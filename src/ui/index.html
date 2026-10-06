@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' bili:; img-src 'self' https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Neko Music</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!--
+  整个界面分成三块：
+  左边 = 侧边栏（导航 + 我的歌单）
+  右边 = 主区域（顶部搜索栏 + 中间内容列表）
+  底部 = 播放控制条
+-->
+<div class="app">
+
+  <!-- ============ 左侧边栏 ============ -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-text">Neko Music</span>
+    </div>
+
+    <nav class="nav" id="nav">
+      <div class="nav-item active" data-view="search">
+        <span class="ico">🔍</span><span>搜索</span>
+      </div>
+      <div class="nav-item" data-view="favorites">
+        <span class="ico">💗</span><span>我喜欢</span>
+      </div>
+      <div class="nav-item" data-view="history">
+        <span class="ico">🕘</span><span>最近播放</span>
+      </div>
+    </nav>
+
+    <div class="playlist-section">
+      <div class="section-head">
+        <span>我的歌单</span>
+        <button class="mini-btn" id="btnNewPlaylist" title="新建歌单">＋</button>
+      </div>
+      <ul class="playlist-list" id="playlistList"></ul>
+    </div>
+
+    <div class="sidebar-foot">
+      <button class="ghost-btn" id="btnSettings" style="width:100%">⚙ 设置（填 Cookie）</button>
+      <div class="tip">按 F12 可打开调试工具</div>
+    </div>
+  </aside>
+
+  <!-- ============ 右侧主区域 ============ -->
+  <main class="main">
+
+    <!-- 顶部工具条 -->
+    <header class="topbar">
+      <div class="search-box">
+        <span class="ico">🔍</span>
+        <input id="searchInput" type="text" placeholder="搜歌名、UP 主、关键词……" autocomplete="off" />
+      </div>
+      <div class="link-box">
+        <input id="linkInput" type="text" placeholder="粘贴 B 站链接或 BV 号，自动识别合集" autocomplete="off" />
+        <button class="primary-btn" id="btnParseLink">解析</button>
+      </div>
+    </header>
+
+    <!-- 中间内容区，所有列表都渲染到这里 -->
+    <section class="content" id="content">
+      <!-- 动态内容 -->
+    </section>
+  </main>
+
+  <!-- ============ 底部播放条 ============ -->
+  <footer class="player" id="player">
+    <!-- 左：当前歌曲信息 -->
+    <div class="np">
+      <div class="np-cover" id="npCover"></div>
+      <div class="np-meta">
+        <div class="np-title" id="npTitle">还没有播放</div>
+        <div class="np-sub" id="npSub">去搜索一首歌吧</div>
+      </div>
+      <button class="heart-btn" id="btnFav" title="收藏">♡</button>
+    </div>
+
+    <!-- 中：播放控制 -->
+    <div class="controls">
+      <div class="ctrl-row">
+        <button class="ctrl-btn" id="btnShuffle" title="随机播放">🔀</button>
+        <button class="ctrl-btn" id="btnPrev" title="上一首">⏮</button>
+        <button class="ctrl-btn big" id="btnPlay" title="播放/暂停">▶</button>
+        <button class="ctrl-btn" id="btnNext" title="下一首">⏭</button>
+        <button class="ctrl-btn" id="btnLoop" title="循环模式">🔁</button>
+      </div>
+      <div class="progress-row">
+        <span class="time" id="timeNow">0:00</span>
+        <div class="progress" id="progress">
+          <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+          <div class="progress-knob" id="progressKnob"></div>
+        </div>
+        <span class="time" id="timeTotal">0:00</span>
+      </div>
+    </div>
+
+    <!-- 右：音量 -->
+    <div class="volume">
+      <span class="ico">🔊</span>
+      <input type="range" id="volume" min="0" max="100" value="80" />
+    </div>
+  </footer>
+</div>
+
+<!-- 轻提示气泡 -->
+<div class="toast" id="toast"></div>
+
+<!-- 隐藏的音频播放核心 -->
+<audio id="audio"></audio>
+
+<script src="app.js"></script>
+</body>
+</html>

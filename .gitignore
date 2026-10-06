@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.tmp/
+.workbuddy/
+
+# 本机专用同步工具（作者自己的工作流，不适合放进公开仓库）
+同步到GitHub.bat

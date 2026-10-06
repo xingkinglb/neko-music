@@ -1,0 +1,27 @@
+{
+  "name": "neko-music",
+  "version": "1.0.0",
+  "description": "Neko Music - 用 B 站视频当曲库的桌面音乐播放器",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "author": "Neo",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.neo.nekommusic",
+    "productName": "NekoMusic",
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
