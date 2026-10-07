@@ -9,7 +9,7 @@
   --bg-soft:   #1a1a27;   /* 侧边栏背景 */
   --panel:     rgba(255, 255, 255, 0.045); /* 半透明卡片 */
   --panel-2:   rgba(255, 255, 255, 0.08);  /* 悬停时的卡片 */
-  --line:      rgba(255, 255, 255, 0.09);  /* 分隔线 */
+  --line:      color-mix(in srgb, var(--accent) 18%, #26263a);  /* 分隔线：跟着主题色走 */
   --text:      #ececf3;   /* 主文字 */
   --muted:     #9b9bb0;   /* 次要文字 */
   --text-2:    #d2d2df;   /* 正文里略暗一档的文字（由 #c9c9da / #cfcfdd / #c2c2d4 合并而来） */
@@ -38,6 +38,10 @@
   /* ★ 这个值必须和 main.js 里 titleBarOverlay.height 一模一样，
      否则系统画的 最小化/最大化/关闭 三个按钮会和这一条对不齐。 */
   --titlebar-h:  38px;
+
+  /* 标题栏底色 = 主色染过的半透明深色（和 main.js 里 titleBarOverlay 同一公式），
+     这样右上角系统按钮能和这一条无缝融合，并且换主题时一起变色 */
+  --titlebar-bg: color-mix(in srgb, var(--accent) 20%, rgba(16, 16, 26, 0.85));
 
   /* ---- 氛围光晕强度 ---- */
   --glow: 1;
@@ -112,12 +116,23 @@ ul { list-style: none; }
   transition: background-image 0.4s ease;
 }
 /* 蒙一层黑纱，把背景压暗，保证上面的白字看得清 */
-.bg-layer::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, var(--bg-dim));
-}
+  .bg-layer::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, var(--bg-dim));
+  }
+  /* 主题色光晕：铺在主色壁纸之上、黑纱之下。
+     换主题时这里的颜色跟着 --accent / --accent-2 变，整面背景的色调就一起变了。
+     （::after 的黑纱会在它上面再压一层，保证白字依然清晰） */
+  .bg-layer::before {
+    content: "";
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(130% 100% at 50% -15%, color-mix(in srgb, var(--accent) 30%, transparent), transparent 55%),
+      radial-gradient(95% 75% at 50% 122%,  color-mix(in srgb, var(--accent-2) 22%, transparent), transparent 60%);
+    pointer-events: none;
+  }
 
 /* ---------- 整体布局 ---------- */
 .app {
@@ -150,15 +165,13 @@ ul { list-style: none; }
      否则它们会点不动（真要放，就得给那个元素单独写 -webkit-app-region: no-drag）。 */
   -webkit-app-region: drag;
 
-  /* 比其它面板实很多（0.9 而不是跟着 --glass-alpha 走）。
+  /* 底色用的不是固定灰，而是主色染过的半透明深色（见 --titlebar-bg）。
      两个原因：
-     ① 右上角那块 138×38 的按钮区是 Windows 用纯色 #12121c 画的，透明度我们改不了。
-        这一条要是太透，跟那块方块之间就会出现一道色差 —— 等于把"白边"换成了"灰边"。
-        0.9 已经能透出一点背景，同时接缝看不出来。
-     ② 正因为已经 0.9 了，背后只剩 10% 能露出来，再加 backdrop-filter 模糊也看不出区别，
-        所以这里干脆不加 —— 顺便避开"drag 区域叠加 backdrop-filter 在 Windows 上
+     ① 右上角那块按钮区是 Windows 用 titleBarOverlay.color 画的；我们让它的颜色和这一条
+        用同一套公式（主色染 20% 进深色），所以换主题时两者一起变色，且接缝看不出来。
+     ② 仍然不加 backdrop-filter —— 避开"drag 区域叠加 backdrop-filter 在 Windows 上
         偶尔导致窗口拖不动"这个已知坑。 */
-  background: rgba(var(--glass-rgb), 0.9);
+  background: var(--titlebar-bg);
   border-bottom: 1px solid var(--line);
 }
 /* 标题栏里的品牌小圆点，比侧边栏时代小一点，免得压住文字 */

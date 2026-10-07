@@ -151,6 +151,39 @@ function clearBgDir() {
 }
 
 // ============================================================
+//  第 2.5 部分：让右上角系统按钮跟着主题变色
+// ============================================================
+//  右上角 最小化/最大化/关闭 三个按钮是 Windows 画的，颜色由 titleBarOverlay 决定，
+//  它不会自动读 CSS，所以换主题时得由界面把主色发过来，这里手动重设一次。
+//  公式和 CSS 里 .titlebar 的 --titlebar-bg 保持一致（主色染 20% 进深色），
+//  这样按钮底色和网页标题栏无缝融合，看不出接缝。
+function applyThemeOverlay(rgbTriple) {
+  if (!mainWindow) return;
+  const m = String(rgbTriple || '').trim().split(/\s+/).map(Number);
+  if (m.length !== 3 || m.some((n) => Number.isNaN(n))) return;
+  const [ar, ag, ab] = m;
+
+  // 按钮底色：主色染过的半透明深色（跟 .titlebar 同公式）
+  const p = 0.20, base = [16, 16, 26];
+  const r = Math.round(base[0] + (ar - base[0]) * p);
+  const g = Math.round(base[1] + (ag - base[1]) * p);
+  const b = Math.round(base[2] + (ab - base[2]) * p);
+  const color = `rgba(${r}, ${g}, ${b}, 0.88)`;
+
+  // 按钮符号：主色的浅粉调（仍够亮，深色底上清晰）
+  const sr = Math.round(ar * 0.45 + 255 * 0.55);
+  const sg = Math.round(ag * 0.45 + 255 * 0.55);
+  const sb = Math.round(ab * 0.45 + 255 * 0.55);
+  const symbolColor = `rgb(${sr}, ${sg}, ${sb})`;
+
+  try {
+    mainWindow.setTitleBarOverlay({ color, symbolColor, height: 38 });
+  } catch (err) {
+    console.error('更新标题栏按钮颜色失败：', err);
+  }
+}
+
+// ============================================================
 //  第 2 部分：创建窗口
 // ============================================================
 function createWindow() {
@@ -174,8 +207,10 @@ function createWindow() {
     // 让 Windows 把 最小化 / 最大化 / 关闭 三个按钮画在右上角，
     // 并且用我们指定的深色，而不是系统的白色。
     titleBarOverlay: {
-      color: '#12121c',        // 三个按钮所在那块方块的底色（跟界面底色一致，接缝就看不出来）
-      symbolColor: '#e6e6f2',  // 按钮里那几条符号（横杠/方框/叉）的颜色
+      // 默认值（樱粉）。界面启动后会通过 applyThemeOverlay() 按实际主题再重设一次，
+      // 所以这里只是避免第一帧闪一下白按钮。
+      color: 'rgba(64, 35, 46, 0.88)',   // 樱粉染过的深色（= 主色 255 111 165 染 20% 进 16 16 26）
+      symbolColor: 'rgb(255, 190, 214)', // 樱粉的浅粉调
       height: 38,              // ★ 必须和 CSS 里的 --titlebar-h 一模一样，否则会对不齐
     },
     webPreferences: {
@@ -187,6 +222,9 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
+
+  // 先按默认主题（樱粉）把右上角按钮颜色设好，界面真正加载后会按用户保存的主题再同步一次
+  applyThemeOverlay('255 111 165');
 
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
@@ -333,6 +371,9 @@ function registerHandlers() {
     fs.renameSync(tmp, DATA_FILE);
     return true;
   });
+
+  // 界面换主题时，同步右上角系统按钮（最小化/最大化/关闭）的颜色
+  handle('theme:overlay', (rgb) => { applyThemeOverlay(rgb); return true; });
 
   // ---- 自定义背景 ----
   // 弹系统文件选择框 → 把选中的图复制到 backgrounds/ → 返回文件名

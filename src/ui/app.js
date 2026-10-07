@@ -149,6 +149,10 @@ function applyAppearance() {
   // 1) 主题（给 <html> 打标记，CSS 里的 [data-theme="xxx"] 就会生效）
   root.dataset.theme = s.theme || 'pink';
 
+  // 把主色发给主进程，让它同步更新右上角系统按钮的颜色（见 main.js 的 titleBarOverlay）
+  const accentRgb = getComputedStyle(root).getPropertyValue('--accent-rgb').trim();
+  if (accentRgb) window.neko.setTitlebarTheme(accentRgb);
+
   // 2) 毛玻璃
   root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 18) + 'px');
   root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));

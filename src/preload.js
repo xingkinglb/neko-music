@@ -42,6 +42,11 @@ contextBridge.exposeInMainWorld('neko', {
   // 清掉已选的背景图
   clearBackground: () => ipcRenderer.invoke('bg:clear'),
 
+  // ---------- 标题栏主题 ----------
+  // 把当前主题的主色（"R G B" 三元组）发给主进程，
+  // 让右上角 最小化/最大化/关闭 三个系统按钮跟着主题一起变色
+  setTitlebarTheme: (rgbTriple) => ipcRenderer.invoke('theme:overlay', rgbTriple),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),

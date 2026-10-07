@@ -168,7 +168,30 @@ const emojiHits = [...findEmoji(html, 'index.html'), ...findEmoji(appjs, 'app.js
 if (emojiHits.length) emojiHits.forEach((h) => err(`彩色 emoji 残留 → ${h}`));
 else ok('界面里已没有任何彩色 emoji（图标全部走 SVG）');
 
+/* ---- 10) 主题色是否真的"渗透"进了背景与边框（而不只是点缀色） ---- */
+console.log('\n[9] 主题色是否渗透进背景与边框：');
+const lineDef = (css.match(/--line:\s*([^;]+);/) || [])[1] || '';
+if (!/var\(\s*--accent/.test(lineDef)) err('--line 没有引用 var(--accent) —— 分隔线/卡片边框不会跟着主题变色');
+else ok(`边框 --line 跟着主色走（${lineDef.trim()}）`);
+
+const tbBgDef = (css.match(/--titlebar-bg:\s*([^;]+);/) || [])[1] || '';
+if (!/var\(\s*--accent/.test(tbBgDef)) err('--titlebar-bg 没有引用 var(--accent) —— 标题栏不会跟着主题变色');
+else ok(`标题栏底色 --titlebar-bg 跟着主色走（${tbBgDef.trim()}）`);
+
+const tbBgUsed = /\.titlebar\s*\{[\s\S]*?background:\s*var\(\s*--titlebar-bg\s*\)/.test(css);
+if (!tbBgUsed) err('.titlebar 没有用 var(--titlebar-bg)，标题栏底色没接上');
+else ok('.titlebar 用上了 --titlebar-bg');
+
+/* ---- 11) 标题栏按钮颜色链路（preload → main → 调用 setTitleBarOverlay） ---- */
+console.log('\n[10] 标题栏按钮跟随主题的链路：');
+if (!preloadMap['setTitlebarTheme']) err('preload 没有暴露 setTitlebarTheme');
+else if (!handlers.has('theme:overlay')) err("main.js 没有 handle('theme:overlay')");
+else ok('换主题时主色经 setTitlebarTheme → theme:overlay 传到主进程');
+
+if (!/setTitleBarOverlay/.test(mainjs)) err('main.js 从未调用 setTitleBarOverlay —— 按钮颜色不会更新');
+else ok('main.js 会在换主题时重设 setTitleBarOverlay');
+
 /* ---- 汇总 ---- */
 console.log('\n========================================');
-if (fail === 0) console.log('全部静态自检通过 ✅（共 8 大类检查）');
+if (fail === 0) console.log('全部静态自检通过 ✅（共 10 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
