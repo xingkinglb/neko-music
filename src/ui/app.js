@@ -92,6 +92,7 @@ let DB = {
     volume: 80,
     bg:    { file: null, dim: 0.55, blur: 0 },
     glass: { blur: 18, alpha: 0.55 },
+    autoLyric: false,
   },
 };
 
@@ -126,6 +127,7 @@ const DEFAULT_SETTINGS = {
   volume: 80,
   bg:    { file: null, dim: 0.55, blur: 0 },
   glass: { blur: 18, alpha: 0.55 },
+  autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
 };
 
 /** 补齐 DB.settings 里缺的字段（老版本存档没有这一项） */
@@ -136,6 +138,7 @@ function migrateSettings() {
     volume: DEFAULT_SETTINGS.volume,
     bg:     Object.assign({}, DEFAULT_SETTINGS.bg,    old.bg    || {}),
     glass:  Object.assign({}, DEFAULT_SETTINGS.glass, old.glass || {}),
+    autoLyric: typeof old.autoLyric === 'boolean' ? old.autoLyric : DEFAULT_SETTINGS.autoLyric,
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -184,21 +187,36 @@ function isFav(track) {
   return DB.favorites.some((t) => sameTrack(t, track));
 }
 
-/**
- * 补齐 cid。
- * B 站的搜索接口和收藏夹接口只给 BV 号，不给 cid（cid 是"某一P"的身份号），
- * 而拿音频必须要 cid。所以播放前先查一次视频详情补上。
- */
+/** 同一个cid 的补齐请求只发一次，避免播放和取歌词同时触发两次网络请求 */
+const cidInFlight = new Map();
 async function ensureCid(track) {
   if (track.cid) return track.cid;
-  const info = await api('videoInfo', track.bvid);
-  const p = info.pages && info.pages[0];
-  if (!p) throw new Error('这个视频没有可播放的内容');
-  track.cid = p.cid;
-  if (!track.duration) track.duration = p.duration;
-  if (!track.author) track.author = info.owner.name;
-  if (!track.cover) track.cover = info.cover;
-  return track.cid;
+
+  const key = track.bvid;
+  if (cidInFlight.has(key)) {
+    const cid = await cidInFlight.get(key);
+    track.cid = cid;
+    return cid;
+  }
+
+  const p = (async () => {
+    const info = await api('videoInfo', track.bvid);
+    const pg = info.pages && info.pages[0];
+    if (!pg) throw new Error('这个视频没有可播放的内容');
+    if (!track.duration) track.duration = pg.duration;
+    if (!track.author) track.author = info.owner.name;
+    if (!track.cover) track.cover = info.cover;
+    return pg.cid;
+  })();
+
+  cidInFlight.set(key, p);
+  try {
+    const cid = await p;
+    track.cid = cid;
+    return cid;
+  } finally {
+    cidInFlight.delete(key);
+  }
 }
 
 /**
@@ -218,6 +236,9 @@ async function playAt(index) {
   $('btnFav').classList.toggle('on', isFav(track));
   $('btnPlay').innerHTML = ic('i-loading', 'spin');
   $('timeTotal').textContent = fmtTime(track.duration);
+
+  // 换歌了：清掉上一首的歌词（自动模式开着的话会顺手取新的）
+  resetLyricsOnTrackChange();
 
   try {
     // 如果这首歌还不知道自己的 cid（搜索来的），先查一次补上
@@ -652,6 +673,10 @@ function syncSettingsUI() {
   $('rngGlassAlpha').value = Math.round((s.glass.alpha ?? 0.55) * 100);
   $('valAlpha').textContent = $('rngGlassAlpha').value + '%';
 
+  // 自动歌词开关
+  const chk = $('chkAutoLyric');
+  if (chk) chk.checked = !!s.autoLyric;
+
   // Cookie 只在还没填过的时候拉一次，避免覆盖用户正在编辑的内容
   if (!$('cookieInput').value) {
     api('cookieGet').then((t) => { $('cookieInput').value = t || ''; }).catch(() => {});
@@ -995,6 +1020,324 @@ function bindEvents() {
     // 地址过期是常事（B 站链接有时效），提示一下就好
     if (audio.src) toast('音频加载失败了，可能链接已过期，换一首试试');
   });
+
+  /* ---- 全局快捷键 ---- */
+  // ★ 最关键的一条：焦点在输入框里时，所有快捷键都让路。
+  //   否则你在搜索框打"深夜"想搜"深"，按空格会变成暂停。
+  //   range（音量/进度滑杆）也要放行：方向键本来就用来调滑杆。
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable === true;
+  }
+
+  document.addEventListener('keydown', (e) => {
+    //输入框 / 滑杆里，一律不抢键盘（除了 Esc，那是关面板 universally 要的）
+    if (isTypingTarget(e.target) && e.key !== 'Escape') return;
+
+    const ctrl = e.ctrlKey || e.metaKey;   // macOS 上 Cmd 也认
+
+    // F11 全屏
+    if (e.key === 'F11') {
+      e.preventDefault();
+      window.neko.setFullScreen(true);
+      return;
+    }
+
+    // Esc：关歌词大屏 / 关设置面板（在bindSettings 和歌词模块里各自监听，
+    //这里只负责放行，不要preventDefault，否则会连输入框里的 Esc 一起吞掉）
+    if (e.key === 'Escape') return;
+
+    // Ctrl + L：手动取歌词（等价于点"词"按钮）
+    if (ctrl && (e.key === 'l' || e.key === 'L')) {
+      e.preventDefault();
+      if (typeof toggleLyrics === 'function') toggleLyrics(true);
+      return;
+    }
+
+    // 空格：播放 / 暂停
+    if (e.code === 'Space' || e.key === ' ') {
+      e.preventDefault();   // 防止页面被空格滚下去
+      if (!audio.src) { toast('先选一首歌吧'); return; }
+      audio.paused ? audio.play() : audio.pause();
+      return;
+    }
+
+    // Ctrl + 左右方向：上一首 / 下一首
+    if (ctrl && e.key === 'ArrowLeft')  { e.preventDefault(); next(-1); return; }
+    if (ctrl && e.key === 'ArrowRight') { e.preventDefault(); next(1);  return; }
+
+    // 上下方向：音量 ±5（先挡住浏览器滚动）
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const v = Math.min(100, Math.round((audio.volume || 0) * 100) + 5);
+      $('volume').value = v;
+      applyVolume(v, true);
+      toast('音量 ' + v + '%');
+      return;
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const v = Math.max(0, Math.round((audio.volume || 0) * 100) - 5);
+      $('volume').value = v;
+      applyVolume(v, true);
+      toast('音量 ' + v + '%');
+      return;
+    }
+
+    // 左右方向：快退 / 快进 5 秒
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (audio.src) audio.currentTime = Math.max(0, audio.currentTime - 5);
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (audio.src) audio.currentTime = Math.min(totalDuration() || 1e9, audio.currentTime + 5);
+      return;
+    }
+  });
+
+  /* ---- 歌词 ---- */
+  bindLyrics();
+}
+
+/* ============================================================
+   第 5.5 部分：歌词
+   ============================================================
+   几个角色，各管一段：
+     lyricState   —— 记住当前这首歌的歌词、加载状态
+     loadLyrics() —— 真正去要歌词（自动 / 手动都走它）
+     syncLyric()  —— 跟着播放进度，把当前句高亮 + 滚动到中间
+   ============================================================ */
+
+const lyricState = {
+  lines: [],      // [{ t: 秒, text: 一句 }]
+  index: -1,      // 当前高亮的是第几句
+  trackKey: '',   // 这份歌词属于哪首歌（bvid+cid），用来判断换歌了没
+  loading: false,
+  failed: false,  // 这首歌取过字幕且失败了（没字幕 / 被限流）
+  showing: false, // 大屏是否展开
+};
+
+/** 正在播的这首歌的"身份证"（换歌后靠它判断歌词要不要清掉） */
+function currentTrackKey() {
+  const t = queue.tracks[queue.index];
+  if (!t || !t.bvid || !t.cid) return '';
+  return t.bvid + ':' + t.cid;
+}
+
+/** 在「词」按钮上方弹一句提示，然后慢慢消散（CSS 负责淡出动画） */
+let lyricTipTimer = null;
+function showLyricTip(msg) {
+  const tip = $('lyricTip');
+  if (!tip) return;
+  tip.textContent = msg;
+  tip.classList.add('show');
+  clearTimeout(lyricTipTimer);
+  lyricTipTimer = setTimeout(() => tip.classList.remove('show'), 2600);
+}
+
+/** 把失败原因翻译成人话。reason 由主进程给出（见 bilibili.js 的 getSubtitle） */
+function lyricFailText(reason, fallback) {
+  if (reason === 'no-cookie') return '还没填 B站 Cookie，先去设置里填一下';
+  if (reason === 'none')      return '这首没有字幕';
+  if (reason === 'limit')     return '被 B 站限流了，等会儿再试';
+  return fallback || '歌词获取失败';
+}
+
+/**
+ * 取歌词并渲染。
+ * @param {boolean} byUser true = 用户主动点的（展开大屏 + 失败给提示）
+ *                     false = 自动模式触发的（安静点，失败不打扰）
+ */
+async function loadLyrics(byUser) {
+  const track = queue.tracks[queue.index];
+  if (!track) {
+    if (byUser) showLyricTip('先放首歌再取歌词');
+    return;
+  }
+
+  // cid 可能还没补上（搜索来的歌），先补齐，否则接口拿不到字幕
+  try {
+    await ensureCid(track);
+  } catch (err) {
+    if (byUser) showLyricTip('这首歌的信息没取到');
+    return;
+  }
+
+  const key = currentTrackKey();
+  if (!key) { if (byUser) showLyricTip('这首歌没法取歌词'); return; }
+
+  // 同一首歌已经拿到过了，不用重复请求
+  if (lyricState.trackKey === key && lyricState.lines.length) {
+    if (byUser) toggleLyrics(true);
+    return;
+  }
+  // 自动模式下已经确认过取不到，不再重复去烦 B 站
+  if (!byUser && lyricState.failed && lyricState.trackKey === key) return;
+
+  lyricState.loading = true;
+  lyricState.failed = false;
+  updateLyricBtn();
+
+  try {
+    const res = await window.neko.subtitle(track.bvid, track.cid);
+
+    lyricState.lines = res.lines || [];
+    lyricState.trackKey = key;
+    lyricState.index = -1;
+    renderLyricLines();
+    if (byUser) {
+      toggleLyrics(true);
+      toast('歌词已加载' + (res.lang ? '（' + res.lang + '）' : ''));
+    }
+  } catch (err) {
+    // 失败：记住原因，换歌时会自动清掉
+    lyricState.lines = [];
+    lyricState.trackKey = key;
+    lyricState.failed = true;
+    lyricState.index = -1;
+    const box = $('lyricBox');
+    if (box) box.innerHTML = '';
+    if (byUser) showLyricTip(lyricFailText(err.reason, err.message));
+  } finally {
+    lyricState.loading = false;
+    updateLyricBtn();
+  }
+}
+
+/** 把歌词行画到页面上（一行一句<p>） */
+function renderLyricLines() {
+  const box = $('lyricBox');
+  if (!box) return;
+  if (!lyricState.lines.length) {
+    box.innerHTML = '<p class="l">（没有歌词）</p>';
+    return;
+  }
+  box.innerHTML = lyricState.lines
+    .map((l) => '<p class="l">' + esc(l.text) + '</p>')
+    .join('');
+  syncLyric(true);
+}
+
+/**
+ * 跟着播放进度更新高亮。
+ * @param {boolean} force 强制重新定位（刚渲染完时用）
+ */
+function syncLyric(force) {
+  if (!lyricState.showing || !lyricState.lines.length) return;
+  const box = $('lyricBox');
+  if (!box) return;
+
+  const t = audio.currentTime || 0;
+  // 找当前该高亮哪一句：最后一句 t <= 播放位置 的那句
+  let idx = 0;
+  for (let i = 0; i < lyricState.lines.length; i++) {
+    if (lyricState.lines[i].t <= t) idx = i; else break;
+  }
+  if (!force && idx === lyricState.index) return;
+  lyricState.index = idx;
+
+  // 逐行切换高亮
+  const rows = box.children;
+  for (let i = 0; i < rows.length; i++) {
+    rows[i].classList.toggle('on', i === idx);
+    rows[i].classList.toggle('near', i === idx - 1 || i === idx + 1);
+  }
+
+  // 把当前句滚到容器正中间
+  const cur = rows[idx];
+  if (cur && cur.scrollIntoView) {
+    cur.scrollIntoView({ block: 'center', behavior: force ? 'auto' : 'smooth' });
+  }
+}
+
+/** 刷新「词」按钮的样子（加载中 / 已加载 / 没字幕） */
+function updateLyricBtn() {
+  const btn = $('btnLyric');
+  if (!btn) return;
+  btn.classList.toggle('loading', lyricState.loading);
+  btn.classList.toggle('on', lyricState.showing && !lyricState.loading);
+  btn.classList.toggle('none', !lyricState.loading && lyricState.failed);
+  btn.title = lyricState.loading ? '正在取歌词…'
+    : (lyricState.showing ? '收起歌词（Esc）' : '歌词（Ctrl+L）');
+}
+
+/**
+ * 展开 / 收起歌词大屏。
+ * @param {boolean} want true=展开 false=收起（不传则取反）
+ */
+function toggleLyrics(want) {
+  const show = want === undefined ? !lyricState.showing : !!want;
+  lyricState.showing = show;
+
+  const ov = $('lyricOverlay');
+  if (ov) ov.classList.toggle('show', show);
+
+  // 展开时如果还没歌词，就去取
+  if (show && !lyricState.lines.length && !lyricState.failed && !lyricState.loading) {
+    loadLyrics(true);
+  } else if (show) {
+    syncLyric(true);
+  }
+  updateLyricBtn();
+}
+
+/** 绑定歌词相关的所有交互 */
+function bindLyrics() {
+  const btn = $('btnLyric');
+  if (btn) {
+    btn.addEventListener('click', () => {
+      // 正在加载时按了：给个提示，别让人以为没反应
+      if (lyricState.loading) { showLyricTip('正在取歌词…'); return; }
+      // 已知取不到（没字幕 / 限流）：点它就重新试一次
+      if (!lyricState.lines.length && lyricState.failed) {
+        lyricState.failed = false;
+        loadLyrics(true);
+        return;
+      }
+      // 已加载 → 收 / 展大屏；没加载过 → 去取
+      if (lyricState.lines.length) toggleLyrics();
+      else loadLyrics(true);
+    });
+  }
+
+  const close = $('btnLyricClose');
+  if (close) close.addEventListener('click', () => toggleLyrics(false));
+
+  // Esc 收起歌词
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && lyricState.showing) {
+      // 焦点在输入框时不抢 Esc —— 那是给人打字用的
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      toggleLyrics(false);
+    }
+  });
+
+  // 设置面板里的开关
+  const chk = $('chkAutoLyric');
+  if (chk) {
+    chk.addEventListener('change', () => {
+      DB.settings.autoLyric = chk.checked;
+      persist();
+      if (chk.checked) loadLyrics(false);   // 开着就立刻给当前这首歌补上
+      toast(chk.checked ? '已开启自动歌词' : '已关闭自动歌词');
+    });
+  }
+}
+
+/** 换歌时：把上一首的歌词清掉；自动开着就顺手取新的 */
+function resetLyricsOnTrackChange() {
+  lyricState.lines = [];
+  lyricState.index = -1;
+  lyricState.trackKey = '';
+  lyricState.failed = false;
+  const box = $('lyricBox');
+  if (box) box.innerHTML = '';
+  if (DB.settings.autoLyric) loadLyrics(false);
+  else updateLyricBtn();
 }
 
 /** 有些音频流拿不到总时长，就用曲目信息里的时长兜底 */

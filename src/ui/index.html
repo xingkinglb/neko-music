@@ -136,6 +136,12 @@
     <symbol id="i-win-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
       <path d="M6 6 18 18M18 6 6 18"/>
     </symbol>
+
+    <!-- ---- 歌词：播放条上的「词」按钮 ---- -->
+    <symbol id="i-lyric" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 6h16M4 11.2h11M4 16.4h8"/>
+      <path d="M20.4 15.6v-4.2l-1.9 1M20.4 11.4a1.6 1.6 0 1 0 1.5 2"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -253,12 +259,31 @@
       </div>
     </div>
 
-    <!-- 右：音量 -->
+    <!-- 右：歌词按钮 + 音量 -->
     <div class="volume">
+      <!--
+        「词」按钮：点一下展开整页歌词
+        · 里面的 .lyric-tip 是"没有字幕"之类的一次性提示，
+          用 .show 触发淡出动画（JS 延时移除），不会一直挂在屏幕上。
+      -->
+      <div class="lyric-wrap">
+        <button class="lyric-btn" id="btnLyric" title="歌词（Ctrl+L）"><svg class="ic"><use href="#i-lyric"/></svg><span>词</span></button>
+        <div class="lyric-tip" id="lyricTip"></div>
+      </div>
       <span class="ico" id="volIcon"><svg class="ic"><use href="#i-vol-2"/></svg></span>
       <input type="range" id="volume" min="0" max="100" value="80" />
     </div>
   </footer>
+</div>
+
+<!--
+  ============ 歌词大屏 ============
+  整页覆盖内容区（侧边栏和播放条都留着，能边看词边控制播放 —— 网易云/QQ 音乐都是这个布局）。
+  用 .show 切换显示/隐藏；歌词行由 app.js 动态生成，每行带 .on 表示"当前这一句"。
+-->
+<div class="lyric-overlay" id="lyricOverlay">
+  <div class="lyric-box" id="lyricBox"></div>
+  <button class="lyric-close" id="btnLyricClose" title="收起歌词（Esc）">✕</button>
 </div>
 
 <!-- 轻提示气泡 -->
@@ -327,6 +352,20 @@
           <div class="field-label">玻璃透明度 <b id="valAlpha">55%</b></div>
           <input type="range" id="rngGlassAlpha" min="10" max="95" value="55" />
           <div class="field-hint">调低 = 更透，能看到更多背景</div>
+        </div>
+
+        <!-- 歌词开关：默认关。不开的时候也能用播放条上的「词」按钮手动取一次 -->
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">自动加载歌词</span>
+            <input type="checkbox" id="chkAutoLyric" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">
+            开启后每首歌会自动取字幕并显示歌词。<br />
+            关着的时候，点播放条上的 <b>词</b> 按钮手动取一次。<br />
+            取字幕需要先在「B 站」标签页填 Cookie，否则拿不到。
+          </div>
         </div>
 
         <button class="ghost-btn" id="btnResetAppearance">恢复默认外观</button>

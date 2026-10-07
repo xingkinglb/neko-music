@@ -39,6 +39,10 @@
      这个值只用来给 .titlebar 定高、和下面的内容错开，避免被盖住。 */
   --titlebar-h:  38px;
 
+  /* ---- 布局尺寸（歌词大屏要照着这几个值避开侧边栏/标题栏/播放条） ---- */
+  --sidebar-w: 240px;   /* 左边侧边栏宽度 */
+  --player-h:92px;     /* 底部播放条高度 */
+
   /* ---- 氛围光晕强度 ---- */
   --glow: 1;
 }
@@ -133,8 +137,8 @@ ul { list-style: none; }
 /* ---------- 整体布局 ---------- */
 .app {
   display: grid;
-  grid-template-columns: 240px 1fr;   /* 左 240px，右占满 */
-  grid-template-rows: var(--titlebar-h) 1fr 92px;
+  grid-template-columns: var(--sidebar-w) 1fr;/* 左 240px，右占满 */
+  grid-template-rows: var(--titlebar-h) 1fr var(--player-h);
   grid-template-areas:
     "titlebar titlebar"
     "sidebar  main"
@@ -580,6 +584,134 @@ ul { list-style: none; }
   width: 11px; height: 11px; border-radius: 50%;
   background: var(--accent); box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.6);
 }
+
+/* ============================================================
+   歌词：播放条「词」按钮 + 整页歌词大屏
+   ============================================================ */
+/* 按钮外面那层要 position:relative，提示气泡才能相对它定位 */
+.lyric-wrap { position: relative; display: flex; align-items: center; }
+.lyric-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 9px; border-radius: 8px;
+  color: var(--muted); font-size: 12.5px;
+  transition: background 0.14s, color 0.14s;
+}
+.lyric-btn .ic { width: 14px; height: 14px; }
+.lyric-btn:hover { background: rgba(var(--accent-rgb), 0.2); color: var(--text); }
+/* 三个状态：加载中(转圈禁用) / 已加载(高亮) / 没字幕(灰掉但仍可点) */
+.lyric-btn.loading { color: var(--muted-2); pointer-events: none; }
+.lyric-btn.loading .ic { animation: neko-spin 0.9s linear infinite; }
+.lyric-btn.on { color: var(--accent); }
+.lyric-btn.none { color: var(--muted-2); }
+@keyframes neko-spin { to { transform: rotate(360deg); } }
+
+/* 没有字幕之类的提示：在按钮上方淡入 → 停留 → 淡出消散（JS 加/移 .show） */
+.lyric-tip {
+  position: absolute; bottom: calc(100% + 9px); right: 0;
+  background: rgba(38, 38, 56, 0.97);
+  border: 1px solid var(--line);
+  color: var(--text); font-size: 12.5px; line-height: 1.5;
+  padding: 8px 12px; border-radius: 10px;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.5);
+  white-space: nowrap; pointer-events: none;
+  opacity: 0; transform: translateY(6px);
+  transition: opacity 0.26s ease, transform 0.26s ease;
+  z-index: 60;
+}
+/* 有个朝下的小尖角，指明是哪个按钮冒出来的 */
+.lyric-tip::after {
+  content: ""; position: absolute; top: 100%; right: 14px;
+  border: 5px solid transparent; border-top-color: rgba(38, 38, 56, 0.97);
+}
+.lyric-tip.show { opacity: 1; transform: translateY(0); }
+
+/* ---- 歌词大屏：整页覆盖内容区，侧边栏和播放条保持不动 ---- */
+/* 它挂在 body 上（不在 .app 那个 grid 里），所以靠固定定位 + 上面那几个布局变量
+   精确避开标题栏 / 侧边栏 / 播放条，正好只盖住"内容区"那一块。 */
+.lyric-overlay {
+  position: fixed;
+  top: var(--titlebar-h);
+  left: var(--sidebar-w);
+  right: 0;
+  bottom: var(--player-h);
+  z-index: 30;
+  background: rgba(14, 14, 22, 0.88);  /* 磨砂玻璃，和整体风格一致 */
+  backdrop-filter: blur(26px) saturate(140%);
+  -webkit-backdrop-filter: blur(26px) saturate(140%);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.22s ease;
+  overflow: hidden;
+}
+.lyric-overlay.show { opacity: 1; pointer-events: auto; }
+
+/* 歌词容器：整块可滚动，自动滚到当前句 */
+.lyric-box {
+  position: absolute; inset: 0;
+  overflow-y: auto;
+  padding: 46% 40px 46%;
+  text-align: center;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+.lyric-box::-webkit-scrollbar { width: 0; }
+
+.lyric-box .l {
+  font-size: 16px; line-height: 1.5;
+  color: var(--muted-2);
+  padding: 9px 0;
+  transition: color 0.2s, transform 0.2s, opacity 0.2s;
+}
+/* 当前这一句：高亮 + 放大 */
+.lyric-box .l.on {
+  color: var(--text);
+  font-size: 19px;
+  font-weight: 500;
+  text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.4);
+}
+/* 上下相邻两句稍微近一点，营造聚焦感 */
+.lyric-box .l.on + .l, .l.near { color: var(--muted); }
+/* 顶部/底部渐隐，句子进出时不会硬生生切掉 */
+.lyric-overlay::before, .lyric-overlay::after {
+  content: ""; position: absolute; left: 0; right: 0;
+  height: 82px; pointer-events: none; z-index: 1;
+}
+.lyric-overlay::before { top: 0;    background: linear-gradient(to bottom, rgba(14,14,22,0.95), transparent); }
+.lyric-overlay::after  { bottom: 0; background: linear-gradient(to top,    rgba(14,14,22,0.95), transparent); }
+
+.lyric-close {
+  position: absolute; top: 16px; right: 20px;
+  width: 30px; height: 30px; border-radius: 8px;
+  color: var(--muted); font-size: 15px; line-height: 1;
+  background: rgba(255,255,255,0.06);
+  z-index: 2;
+}
+.lyric-close:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
+
+/* ============================================================
+   设置面板里的开关（自动歌词）
+   ============================================================ */
+.switch-row {
+  display: flex; align-items: center; gap: 12px;
+  cursor: pointer; user-select: none;
+}
+.switch-row input { display: none; }   /* 真正的 checkbox 藏起来，用下面的 .switch 画 */
+.switch-label { flex: 1; font-size: 13.5px; }
+.switch {
+  position: relative;
+  width: 40px; height: 22px; border-radius: 11px;
+  background: rgba(255,255,255,0.13);
+  transition: background 0.2s;
+  flex-shrink: 0;
+}
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; opacity: 0.85;
+  transition: transform 0.2s, opacity 0.2s;
+}
+.switch-row input:checked + .switch { background: rgba(var(--accent-rgb), 0.85); }
+.switch-row input:checked + .switch::after { transform: translateX(18px); opacity: 1; }
+.switch-row input:focus-visible + .switch { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ============================================================
    轻提示气泡

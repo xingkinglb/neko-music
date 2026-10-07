@@ -206,12 +206,6 @@ function createWindow() {
   mainWindow.on('maximize',   () => { try { mainWindow.webContents.send('win:state', true);  } catch (_) {} });
   mainWindow.on('unmaximize', () => { try { mainWindow.webContents.send('win:state', false); } catch (_) {} });
 
-  // 开发时方便调试：按 F12 打开开发者工具
-  // 正式发布时可以把这段删掉
-  mainWindow.webContents.on('before-input-event', (event, input) => {
-    if (input.key === 'F12') mainWindow.webContents.toggleDevTools();
-  });
-
   // 把网页里的日志转发到终端 —— 只在"调试模式"下开启。
   // 平时关着，原因有两个：
   //   ① 网页动不动就刷一堆警告（比如图片被安全策略拦了），全打到终端会很吵；
@@ -251,6 +245,7 @@ const DEFAULT_DATA = {
     volume: 80,      // 音量记忆，0-100
     bg:    { file: null, dim: 0.55, blur: 0 },  // 背景图文件名 / 压暗程度 / 额外模糊
     glass: { blur: 18, alpha: 0.55 },           // 毛玻璃：模糊半径 / 不透明度
+    autoLyric: false,   // 自动加载歌词（默认关，可手动点「词」）
   },
 };
 
@@ -274,6 +269,7 @@ function migrate(data) {
     volume: (typeof old.volume === 'number' && old.volume >= 0 && old.volume <= 100) ? old.volume : 80,
     bg:    Object.assign({ file: null, dim: 0.55, blur: 0 }, old.bg || {}),
     glass: Object.assign({ blur: 18, alpha: 0.55 }, old.glass || {}),
+    autoLyric: typeof old.autoLyric === 'boolean' ? old.autoLyric : false,
   };
 
   // 背景图如果已经不在硬盘上（比如换过电脑、清过缓存），就悄悄置空，别留个裂图
@@ -298,7 +294,9 @@ function handle(channel, fn) {
       return { ok: true, data: data === undefined ? null : data };
     } catch (err) {
       console.error(`[${channel}] 出错：`, err);
-      return { ok: false, error: err.message || String(err) };
+      // reason 是给界面看的"失败原因分类"（比如字幕的 no-cookie / none / limit），
+      // 没有就省略。界面据此显示不同的提示文案。
+      return { ok: false, error: err.message || String(err), reason: err.reason };
     }
   });
 }
@@ -321,6 +319,22 @@ function registerHandlers() {
 
   handle('bili:favFolders', (mid) => bili.getFavFolders(mid));
   handle('bili:favMedias', (mediaId, pn) => bili.getFavMedias(mediaId, pn || 1));
+
+  // ---------- 字幕（做滚动歌词用） ----------
+  // 界面靠返回的 reason 区分失败原因，从而给出不同提示（没登录 / 没字幕 / 被限流）
+  handle('bili:subtitle', async (bvid, cid) => {
+    try {
+      return await bili.getSubtitle(bvid, cid);
+    } catch (err) {
+      // 把 reason 原样传回界面，别让它自己猜
+      const e = new Error(err.message || '字幕获取失败');
+      e.reason = err.reason || 'network';
+      throw e;
+    }
+  });
+
+  // 界面用它来决定"词"按钮提示什么（还是提前提示去填 Cookie）
+  handle('bili:hasCookie', () => bili.hasLoginCookie());
 
   // 读取 / 保存用户填的 B 站 Cookie
   handle('cookie:get', () => {
@@ -356,6 +370,7 @@ function registerHandlers() {
     else mainWindow.maximize();
   });
   ipcMain.on('win-close', () => { if (mainWindow) mainWindow.close(); });
+  ipcMain.on('win:fullscreen', (flag) => { if (mainWindow) mainWindow.setFullScreen(!!flag); });
 
   // ---- 自定义背景 ----
   // 弹系统文件选择框 → 把选中的图复制到 backgrounds/ → 返回文件名

@@ -214,7 +214,57 @@ else ok('主进程在最大化/还原时会通知界面（onWinState 已接通�
 
 if (!winBad) ok(`自绘窗口按钮 ${winApi.length} 个经 preload.send 接通到 main.js 的 ipcMain.on（${winApi.map((n) => winCh[n]).join(' / ')}）`);
 
+/* ---- 12) 歌词：失败原因必须能传回界面（否则一律显示"获取失败"） ---- */
+console.log('\n[11] 歌词失败原因的传递链路：');
+/* 主进程 handle() 统一包了 {ok, error}，必须额外把 err.reason 带出去，
+   界面才能区分"没填Cookie / 没字幕 / 被限流"这三种完全不同的提示。 */
+if (!/reason:\s*err\.reason/.test(mainjs)) err("handle() 包装器没有把 err.reason 传回界面 —— 所有歌词失败都会显示同一句废话");
+else ok('主进程把 reason 透传给界面（能区分失败原因）');
+
+/* bilibili.js 必须区分三种 reason，且把"限流造成的假空"单列出来——
+   这两种"空"含义完全不同，混在一起会让界面误报"这歌没字幕"。 */
+const biliSrc = read('src/bilibili.js');
+const reasons = [...biliSrc.matchAll(/e\.reason\s*=\s*'(\w[\w-]*)'/g)].map((m) => m[1]);
+['no-cookie', 'none', 'limit'].forEach((r) => {
+  if (!reasons.includes(r)) err(`bilibili.js 里没有 reason='${r}'，界面会显示错误的提示文案`);
+});
+if (reasons.includes('limit')) ok(`getSubtitle 区分了失败原因（${[...new Set(reasons)].join(' / ')}）`);
+
+/* "假残缺"必须被判成限流，而不是当成"没字幕" —— 这是两个完全不同的现象 */
+if (!/body\.length\s*===\s*0[\s\S]*?reason\s*=\s*'limit'/.test(biliSrc)) {
+  err("getSubtitle 没有识别'轨道非空但下载为空'的限流假象 —— 会误报成'这歌没字幕'");
+} else ok('识别了"轨道存在但内容为空"的限流假象（不会误报成没字幕）');
+
+/* ---- 13) 歌词 UI 要素 ---- */
+console.log('\n[12] 歌词界面要素：');
+['btnLyric', 'lyricTip', 'lyricOverlay', 'lyricBox', 'chkAutoLyric', 'btnLyricClose'].forEach((id) => {
+  if (!htmlIds.has(id)) err(`index.html 里缺少 #${id}`);
+});
+if (['btnLyric', 'lyricTip', 'lyricOverlay', 'lyricBox', 'chkAutoLyric', 'btnLyricClose'].every((id) => htmlIds.has(id))) {
+  ok('「词」按钮 / 提示气泡 / 歌词大屏 / 自动开关 都在页面里');
+}
+/* 没有字幕时提示要能"淡出消散"，所以必须有 .show 状态 + transition */
+const tipRule = (css.match(/\.lyric-tip\s*\{[\s\S]*?\n\}/) || [''])[0];
+if (!/transition/.test(tipRule) || !/\.lyric-tip\.show/.test(css)) err('.lyric-tip 缺少 transition 或 .show 状态 —— 提示不会淡出消散');
+else ok('.lyric-tip 有淡入淡出动画（提示会慢慢消散）');
+
+/* 大屏必须避开侧边栏/标题栏/播放条，否则会盖住它们 */
+const ovRule = (css.match(/\.lyric-overlay\s*\{[\s\S]*?\n\}/) || [''])[0];
+if (!/var\(--sidebar-w\)/.test(ovRule) || !/var\(--titlebar-h\)/.test(ovRule)) {
+  err('.lyric-overlay 没有用布局变量定位 —— 可能盖住侧边栏/标题栏/播放条');
+} else ok('歌词大屏精确避开侧边栏 / 标题栏 / 播放条');
+
+/* 换歌时必须清掉上一首歌词，否则会出现"这首歌的词配那首歌的音" */
+if (!/function resetLyricsOnTrackChange/.test(appjs)) err('app.js 里没有 resetLyricsOnTrackChange() —— 换歌后歌词不会被清掉');
+else if (!/resetLyricsOnTrackChange\(\)/.test(appjs.split('function resetLyricsOnTrackChange')[0])) {
+  err('resetLyricsOnTrackChange() 定义了却从没被调用 —— 换歌后旧歌词会残留');
+} else ok('换歌时会清掉上一首的歌词');
+
+/* 自动歌词开关必须真的连着存档字段，而不是写死 */
+if (!/autoLyric/.test(appjs) || !/autoLyric/.test(mainjs)) err('autoLyric 没贯穿 界面↔ 主进程存档 —— 开关关掉后再开软件会丢');
+else ok('自动歌词开关会存进存档（重启后还记得）');
+
 /* ---- 汇总 ---- */
 console.log('\n========================================');
-if (fail === 0) console.log('全部静态自检通过 ✅（共 10 大类检查）');
+if (fail === 0) console.log('全部静态自检通过 ✅（共 12 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

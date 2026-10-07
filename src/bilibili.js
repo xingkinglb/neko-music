@@ -426,6 +426,109 @@ async function getFavMedias(mediaId, pn = 1) {
   };
 }
 
+// ============================================================
+//  第 6 部分：字幕（拿来做滚动歌词）
+// ============================================================
+//  链路一共三步，跟B 站自己的播放器完全一致：
+//    ① /x/player/v2  → 这个视频有哪些字幕轨道（中文、AI 中文、英文……）
+//    ② 挑一条中文轨道（优先真人字幕，其次 B 站自动生成的 AI 字幕）
+//    ③ 下载那条字幕的 JSON，里面是一句一句的 {from, to, content}
+//
+//  ⚠️ 两个必须知道的坑：
+//    1) **不登录基本拿不到**。匿名请求 /x/player/v2 返回的字幕列表是空的。
+//       所以没填 Cookie 时我们会提前返回"没登录"，不去白跑一趟请求。
+//    2) **限流会给你"假残缺"**：轨道列表非空，但下载下来 body 是空的。
+//       这种绝不能当成成功，否则界面上会出现一片空白还以为正在加载。
+
+/** 用户有没有填 Cookie —— 决定能不能取字幕 */
+function hasLoginCookie() {
+  return /SESSDATA=/.test(BASE_COOKIE);
+}
+
+/**
+ * 取某个视频（某一 P）的字幕，返回逐句歌词
+ * @returns {Promise<{lines: Array<{t:number, text:string}>}>}
+ * @throws  {Error} 带 reason 字段，用来区分失败原因（界面据此给不同提示）
+ *   reason: 'no-cookie' | 'limit' | 'none' | 'network'
+ */
+async function getSubtitle(bvid, cid) {
+  // 没登录就别试了 —— 直接告诉界面"先去填 Cookie"，省一次被限流的机会
+  if (!hasLoginCookie()) {
+    const e = new Error('还没填 B 站 Cookie，拿不到字幕');
+    e.reason = 'no-cookie';
+    throw e;
+  }
+
+  // ①拿字幕轨道列表
+  let list;
+  try {
+    const json = await requestJSON(
+      `https://api.bilibili.com/x/player/v2?bvid=${bvid}&cid=${cid}`
+    );
+    list = (json.data && json.data.subtitle && json.data.subtitle.subtitles) || [];
+  } catch (err) {
+    // requestJSON 抛出来的多为限流类问题，换个 reason 让界面说人话
+    const e = new Error(err.message || '字幕接口请求失败');
+    e.reason = /风控|限流|验证|频繁|超限/.test(e.message) ? 'limit' : 'network';
+    throw e;
+  }
+
+  // 没有字幕轨道 = 这视频就没字幕
+  if (!list.length) {
+    const e = new Error('这首没有字幕');
+    e.reason = 'none';
+    throw e;
+  }
+
+  // ②挑轨道：真人中文 > AI 中文 > 任何中文 > 第一条
+  const pick =
+    list.find((s) => s.lan && s.lan.startsWith('zh') && !s.lan.startsWith('ai')) ||
+    list.find((s) => s.lan && s.lan.startsWith('ai-zh')) ||
+    list.find((s) => s.lan && s.lan.startsWith('zh')) ||
+    list[0];
+
+  if (!pick || !pick.subtitle_url) {
+    const e = new Error('这首没有字幕');
+    e.reason = 'none';
+    throw e;
+  }
+
+  // subtitle_url 常常是 "//aisubtitle.hdslb.com/..." 这种省略协议的，必须补上 https:
+  const subUrl = toHttps(pick.subtitle_url);
+
+  // ③下载字幕 JSON
+  let body;
+  try {
+    await throttle();
+    const res = await httpRequest(subUrl);
+    const parsed = JSON.parse(res.body);
+    body = parsed && parsed.body;
+  } catch (err) {
+    const e = new Error(err.message || '字幕下载失败');
+    e.reason = 'network';
+    throw e;
+  }
+
+  // ★ 坑 2 在这里：轨道存在但 body 为空 —— 这是被限流了，不是"这歌没字幕"。
+  //   所以 reason 要明确区分开，否则界面会误报"没字幕"。
+  if (!Array.isArray(body) || body.length === 0) {
+    const e = new Error('被 B 站限流了，字幕没下下来');
+    e.reason = 'limit';
+    throw e;
+  }
+
+  // 整理成统一格式：t = 开始时间（秒），text = 这一句
+  const lines = body
+    .map((it) => ({
+      t: Number(it.from) || 0,
+      text: String(it.content || '').trim(),
+    }))
+    .filter((l) => l.text)          // 丢掉空行（有的是换行占位）
+    .sort((a, b) => a.t - b.t);   // 保证按时间递增
+
+  return { lines, lang: pick.lan_doc || pick.lan };
+}
+
 // 把上面这些函数导出，让主进程可以使用
 module.exports = {
   setUserCookie,
@@ -435,6 +538,8 @@ module.exports = {
   getAudioUrl,
   getFavFolders,
   getFavMedias,
+  getSubtitle,
+  hasLoginCookie,
   USER_AGENT,
   REFERER,
 };

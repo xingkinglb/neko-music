@@ -52,6 +52,16 @@ contextBridge.exposeInMainWorld('neko', {
   // 界面收到后用它来切换"最大化 / 还原"图标。
   onWinState: (cb) => ipcRenderer.on('win:state', (_e, maximized) => cb(!!maximized)),
 
+  // F11 全屏切换（网页自己没法直接进全屏，得请主进程帮忙）
+  setFullScreen: (flag) => ipcRenderer.send('win:fullscreen', !!flag),
+
+  // ---------- 字幕 / 歌词 ----------
+  // 取某个视频（某一 P）的字幕，返回 [{t: 开始秒数, text: 一句话}]
+  subtitle: (bvid, cid) => ipcRenderer.invoke('bili:subtitle', bvid, cid),
+
+  // 有没有填 B 站 Cookie（取字幕的前提，没填直接省掉一次白跑的请求）
+  hasCookie: () => ipcRenderer.invoke('bili:hasCookie'),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),
