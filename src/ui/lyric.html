@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<!--
+  安全策略：这个窗口只需要加载自己目录下的 css 和 js，别的什么都不要。
+  写成 'self' 最省事也最安全 —— 就算歌词文本里混进了外链，也加载不起来。
+-->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; script-src 'self'" />
+<title>桌面歌词</title>
+<link rel="stylesheet" href="lyric.css" />
+</head>
+<body>
+
+<!--
+  桌面歌词悬浮窗。
+  结构就两块：上面一排工具条（平时藏着），下面两行歌词。
+  .lyric-win 整块是拖动区（CSS 里标了 app-region: drag），
+  工具条里的按钮单独标 no-drag，不然会被拖动区吃掉点击。
+-->
+<div class="lyric-win" id="win">
+
+  <div class="lyric-bar" id="bar">
+    <button class="lb" id="lbPrev" title="上一首">
+      <svg viewBox="0 0 24 24"><path d="M19 6v12l-10-6z"/><rect x="5" y="6" width="2.4" height="12" rx="1.2"/></svg>
+    </button>
+    <button class="lb" id="lbPlay" title="播放 / 暂停">
+      <svg viewBox="0 0 24 24" id="lbPlayIcon"><path d="M8 5l11 7-11 7z"/></svg>
+    </button>
+    <button class="lb" id="lbNext" title="下一首">
+      <svg viewBox="0 0 24 24"><path d="M5 6v12l10-6z"/><rect x="16.6" y="6" width="2.4" height="12" rx="1.2"/></svg>
+    </button>
+    <span class="lb-sep"></span>
+    <button class="lb lb-font" id="lbFontDown" title="字号变小">
+      <svg viewBox="0 0 24 24"><text x="7" y="17" font-size="12">A</text><path d="M14 15h7" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+    </button>
+    <button class="lb lb-font" id="lbFontUp" title="字号变大">
+      <svg viewBox="0 0 24 24"><text x="7" y="17.5" font-size="16">A</text><path d="M17.5 12v6M14.5 15h6" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linecap="round"/></svg>
+    </button>
+    <span class="lb-sep"></span>
+    <button class="lb" id="lbLock" title="锁定位置（锁定后拖不动，再点一次解锁）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+        <rect x="5.5" y="11" width="13" height="8.5" rx="2.4"/>
+        <path id="lbLockArc" d="M8.6 11V8.4a3.4 3.4 0 0 1 6.8 0V11"/>
+      </svg>
+    </button>
+    <button class="lb" id="lbClose" title="关闭桌面歌词">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+        <path d="M7 7l10 10M17 7L7 17"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="lyric-body" id="body">
+    <div class="lyric-line cur" id="lineCur"></div>
+    <div class="lyric-line next" id="lineNext"></div>
+  </div>
+
+</div>
+
+<script src="lyric.js"></script>
+</body>
+</html>

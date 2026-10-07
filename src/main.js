@@ -9,7 +9,7 @@
  * ============================================================
  */
 
-const { app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme, shell, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -200,6 +200,9 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
+
+  // 主窗口关掉时，悬浮歌词也要一起关（不然会剩一个孤零零的窗口挂在桌面上）
+  mainWindow.on('closed', () => { closeLyricWindow(); });
 
   // 窗口被最大化 / 还原时，通知界面，让"最大化"按钮切换成"还原"图标。
   // （双击标题栏最大化、拖到顶部最大化，都会触发这里。）
@@ -409,6 +412,146 @@ function registerHandlers() {
   });
 
   handle('bg:clear', () => { clearBgDir(); return true; });
+
+  // ---- 桌面歌词（第二个窗口） ----
+  // 主窗口负责"给内容"，这里负责"转发和操作窗口本身"。
+  ipcMain.on('lyric:open',   (_e, opts) => createLyricWindow(opts));
+  ipcMain.on('lyric:close',  () => closeLyricWindow());
+  ipcMain.on('lyric:push',   (_e, data) => pushToLyric('lyric:data', data));
+  ipcMain.on('lyric:style',  (_e, style) => pushToLyric('lyric:style', style));
+  ipcMain.on('lyric:resize', (_e, h) => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    const hh = Math.max(LYRIC_MIN_H, Math.round(Number(h) || LYRIC_MIN_H));
+    const [w] = lyricWindow.getSize();
+    lyricWindow.setSize(w, hh, false);
+  });
+  // 拖动中：悬浮窗自己算好了新位置，这里只负责把窗口挪过去
+  ipcMain.on('lyric:move', (_e, x, y) => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    if (typeof x !== 'number' || typeof y !== 'number') return;
+    lyricWindow.setPosition(Math.round(x), Math.round(y), false);
+  });
+  ipcMain.on('lyric:through', (_e, on) => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    // forward:true —— 开启时把鼠标事件转给下面的软件，等于"点穿过去"
+    lyricWindow.setIgnoreMouseEvents(!!on, { forward: true });
+  });
+  // 悬浮窗上那排按钮（上一首 / 播放 / 下一首 / 字号 / 锁定 / 关闭）→ 转给主窗口执行
+  ipcMain.on('lyric:cmd', (_e, cmd, arg) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('lyric:cmd', cmd, arg); } catch (_) { /* 忽略 */ }
+    }
+  });
+}
+
+// ============================================================
+//  第 4.5 部分：桌面歌词（第二个窗口）
+// ============================================================
+//  这是一个独立的无边框小窗，浮在所有软件最上面，专门显示当前歌词。
+//  它自己不播歌、也不联网 —— 所有内容都由主窗口推过来（见下面的 lyric:push）。
+//
+//  四个必须知道的点：
+//    ① transparent:true + frame:false 才能做出"只有字、没有框"的效果；
+//       同时 backgroundColor 必须是 #00000000，否则会是一整块黑。
+//    ② alwaysOnTop 用 'screen-saver' 这一级 —— 比普通置顶更高，
+//       别的软件全屏播放时也压得住（普通置顶会被全屏程序盖掉）。
+//    ③ 窗口高度不固定：字号 / 行数变了之后由 lyric.js 量完回报（lyric:resize）。
+//    ④ 鼠标穿透（clickThrough）开启后，点击会穿到下面的软件，
+//       此时悬浮窗自己收不到点击 —— 所以关闭穿透的入口只能放在主窗口。
+// ============================================================
+
+let lyricWindow = null;
+
+const LYRIC_W = 640;    // 悬浮窗宽度（高度按内容算）
+const LYRIC_MIN_H = 56; // 高度下限，防止字号调到最小时窗口被压成一条线
+
+/** 存档里的坐标还在不在某个显示器的可视范围内（换过显示器 / 改过分辨率就会失效） */
+function lyricPosUsable(x, y, w, h) {
+  if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return false;
+  return screen.getAllDisplays().some((d) => {
+    const a = d.workArea;
+    // 至少要露出右上角一小块，别整个飘到屏幕外面去
+    return x >= a.x - w + 60 && x <= a.x + a.width - 60 &&
+           y >= a.y - h + 24 && y <= a.y + a.height - 24;
+  });
+}
+
+/** 默认位置：主显示器工作区底部居中、任务栏上方一点 */
+function lyricDefaultBounds() {
+  const a = screen.getPrimaryDisplay().workArea;
+  const w = Math.min(LYRIC_W, Math.round(a.width * 0.6));
+  const h = 104;
+  return { x: a.x + Math.round((a.width - w) / 2), y: a.y + a.height - h - 56, w, h };
+}
+
+/** 往悬浮窗发消息（窗口可能已经关了，所以每次都要判一下） */
+function pushToLyric(channel, payload) {
+  if (!lyricWindow || lyricWindow.isDestroyed()) return;
+  try { lyricWindow.webContents.send(channel, payload); } catch (_) { /* 窗口正在关闭，忽略 */ }
+}
+
+function createLyricWindow(opts) {
+  const o = (opts && typeof opts === 'object') ? opts : {};
+  if (lyricWindow && !lyricWindow.isDestroyed()) {
+    pushToLyric('lyric:style', o);   // 已经开着了，只更新样式
+    return;
+  }
+
+  const fb = lyricDefaultBounds();
+  const useSaved = lyricPosUsable(o.x, o.y, fb.w, 104);
+
+  lyricWindow = new BrowserWindow({
+    x: useSaved ? Math.round(o.x) : fb.x,
+    y: useSaved ? Math.round(o.y) : fb.y,
+    width: fb.w,
+    height: fb.h,
+    frame: false,            // 无边框
+    transparent: true,       // 背景透明，才只有字没有框
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    skipTaskbar: true,       // 不在任务栏里再占一个图标
+    resizable: false,
+    hasShadow: false,
+    title: '桌面歌词',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload-lyric.js'),  // 它有自己的传话筒
+      contextIsolation: true,
+      nodeIntegration: false,
+      spellcheck: false,
+    },
+  });
+
+  // 用更高一级的置顶：普通 alwaysOnTop 会被全屏程序盖住
+  lyricWindow.setAlwaysOnTop(true, 'screen-saver');
+  lyricWindow.loadFile(path.join(__dirname, 'ui', 'lyric.html'));
+
+  // 拖动结束后把新坐标告诉主窗口，由它写进存档（下次打开还在原处）
+  lyricWindow.on('moved', () => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    const [x, y] = lyricWindow.getPosition();
+    // 顺便同步给悬浮窗自己：万一被系统吸附到边缘，它手里的坐标也能跟着校正
+    pushToLyric('lyric:pos', { x, y });
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try { mainWindow.webContents.send('lyric:moved', { x, y }); } catch (_) { /* 忽略 */ }
+    }
+  });
+
+  lyricWindow.on('closed', () => { lyricWindow = null; });
+
+  // 页面画好了再亮相，避免闪一下白块
+  lyricWindow.once('ready-to-show', () => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    pushToLyric('lyric:style', o);
+    if (o.clickThrough) lyricWindow.setIgnoreMouseEvents(true, { forward: true });
+    lyricWindow.show();
+    // 告诉页面窗口现在在哪 —— 拖动时要以它为基准算偏移
+    const [px, py] = lyricWindow.getPosition();
+    pushToLyric('lyric:pos', { x: px, y: py });
+  });
+}
+
+function closeLyricWindow() {
+  if (lyricWindow && !lyricWindow.isDestroyed()) lyricWindow.close();
 }
 
 // ============================================================

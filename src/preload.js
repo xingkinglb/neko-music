@@ -67,6 +67,29 @@ contextBridge.exposeInMainWorld('neko', {
   // 安全上只允许 http/https，主进程会再校验一次，防止被拿去打开本地文件。
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),
 
+  // ---------- 桌面歌词（独立置顶小窗） ----------
+  // 打开那个浮在桌面上的歌词窗（opts 里带字号、位置、是否穿透等设置）
+  lyricOpen:    (opts) => ipcRenderer.send('lyric:open', opts),
+
+  // 关掉它
+  lyricClose:   () => ipcRenderer.send('lyric:close'),
+
+  // 把歌词和播放进度推给悬浮窗（换歌 / 跳转 / 播放中每 250 毫秒各推一次）
+  lyricPush:    (data) => ipcRenderer.send('lyric:push', data),
+
+  // 推送样式：字号 / 不透明度 / 行数 / 主题色
+  lyricStyle:   (style) => ipcRenderer.send('lyric:style', style),
+
+  // 鼠标穿透：开启后点歌词会穿到下面的软件上。
+  // 关闭入口只能放在主窗口 —— 开启后悬浮窗自己收不到点击，关不掉自己。
+  lyricThrough: (on) => ipcRenderer.send('lyric:through', !!on),
+
+  // 悬浮窗上那排按钮发来的命令（prev / toggle / next / font / lock / close）
+  onLyricCmd:   (cb) => ipcRenderer.on('lyric:cmd', (_e, cmd, arg) => cb(cmd, arg)),
+
+  // 悬浮窗被拖动后，主进程把新坐标送回来存档
+  onLyricMoved: (cb) => ipcRenderer.on('lyric:moved', (_e, pos) => cb(pos)),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),

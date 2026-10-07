@@ -134,6 +134,7 @@ const DEFAULT_SETTINGS = {
   bg:    { file: null, dim: 0.55, blur: 0 },
   glass: { blur: 18, alpha: 0.55 },
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
+  lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
 };
 
 /** 补齐 DB.settings 里缺的字段（老版本存档没有这一项） */
@@ -145,9 +146,25 @@ function migrateSettings() {
     bg:     Object.assign({}, DEFAULT_SETTINGS.bg,    old.bg    || {}),
     glass:  Object.assign({}, DEFAULT_SETTINGS.glass, old.glass || {}),
     autoLyric: typeof old.autoLyric === 'boolean' ? old.autoLyric : DEFAULT_SETTINGS.autoLyric,
+    lyricWin: null,   // 下面单独补（要逐项夹范围，不能整块照抄）
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
+
+  // 桌面歌词的设置：老存档没有，就给一套默认值；有就逐项夹到合法范围，
+  // 防止存档被手改过之后字号变成 999、不透明度变成 -3 这种离谱值。
+  const w = (old.lyricWin && typeof old.lyricWin === 'object') ? old.lyricWin : {};
+  const clampNum = (v, lo, hi, dft) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, Math.round(v))) : dft;
+  DB.settings.lyricWin = {
+    on: w.on === true,
+    x: typeof w.x === 'number' && isFinite(w.x) ? w.x : null,
+    y: typeof w.y === 'number' && isFinite(w.y) ? w.y : null,
+    fontSize: clampNum(w.fontSize, 12, 48, DEFAULT_LYRIC_WIN.fontSize),
+    opacity:  clampNum(w.opacity,  30, 100, DEFAULT_LYRIC_WIN.opacity),
+    lines:    w.lines === 1 ? 1 : 2,
+    locked:       w.locked === true,
+    clickThrough: w.clickThrough === true,
+  };
 }
 
 /** 把 DB.settings 里的外观设置"刷"到界面上 */
@@ -1021,8 +1038,8 @@ function bindEvents() {
   /* ---- 音频事件 ---- */
   // 播放/暂停/缓冲三个状态，换的是图标本身。
   // 用 innerHTML 换 <use> 引用的名字，视觉上就是"换了个图标"。
-  audio.addEventListener('play',    () => { $('btnPlay').innerHTML = ic('i-pause'); });
-  audio.addEventListener('pause',   () => { $('btnPlay').innerHTML = ic('i-play'); });
+  audio.addEventListener('play',    () => { $('btnPlay').innerHTML = ic('i-pause'); pushLyricToDesktop(); });
+  audio.addEventListener('pause',   () => { $('btnPlay').innerHTML = ic('i-play');  pushLyricToDesktop(); });
   audio.addEventListener('waiting', () => { $('btnPlay').innerHTML = ic('i-loading', 'spin'); });
 
   audio.addEventListener('timeupdate', () => {
@@ -1039,12 +1056,13 @@ function bindEvents() {
     // ★ 歌词滚动的"发动机"就在这里：播放位置一变，就重新算当前该高亮哪一句。
     //   少了这一行，歌词只会停在刚加载时那一句，之后再也不动。
     syncLyric();
+    pushLyricToDesktop();
   });
 
   // 跳转结束后立刻重新定位歌词。
   // ★ 这一条不能省：暂停状态下 timeupdate 是不触发的，
   //   没有它的话，暂停时拖进度条歌词不会跟着走。
-  audio.addEventListener('seeked', () => syncLyric(true));
+  audio.addEventListener('seeked', () => { syncLyric(true); pushLyricToDesktop(); });
 
   audio.addEventListener('ended', () => {
     if (loopMode === 'one') { audio.currentTime = 0; audio.play(); return; }
@@ -1083,10 +1101,10 @@ function bindEvents() {
     //这里只负责放行，不要preventDefault，否则会连输入框里的 Esc 一起吞掉）
     if (e.key === 'Escape') return;
 
-    // Ctrl + L：手动取歌词（等价于点"词"按钮）
+    // Ctrl + L：开 / 关桌面歌词（等价于点「词」按钮）
     if (ctrl && (e.key === 'l' || e.key === 'L')) {
       e.preventDefault();
-      if (typeof toggleLyrics === 'function') toggleLyrics(true);
+      toggleDesktopLyric();
       return;
     }
 
@@ -1133,6 +1151,7 @@ function bindEvents() {
 
   /* ---- 歌词 ---- */
   bindLyrics();
+  bindDesktopLyric();
 }
 
 /**
@@ -1285,10 +1304,8 @@ async function loadLyrics(byUser) {
     lyricState.trackKey = key;
     lyricState.index = -1;
     renderLyricLines(res.videoTitle);
-    if (byUser) {
-      toggleLyrics(true);
-      toast('歌词已加载' + (res.lang ? '（' + res.lang + '）' : ''));
-    }
+    pushLyricToDesktop();
+    if (byUser) toast('歌词已加载' + (res.lang ? '（' + res.lang + '）' : ''));
   } catch (err) {
     // 失败：记住原因，换歌时会自动清掉
     lyricState.lines = [];
@@ -1303,6 +1320,7 @@ async function loadLyrics(byUser) {
   } finally {
     lyricState.loading = false;
     updateLyricBtn();
+    pushLyricToDesktop();   // 不管成功失败，都让悬浮窗知道最新状态
   }
 }
 
@@ -1403,15 +1421,16 @@ function scrollLyricTo(idx, instant) {
   else box.scrollTop = top;
 }
 
-/** 刷新「词」按钮的样子（加载中 / 已加载 / 没字幕） */
+/** 刷新「词」按钮的样子（加载中 / 桌面歌词已开 / 没字幕） */
 function updateLyricBtn() {
   const btn = $('btnLyric');
   if (!btn) return;
+  const desktopOn = lw().on;
   btn.classList.toggle('loading', lyricState.loading);
-  btn.classList.toggle('on', lyricState.showing && !lyricState.loading);
-  btn.classList.toggle('none', !lyricState.loading && lyricState.failed);
+  btn.classList.toggle('on', desktopOn && !lyricState.loading);
+  btn.classList.toggle('none', !desktopOn && !lyricState.loading && lyricState.failed);
   btn.title = lyricState.loading ? '正在取歌词…'
-    : (lyricState.showing ? '收起歌词（Esc）' : '歌词（Ctrl+L）');
+    : (desktopOn ? '关闭桌面歌词（Ctrl+L）' : '桌面歌词（Ctrl+L）');
 }
 
 /**
@@ -1441,15 +1460,8 @@ function bindLyrics() {
     btn.addEventListener('click', () => {
       // 正在加载时按了：给个提示，别让人以为没反应
       if (lyricState.loading) { showLyricTip('正在取歌词…'); return; }
-      // 已知取不到（没字幕 / 限流）：点它就重新试一次
-      if (!lyricState.lines.length && lyricState.failed) {
-        lyricState.failed = false;
-        loadLyrics(true);
-        return;
-      }
-      // 已加载 → 收 / 展大屏；没加载过 → 去取
-      if (lyricState.lines.length) toggleLyrics();
-      else loadLyrics(true);
+      // 点一下 = 开 / 关桌面歌词（悬浮窗开起来后一直挂着，直到再点一次）
+      toggleDesktopLyric();
     });
   }
 
@@ -1499,6 +1511,145 @@ function bindLyrics() {
   }
 }
 
+/* ============================================================
+   第 5.6 部分：桌面歌词（独立置顶小窗）
+   ============================================================
+   一句话分工：**「自动加载歌词」是供词能力，「桌面歌词」是用词方式。**
+   悬浮窗要一直显示后面的歌，就必须能自动取词 —— 所以两者是联动的：
+     开桌面歌词 → 自动打开「自动加载歌词」
+     手动关「自动加载歌词」→ 桌面歌词一起关
+   ============================================================ */
+
+/** 桌面歌词悬浮窗设置的默认值（老存档没有这一项时用它补上） */
+const DEFAULT_LYRIC_WIN = {
+  on: false,            // 悬浮窗是否开着
+  x: null, y: null,     // 上次拖到的位置（null = 用默认位置）
+  fontSize: 22,         // 字号 12~48
+  opacity: 86,          // 底部不透明度 30~100
+  lines: 2,             // 1 = 单行，2 = 双行
+  locked: false,        // 锁定位置：拖不动，但按钮还能点
+  clickThrough: false,  // 鼠标穿透：点歌词会穿到下面的软件
+};
+
+/** 取当前悬浮窗的设置（顺手保证它一定存在，防止老存档取到 undefined） */
+function lw() {
+  if (!DB.settings.lyricWin) DB.settings.lyricWin = Object.assign({}, DEFAULT_LYRIC_WIN);
+  return DB.settings.lyricWin;
+}
+
+/** 当前主题色，悬浮窗要用它染"当前这一句" */
+function currentAccent() {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--accent');
+  return (v || '').trim() || '#f472b6';
+}
+
+/**
+ * 把"现在该显示什么"推给悬浮窗。
+ * 不做逐帧广播 —— 只在换歌 / 跳转 / 播放状态变化 / 播放中每 250 毫秒推一次，
+ * 悬浮窗自己算当前是第几句，这样平时几乎不占资源。
+ */
+function pushLyricToDesktop() {
+  if (!lw().on) return;
+  const status = lyricState.loading ? 'loading'
+    : (lyricState.lines.length ? 'ok' : (lyricState.failed ? 'none' : 'idle'));
+  window.neko.lyricPush({
+    status,
+    lines: lyricState.lines,
+    time: audio.currentTime || 0,
+    playing: !audio.paused && !!audio.src,
+  });
+}
+
+/** 把悬浮窗的长相（字号 / 不透明度 / 行数 / 锁定 / 主题色）推过去 */
+function pushLyricStyle() {
+  if (!lw().on) return;
+  const s = lw();
+  window.neko.lyricStyle({
+    fontSize: s.fontSize, opacity: s.opacity, lines: s.lines,
+    locked: s.locked, accent: currentAccent(),
+  });
+}
+
+function openDesktopLyric() {
+  const s = lw();
+  s.on = true;
+  window.neko.lyricOpen({
+    x: s.x, y: s.y, fontSize: s.fontSize, opacity: s.opacity,
+    lines: s.lines, locked: s.locked, clickThrough: s.clickThrough,
+    accent: currentAccent(),
+  });
+  // 穿透状态要单独设一次：窗口刚创建时还来不及设
+  window.neko.lyricThrough(!!s.clickThrough);
+  updateLyricBtn();
+  persistLater();
+}
+
+function closeDesktopLyric() {
+  lw().on = false;
+  window.neko.lyricClose();
+  updateLyricBtn();
+  persistLater();
+}
+
+/** 开 / 关桌面歌词。不传参数就是"切换" */
+function toggleDesktopLyric(want) {
+  const on = (want === undefined) ? !lw().on : !!want;
+  if (!on) { closeDesktopLyric(); return; }
+
+  // ★ 联动：要一直显示后面的歌，就必须能自动取词
+  if (!DB.settings.autoLyric) {
+    DB.settings.autoLyric = true;
+    syncLyricSettingsUI();
+    toast('已同时开启「自动加载歌词」');
+  }
+  openDesktopLyric();
+  if (lyricState.lines.length) pushLyricToDesktop();
+  else if (!lyricState.failed) loadLyrics(false);
+  else pushLyricToDesktop();
+}
+
+/** 设置面板里那几个歌词控件的值 ← 读设置 */
+function syncLyricSettingsUI() {
+  const chkAuto = $('chkAutoLyric');
+  if (chkAuto) chkAuto.checked = !!DB.settings.autoLyric;
+}
+
+/** 悬浮窗上的按钮 → 在这里执行（切歌 / 播放暂停 / 字号 / 锁定 / 关闭） */
+function bindDesktopLyric() {
+  if (!window.neko.onLyricCmd) return;
+
+  window.neko.onLyricCmd((cmd, arg) => {
+    if (cmd === 'prev') next(-1);
+    else if (cmd === 'next') next(1);
+    else if (cmd === 'toggle') {
+      if (!audio.src) { toast('先选一首歌吧'); return; }
+      audio.paused ? audio.play() : audio.pause();
+    } else if (cmd === 'close') {
+      closeDesktopLyric();
+      toast('已关闭桌面歌词');
+    } else if (cmd === 'font') {
+      const s = lw();
+      s.fontSize = Math.max(12, Math.min(48, s.fontSize + (Number(arg) || 0)));
+      pushLyricStyle();
+      syncLyricSettingsUI();
+      persistLater();
+    } else if (cmd === 'lock') {
+      lw().locked = !!arg;
+      pushLyricStyle();
+      syncLyricSettingsUI();
+      persistLater();
+    }
+  });
+
+  // 悬浮窗被拖动 → 记下新坐标（下次打开还在原处）
+  window.neko.onLyricMoved((pos) => {
+    if (!pos || typeof pos.x !== 'number') return;
+    lw().x = pos.x;
+    lw().y = pos.y;
+    persistLater();
+  });
+}
+
 /** 换歌时：把上一首的歌词清掉；自动开着就顺手取新的 */
 function resetLyricsOnTrackChange() {
   lyricState.lines = [];
@@ -1511,6 +1662,7 @@ function resetLyricsOnTrackChange() {
   if (warn) { warn.innerHTML = ''; warn.classList.remove('show'); }
   if (DB.settings.autoLyric) loadLyrics(false);
   else updateLyricBtn();
+  pushLyricToDesktop();
 }
 
 /** 有些音频流拿不到总时长，就用曲目信息里的时长兜底 */
@@ -1619,6 +1771,13 @@ async function boot() {
       $('npCover').style.backgroundImage = `url("${DB.lastTrack.cover}")`;
       $('npCover').style.backgroundSize = 'cover';
     }
+  }
+
+  // 6) 上次退出时桌面歌词是开着的，就把它重新挂回屏幕上（位置也还是上次那个）
+  syncLyricSettingsUI();
+  if (lw().on) {
+    openDesktopLyric();
+    if (DB.settings.autoLyric && DB.lastTrack) loadLyrics(false);
   }
 }
 
