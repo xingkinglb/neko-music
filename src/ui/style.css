@@ -487,10 +487,39 @@ ul { list-style: none; }
 /* 左：当前歌曲 */
 .np { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .np-cover {
+  position: relative;
   width: 54px; height: 54px; border-radius: 10px; flex-shrink: 0;
   background: var(--track-bg) center/cover no-repeat;
   box-shadow: 0 3px 12px rgba(0,0,0,0.35);
+  /* 它是个按钮了（点它进整页歌词），把浏览器给按钮的默认样式抹掉 */
+  border: 0; padding: 0; overflow: visible; cursor: pointer;
+  transition: transform 0.16s ease, box-shadow 0.16s ease;
 }
+.np-cover:hover { transform: scale(1.05); box-shadow: 0 4px 16px rgba(0,0,0,0.45); }
+
+/* 鼠标移上去：盖一层半透明，中间浮出"歌词"两个字 —— 提示它可以直接点 */
+.np-cover::after {
+  content: "歌词";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 10px;
+  font-size: 12px; color: #fff;
+  background: rgba(10, 10, 16, 0.62);
+  opacity: 0; transition: opacity 0.16s ease;
+}
+.np-cover:hover::after { opacity: 1; }
+
+/* 正在播放：外面套一圈慢慢转的弧线，像唱片在转 */
+.np-cover.spin::before {
+  content: ""; position: absolute; inset: -5px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--accent);
+  border-right-color: rgba(var(--accent-rgb), 0.4);
+  animation: coverSpin 3.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes coverSpin { to { transform: rotate(360deg); } }
 .np-meta { min-width: 0; flex: 1; }
 .np-title { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-sub { font-size: 11.5px; color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -705,10 +734,37 @@ ul { list-style: none; }
 .lyric-overlay.show { opacity: 1; pointer-events: auto; }
 
 /* 歌词容器：整块可滚动，自动滚到当前句 */
+/* 整页歌词顶上的信息条：歌名 + 歌手 + 「桌面歌词」开关 */
+.lyric-head {
+  position: absolute; top: 0; left: 0; right: 0; z-index: 3;
+  display: flex; align-items: center; gap: 14px;
+  padding: 18px 78px 12px 28px;
+}
+.lyric-head-meta { flex: 1; min-width: 0; }
+.lyric-head-title {
+  font-size: 15px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lyric-head-sub {
+  margin-top: 3px; font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lyric-head-btn {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  height: 30px; padding: 0 12px; border-radius: 999px;
+  font-size: 12.5px; color: var(--muted);
+  background: rgba(255,255,255,0.07);
+  transition: background 0.14s, color 0.14s;
+}
+.lyric-head-btn:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
+.lyric-head-btn.on { color: var(--accent); background: rgba(var(--accent-rgb), 0.18); }
+.lyric-head-btn .ic { width: 14px; height: 14px; }
+
 .lyric-box {
   position: absolute; inset: 0;
   overflow-y: auto;
-  padding: 46% 40px 46%;
+  /* 顶部留出信息条的高度，底部留一半屏幕，让当前句能停在正中间 */
+  padding: 92px 40px 46%;
   text-align: center;
   scroll-behavior: smooth;
   scrollbar-width: none;
@@ -716,6 +772,7 @@ ul { list-style: none; }
 .lyric-box::-webkit-scrollbar { width: 0; }
 
 .lyric-box .l {
+  cursor: pointer;   /* 点一句就跳到那一句的时间 */
   font-size: 16px; line-height: 1.5;
   color: var(--muted-2);
   padding: 9px 0;

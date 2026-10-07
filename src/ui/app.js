@@ -1041,8 +1041,8 @@ function bindEvents() {
   /* ---- 音频事件 ---- */
   // 播放/暂停/缓冲三个状态，换的是图标本身。
   // 用 innerHTML 换 <use> 引用的名字，视觉上就是"换了个图标"。
-  audio.addEventListener('play',    () => { $('btnPlay').innerHTML = ic('i-pause'); pushLyricToDesktop(); });
-  audio.addEventListener('pause',   () => { $('btnPlay').innerHTML = ic('i-play');  pushLyricToDesktop(); });
+  audio.addEventListener('play',    () => { $('btnPlay').innerHTML = ic('i-pause'); updateCoverSpin(); pushLyricToDesktop(); });
+  audio.addEventListener('pause',   () => { $('btnPlay').innerHTML = ic('i-play');  updateCoverSpin(); pushLyricToDesktop(); });
   audio.addEventListener('waiting', () => { $('btnPlay').innerHTML = ic('i-loading', 'spin'); });
 
   audio.addEventListener('timeupdate', () => {
@@ -1108,6 +1108,13 @@ function bindEvents() {
     if (ctrl && (e.key === 'l' || e.key === 'L')) {
       e.preventDefault();
       toggleDesktopLyric();
+      return;
+    }
+
+    // Ctrl + D：开 / 关整页歌词（等价于点播放条最左边那张封面）
+    if (ctrl && (e.key === 'd' || e.key === 'D')) {
+      e.preventDefault();
+      toggleLyrics();
       return;
     }
 
@@ -1364,7 +1371,29 @@ function renderLyricLines(videoTitle) {
   }
 
   box.innerHTML = rows;
+  updateLyricHead();
   syncLyric(true);
+}
+
+/** 整页歌词顶部那条信息：歌名 + 歌手（顺便刷新「桌面歌词」按钮的亮灭） */
+function updateLyricHead() {
+  const cur = queue.tracks[queue.index];
+  const t = $('lyricTitle'); if (t) t.textContent = cur ? (cur.title || '歌词') : '歌词';
+  const sub = $('lyricSub'); if (sub) sub.textContent = cur ? (cur.author || '') : '';
+  updateLyricHeadBtn();
+}
+
+function updateLyricHeadBtn() {
+  const btn = $('btnLyricDesktop');
+  if (!btn) return;
+  btn.classList.toggle('on', !!lw().on);
+  btn.title = lw().on ? '关闭桌面歌词' : '在桌面上挂一个悬浮歌词窗';
+}
+
+/** 播放中给封面套一圈旋转弧线（暂停就停），一眼能看出在播 */
+function updateCoverSpin() {
+  const cover = $('npCover');
+  if (cover) cover.classList.toggle('spin', !audio.paused && !!audio.src);
 }
 
 /**
@@ -1447,9 +1476,11 @@ function toggleLyrics(want) {
   const ov = $('lyricOverlay');
   if (ov) ov.classList.toggle('show', show);
 
+  if (show) updateLyricHead();
+
   // 展开时如果还没歌词，就去取
   if (show && !lyricState.lines.length && !lyricState.failed && !lyricState.loading) {
-    loadLyrics(true);
+    loadLyrics(false);
   } else if (show) {
     syncLyric(true);
   }
@@ -1470,6 +1501,43 @@ function bindLyrics() {
 
   const close = $('btnLyricClose');
   if (close) close.addEventListener('click', () => toggleLyrics(false));
+
+  // 播放条最左边那张封面 = 整页歌词的入口（悬停会浮出"歌词"两个字提示可点）
+  const cover = $('npCover');
+  if (cover) {
+    cover.addEventListener('click', () => {
+      if (!queue.tracks[queue.index]) { toast('先放一首歌，再点封面看歌词'); return; }
+      // 还没取过就去取一次，取过（或已知取不到）就直接展开
+      if (!lyricState.lines.length && !lyricState.failed && !lyricState.loading) loadLyrics(false);
+      toggleLyrics(true);
+    });
+  }
+
+  // 点某一句歌词 → 跳到那一句的时间（找副歌特别好用）
+  const box = $('lyricBox');
+  if (box) {
+    box.addEventListener('click', (e) => {
+      const row = e.target.closest('.l');
+      if (!row || !audio.src) return;
+      const i = Array.prototype.indexOf.call(box.children, row);
+      const line = lyricState.lines[i];
+      if (!line) return;
+      audio.currentTime = Math.max(0, line.t);
+      syncLyric(true);
+      pushLyricToDesktop();
+      toast('已跳到 ' + fmtTime(line.t));
+    });
+  }
+
+  // 歌词页里的「桌面歌词」按钮：不用退回主界面就能开悬浮窗
+  const deskBtn = $('btnLyricDesktop');
+  if (deskBtn) {
+    deskBtn.addEventListener('click', () => {
+      toggleDesktopLyric();
+      updateLyricHeadBtn();
+      syncLyricSettingsUI();
+    });
+  }
 
   // 「打开视频」：用默认浏览器打开当前这首的 B 站页面。
   // 字幕取不到或不对劲时，这是最直接的核对/替代办法 ——
@@ -1595,6 +1663,8 @@ function openDesktopLyric() {
   // 穿透状态要单独设一次：窗口刚创建时还来不及设
   window.neko.lyricThrough(!!s.clickThrough);
   updateLyricBtn();
+  syncLyricSettingsUI();
+  updateLyricHeadBtn();
   persistLater();
 }
 
@@ -1602,6 +1672,8 @@ function closeDesktopLyric() {
   lw().on = false;
   window.neko.lyricClose();
   updateLyricBtn();
+  syncLyricSettingsUI();
+  updateLyricHeadBtn();
   persistLater();
 }
 
@@ -1702,7 +1774,7 @@ function bindDesktopLyric() {
       if (!audio.src) { toast('先选一首歌吧'); return; }
       audio.paused ? audio.play() : audio.pause();
     } else if (cmd === 'close') {
-      closeDesktopLyric();
+      closeDesktopLyric();          // 里面会顺手把设置页的开关也刷成"关"
       toast('已关闭桌面歌词');
     } else if (cmd === 'font') {
       const s = lw();

@@ -428,5 +428,120 @@ if (/scrollTo\(\{[^}]*behavior:\s*instant\s*\|\|\s*far\s*\?\s*'auto'/.test(appjs
   err("scrollTo 没有用 behavior:'instant' —— 刚渲染/刚跳转时会看到长距离惯性滑动");
 } else ok("跳转/重渲染用 behavior:'instant'，逐句跟进用 smooth");
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 18 大类检查）');
+/* ---- 20) 桌面歌词悬浮窗（第二个窗口） ---- */
+console.log('\n[19] 桌面歌词悬浮窗：');
+const lyricHtml = stripHtml(read('src/ui/lyric.html'));
+const lyricCss  = stripBlock(read('src/ui/lyric.css'));
+const lyricJs   = stripBlock(read('src/ui/lyric.js'));
+const lyricPre  = stripBlock(read('src/preload-lyric.js'));
+
+/* 窗口本体：无边框 + 透明 + 不在任务栏 + 独立预加载 + 隔离。
+   少了 transparent / backgroundColor 就是一整块黑方块，不是"悬浮歌词"。 */
+const lwBlock = (mainjs.match(/lyricWindow = new BrowserWindow\(\{([\s\S]*?)\n  \}\);/) || [])[1] || '';
+if (!lwBlock) err('找不到桌面歌词窗口的创建代码');
+const LW_MUST = [
+  ['frame:false',     /frame:\s*false/],
+  ['transparent:true', /transparent:\s*true/],
+  ['skipTaskbar:true', /skipTaskbar:\s*true/],
+  ['alwaysOnTop:true', /alwaysOnTop:\s*true/],
+  ['contextIsolation:true', /contextIsolation:\s*true/],
+  ['nodeIntegration:false', /nodeIntegration:\s*false/],
+  ['独立预加载脚本',   /preload-lyric\.js/],
+];
+LW_MUST.forEach(([name, re]) => {
+  if (!re.test(lwBlock)) err(`桌面歌词窗口缺少 ${name}（安全 / 外观会出问题）`);
+});
+if (lwBlock) ok('悬浮窗：无边框 + 透明 + 不在任务栏 + 独立预加载 + 开启隔离');
+
+/* 置顶等级必须是 screen-saver：普通 alwaysOnTop 会被全屏程序盖住 */
+if (!/setAlwaysOnTop\(true,\s*'screen-saver'\)/.test(mainjs)) {
+  err("悬浮窗没有用 setAlwaysOnTop(true,'screen-saver') —— 别的软件全屏时会被盖住");
+} else ok("置顶等级为 screen-saver（全屏软件也压得住）");
+if (!/backgroundColor:\s*'#00000000'/.test(mainjs)) err('透明窗口的 backgroundColor 不是 #00000000（会变成黑块）');
+else ok('透明窗口底色为 #00000000');
+
+/* 页面资源在自己目录下（CSP 写的是 'self'，路径错了就整页空白） */
+if (!/href="lyric\.css"/.test(lyricHtml)) err('lyric.html 没有引 lyric.css');
+if (!/src="lyric\.js"/.test(lyricHtml))   err('lyric.html 没有引 lyric.js');
+if (/href="lyric\.css"/.test(lyricHtml) && /src="lyric\.js"/.test(lyricHtml)) ok('悬浮窗的 css / js 都挂在自己目录下');
+
+/* ★ 鼠标穿透的关闭入口必须在主窗口：开启后悬浮窗点不到自己，关不掉自己 */
+if (!htmlIds.has('chkLyricThrough')) err('主窗口设置里没有「鼠标穿透」开关 —— 开了就关不掉了');
+else if (/clickThrough|穿透/.test(lyricHtml) || /clickThrough|穿透/.test(lyricJs)) {
+  err('穿透开关出现在悬浮窗自己身上 —— 开启后它点不到自己，必须放主窗口');
+} else ok('鼠标穿透的开关只在主窗口（悬浮窗自己没有，避免开了关不掉）');
+
+/* ★ 拖动不能用 -webkit-app-region: drag —— 拖拽区会吞掉鼠标事件，
+   那样"单击歌词弹工具条"永远收不到点击 */
+if (/app-region:\s*drag/.test(lyricCss)) {
+  err('悬浮窗用了 -webkit-app-region: drag —— 拖拽区会吞掉点击，工具条弹不出来');
+} else if (!/window\.lyric\.move\(/.test(lyricJs)) {
+  err('悬浮窗没有自己实现拖动（lyric.move）—— 拖不动');
+} else ok('拖动由 JS 自己算（避开了拖拽区吞点击的问题）');
+
+/* 工具条：点击才显示 + 3 秒自动收起 + 4px 区分单击与拖动 */
+if (!/moved > 4/.test(lyricJs)) err('没有"位移 > 4px 算拖动"的判定 —— 手抖会误弹工具条');
+else if (!/setTimeout\(hideBar, 3000\)/.test(lyricJs)) err('工具条没有 3 秒自动收起');
+else if (!/\.lyric-bar\.show/.test(lyricCss)) err('CSS 里没有 .lyric-bar.show（工具条显示不出来）');
+else ok('工具条：单击才出现、移开 3 秒收起、4px 以内算单击');
+
+/* IPC：悬浮窗那一侧的通道必须在 main.js 注册 */
+[['lyric:open', 1], ['lyric:close', 1], ['lyric:push', 1], ['lyric:style', 1],
+ ['lyric:resize', 1], ['lyric:move', 1], ['lyric:through', 1], ['lyric:cmd', 1]]
+  .forEach(([ch]) => {
+    if (!new RegExp("ipcMain\\.on\\('" + ch.replace(':', ':') + "'").test(mainjs)) {
+      err(`main.js 没有注册 ${ch}`);
+    }
+  });
+if (!/onData:/.test(lyricPre) || !/onStyle:/.test(lyricPre) || !/cmd:/.test(lyricPre) || !/resize:/.test(lyricPre)) {
+  err('preload-lyric 暴露的桥不完整（onData / onStyle / cmd / resize）');
+} else ok('悬浮窗的 IPC 通道两端都接上了');
+
+/* 主题色要传给悬浮窗，不然它永远是一个颜色 */
+if (!/accent:\s*currentAccent\(\)/.test(appjs)) err('推送样式时没有带上主题色（悬浮窗不会跟着换主题）');
+else ok('主题色会推给悬浮窗（换主题时当前句颜色跟着变）');
+
+/* ---- 21) 音量：悬停展开的竖向滑杆 ---- */
+console.log('\n[20] 音量控件：');
+['volWrap', 'volTrack', 'volFill', 'volKnob', 'volNum', 'btnMute'].forEach((id) => {
+  if (!htmlIds.has(id)) err(`index.html 缺少 #${id}（音量浮层不完整）`);
+});
+if (!/\.vol-wrap:hover \.vol-pop/.test(css)) err('CSS 里没有 .vol-wrap:hover .vol-pop —— 悬停不会展开');
+else ok('音量悬停展开（.vol-wrap:hover .vol-pop）');
+if (!/\.vol-track\s*\{[^}]*height:/.test(css)) err('.vol-track 是竖向的但没有高度');
+else ok('音量滑杆是竖向的（有固定高度）');
+if (/\$\('volume'\)/.test(appjs)) err('app.js 还在引用已经删掉的 #volume（会取到 null 报错）');
+else ok('旧的横向音量条已彻底移除（没有残留引用）');
+const volFn = (appjs.match(/function bindVolume\(\)\s*\{[\s\S]*?\n\}/) || [])[0] || '';
+if (!volFn) err('找不到 bindVolume() —— 音量交互整套都没接上');
+else if (!/\$\('btnMute'\)/.test(volFn)) err('bindVolume 里没有取到 #btnMute（静音按钮不存在）');
+else if (!/muteBtn\.addEventListener\('click'/.test(volFn)) err('点音量图标静音没接上');
+else if (!/addEventListener\('wheel'/.test(volFn)) err('滚轮调音量没接上');
+else ok('点图标静音 + 滚轮调音量 + 竖向滑杆拖动都已绑定');
+
+/* ---- 22) 封面 = 整页歌词入口 ---- */
+console.log('\n[21] 封面进歌词页：');
+if (!/<button[^>]*id="npCover"/.test(html)) err('#npCover 不是按钮（点不动）');
+else if (!/\$\('npCover'\)/.test(appjs) || !/cover\.addEventListener\('click'/.test(appjs)) {
+  err('#npCover 没有点击处理（点了没反应）');
+}
+else ok('播放条封面可点击进入整页歌词');
+if (!/ctrl && \(e\.key === 'd' \|\| e\.key === 'D'\)/.test(appjs)) err('没有 Ctrl+D 切换整页歌词');
+else ok('Ctrl+D 可开关整页歌词');
+if (!/closest\('\.l'\)/.test(appjs)) err('整页歌词不支持"点某句跳到那一句"');
+else ok('整页歌词点某句可跳到那一句的时间');
+
+/* ---- 23) 存档：桌面歌词的设置要能自愈 ---- */
+console.log('\n[22] 桌面歌词存档：');
+const lwKeys = ['on', 'x', 'y', 'fontSize', 'opacity', 'lines', 'locked', 'clickThrough'];
+const lwDef = (appjs.match(/DEFAULT_LYRIC_WIN = \{([\s\S]*?)\n\};/) || [])[1] || '';
+const lwMiss = lwKeys.filter((k) => !new RegExp('\\b' + k + '\\s*:').test(lwDef));
+if (lwMiss.length) err(`DEFAULT_LYRIC_WIN 缺少字段：${lwMiss.join(', ')}`);
+else ok('桌面歌词设置 8 个字段都有默认值');
+const lwMig = lwKeys.filter((k) => !new RegExp('\\b' + k + '\\s*:').test(mainjs) && !new RegExp('\\b' + k + '\\s*:').test(appjs));
+if (!/lyricWin:/.test(appjs)) err('migrateSettings 没有给 lyricWin 补默认值（老存档会取到 undefined）');
+else if (lwMig.length) err(`migrate 后仍缺少字段：${lwMig.join(', ')}`);
+else ok('老存档会自动补出 lyricWin（逐项夹到合法范围，不会被手改坏）');
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 23 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

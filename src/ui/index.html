@@ -238,7 +238,13 @@
   <footer class="player" id="player">
     <!-- 左：当前歌曲信息 -->
     <div class="np">
-      <div class="np-cover" id="npCover"></div>
+      <!--
+        封面 = 整页歌词的入口。
+        它本身是个按钮：鼠标移上去浮出「歌词」两个字（提示可点），
+        点一下就展开整页歌词滚动页（和网易云 / QQ 音乐点封面进歌词页是一个意思）。
+        播放时外面会多一圈慢慢转的弧线，一眼能看出"正在播"。
+      -->
+      <button class="np-cover" id="npCover" title="查看歌词（Ctrl+D）" aria-label="查看歌词"></button>
       <div class="np-meta">
         <div class="np-title" id="npTitle">还没有播放</div>
         <div class="np-sub" id="npSub">去搜索一首歌吧</div>
@@ -307,6 +313,17 @@
   用 .show 切换显示/隐藏；歌词行由 app.js 动态生成，每行带 .on 表示"当前这一句"。
 -->
 <div class="lyric-overlay" id="lyricOverlay">
+  <!-- 顶部：歌名歌手 + 一个"开桌面歌词"的开关（不用退回主界面就能开悬浮窗） -->
+  <div class="lyric-head">
+    <div class="lyric-head-meta">
+      <div class="lyric-head-title" id="lyricTitle">歌词</div>
+      <div class="lyric-head-sub" id="lyricSub"></div>
+    </div>
+    <button class="lyric-head-btn" id="btnLyricDesktop" title="在桌面上挂一个悬浮歌词窗">
+      <svg class="ic"><use href="#i-lyric"/></svg><span>桌面歌词</span>
+    </button>
+  </div>
+
   <p class="lyric-warn" id="lyricWarn"></p>
   <div class="lyric-box" id="lyricBox"></div>
   <button class="lyric-close" id="btnLyricClose" title="收起歌词（Esc）">✕</button>
