@@ -108,16 +108,33 @@ let queue = { tracks: [], index: -1, name: '' };
 // 界面当前所处的页面，比如 'search' / 'favorites' / 'history' / 'playlist:xxx'
 let currentView = 'search';
 
-/** 把内存中的数据写到硬盘（每次改动后调用） */
+/** 把内存中的数据写到硬盘（每次改动后调用）。
+ * ★ 必须走 api()：主进程统一把结果包成 {ok,data}，直接调 window.neko.saveData
+ *   拿到的是外壳、ok 恒为 true，失败会被吞掉；走 api() 才会解包并在失败时抛错。
+ *   存盘前先深拷贝一份快照，避免序列化过程中 DB 还在被改、写出半新半旧的数据。 */
+let lastSaveErrorAt = 0;
 async function persist() {
   try {
-    await window.neko.saveData(DB);
+    const snapshot = JSON.parse(JSON.stringify(DB));
+    await api('saveData', snapshot);
+    return true;
   } catch (e) {
     console.error('保存失败', e);
+    const now = Date.now();
+    if (now - lastSaveErrorAt > 4000) {
+      lastSaveErrorAt = now;
+      toast('本机保存失败：' + (e.message || '请检查应用数据目录权限'));
+    }
+    return false;
   }
 }
 
 let persistTimer = null;
+async function flushPersistence() {
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
+  return persist();
+}
+
 /**
  * "等一下再存"。拖滑杆时每一像素都会触发一次变更，
  * 要是每次都写盘，硬盘会被刷爆。攒 300 毫秒一起写就够了。
@@ -291,7 +308,7 @@ async function playAt(index) {
     // 记入历史（同样的歌不重复记录，把它提到最前面）
     DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
     DB.lastTrack = track;
-    persist();
+    persistLater();
 
     renderAll();   // 刷新列表里的"正在播放"高亮
   } catch (err) {
@@ -363,6 +380,13 @@ function trackListHTML(tracks, opts = {}) {
 let searchResults = [];
 let searchKeyword = '';
 let searchPage = 1;
+let discoveryResults = [];
+let discoveryLoading = false;
+let discoveryError = '';
+let discoveryPromise = null;
+const discoverySearchCache = new Map();
+const DISCOVERY_KEYWORDS = ['歌曲', '音乐'];
+const DISCOVERY_SIZE = 12;
 
 async function renderSearch() {
   if (!searchResults.length) {
@@ -407,6 +431,75 @@ async function doSearch(keyword, page = 1) {
   } catch (err) {
     content().innerHTML = `<div class="err">搜索失败：${esc(err.message)}</div>`;
   }
+}
+
+function renderDiscovery() {
+  currentView = 'discovery';
+  if (discoveryLoading) {
+    content().innerHTML = `<div class="loading"><div class="spinner"></div>正在为你发现音乐…</div>`;
+    return;
+  }
+  if (discoveryError) {
+    content().innerHTML = `<div class="err">发现失败：${esc(discoveryError)}</div><div class="block-actions discovery-retry"><button class="ghost-btn" id="btnRefreshDiscovery">重新加载</button></div>`;
+    return;
+  }
+  if (!discoveryResults.length) {
+    content().innerHTML = `<div class="empty"><div class="big">${ic('i-note')}</div><div class="msg">暂时没有发现音乐</div><div class="hint">试试刷新，稍后再来看看</div><button class="ghost-btn" id="btnRefreshDiscovery">刷新</button></div>`;
+    return;
+  }
+  content().innerHTML = `
+    <div class="block-head">
+      <div>
+        <div class="block-title">发现</div>
+        <div class="block-sub">从「歌曲」和「音乐」中随机挑选 · ${discoveryResults.length} 个视频</div>
+      </div>
+      <div class="block-actions">
+        <button class="ghost-btn" id="btnPlayDiscovery">${ic('i-play')}<span>播放全部</span></button>
+        <button class="ghost-btn" id="btnRefreshDiscovery">随机换一批</button>
+      </div>
+    </div>
+    ${trackListHTML(discoveryResults)}`;
+}
+
+async function loadDiscovery(refresh = false) {
+  currentView = 'discovery';
+  if (discoveryPromise) return discoveryPromise;
+  if (!refresh && discoveryResults.length) return renderDiscovery();
+  discoveryLoading = true;
+  discoveryError = '';
+  renderDiscovery();
+  discoveryPromise = (async () => {
+    try {
+      const batches = await Promise.all(DISCOVERY_KEYWORDS.map(async (keyword) => {
+        if (!discoverySearchCache.has(keyword)) {
+          const request = api('search', keyword, 1).then((res) => res.list.map((v) => ({
+            bvid: v.bvid, cid: null, page: 1, title: v.title, author: v.author,
+            cover: v.cover, duration: parseDuration(v.duration),
+          }))).catch((err) => {
+            discoverySearchCache.delete(keyword);
+            throw err;
+          });
+          discoverySearchCache.set(keyword, request);
+        }
+        return discoverySearchCache.get(keyword);
+      }));
+      const unique = new Map();
+      batches.flat().forEach((track) => { if (track.bvid && !unique.has(track.bvid)) unique.set(track.bvid, track); });
+      const pool = [...unique.values()];
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      discoveryResults = pool.slice(0, DISCOVERY_SIZE);
+    } catch (err) {
+      discoveryError = err.message || '请检查网络后重试';
+    } finally {
+      discoveryLoading = false;
+      discoveryPromise = null;
+      if (currentView === 'discovery') renderDiscovery();
+    }
+  })();
+  return discoveryPromise;
 }
 
 /** B 站搜索返回的 duration 形如 "3:45" 或 "1:02:03" */
@@ -633,6 +726,10 @@ function renderPlaylistSidebar() {
 function renderAll() {
   renderPlaylistSidebar();
   if (currentView === 'search') renderSearch();
+  else if (currentView === 'discovery') {
+    renderDiscovery();
+    if (!discoveryResults.length && !discoveryLoading && !discoveryError) loadDiscovery();
+  }
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'history') renderHistory();
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
@@ -888,6 +985,10 @@ function bindEvents() {
   $('winMin').addEventListener('click', () => window.neko.winMin());
   $('winMax').addEventListener('click', () => window.neko.winMax());
   $('winClose').addEventListener('click', () => window.neko.winClose());
+  window.neko.onPrepareClose(async () => {
+    const saved = await flushPersistence();
+    window.neko.closeReady(saved);
+  });
   // 主进程告诉我们窗口已被最大化 / 还原（双击标题栏也会触发），
   // 这里把"最大化"图标切换成"还原"图标，反之亦然。
   window.neko.onWinState((max) => {
@@ -931,6 +1032,8 @@ function bindEvents() {
     const idEl = e.target.closest('[id]');
     const id = idEl ? idEl.id : '';
     if (id === 'btnPlayAll') { playTracks(searchResults, 0, `搜索：${searchKeyword}`); return; }
+    if (id === 'btnRefreshDiscovery') { loadDiscovery(true); return; }
+    if (id === 'btnPlayDiscovery') { playTracks(discoveryResults, 0, '发现'); return; }
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
     if (id === 'btnPlayParsed') { playTracks(parsedView.tracks, 0, parsedView.info.title); return; }
@@ -1916,6 +2019,7 @@ function totalDuration() {
 
 /** 当前页面正在显示的那组曲目 */
 function currentTracks() {
+  if (currentView === 'discovery') return discoveryResults;
   if (currentView === 'favorites') return DB.favorites;
   if (currentView === 'history') return DB.history;
   if (currentView === 'parsed' && parsedView) return parsedView.tracks;
@@ -1981,8 +2085,12 @@ async function addManyToPlaylist(tracks) {
    ============================================================ */
 async function boot() {
   // 1) 读取本地存档
+  // ★ 必须走 api() 解包。主进程 store:load 返回的是 {ok:true, data: 存档}；
+  //   直接调 window.neko.loadData() 拿到的是外壳对象，DB.settings 会是 undefined，
+  //   于是每次启动都"读不到、全变默认"—— 设置和歌单看起来就像没保存过。
   try {
-    DB = (await window.neko.loadData()) || DB;
+    const loaded = await api('loadData');
+    if (loaded && typeof loaded === 'object') DB = loaded;
     DB.playlists = DB.playlists || [];
     DB.favorites = DB.favorites || [];
     DB.history = DB.history || [];

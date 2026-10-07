@@ -46,7 +46,9 @@ contextBridge.exposeInMainWorld('neko', {
   // 这三个按钮是界面自己画的 HTML 按钮，点一下就发个"请主进程帮忙"的消息。
   winMin:   () => ipcRenderer.send('win-min'),     // 最小化
   winMax:   () => ipcRenderer.send('win-max'),     // 最大化 / 还原（切换）
-  winClose: () => ipcRenderer.send('win-close'),   // 关闭
+  winClose: () => ipcRenderer.send('win-close'),   // 请求关闭（主进程会先等待本地数据保存完成）
+  closeReady: (ok) => ipcRenderer.send('win:close-ready', !!ok),
+  onPrepareClose: (cb) => ipcRenderer.on('win:prepare-close', () => cb()),
 
   // 主进程告诉我们窗口现在是被最大化还是还原了（双击标题栏也会触发），
   // 界面收到后用它来切换"最大化 / 还原"图标。

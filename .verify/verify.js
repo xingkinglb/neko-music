@@ -18,6 +18,7 @@ const css = stripBlock(read('src/ui/style.css'));
 const appjs = stripBlock(read('src/ui/app.js'));
 const preload = stripBlock(read('src/preload.js'));
 const mainjs = stripBlock(read('src/main.js'));
+const gitignore = read('.gitignore');
 
 let fail = 0;
 const err = (m) => { console.log('  ✗ ' + m); fail++; };
@@ -284,6 +285,57 @@ if (!/if\s*\(res\.reason\)\s*e\.reason\s*=\s*res\.reason/.test(appjs)) {
 if (!/function setUserCookie[\s\S]*?!\/=\/\.test\(t\)/.test(biliSrc)) {
   err('setUserCookie 没处理"只有值、没有 SESSDATA= 前缀"的粘贴 —— 用户填了却等于没填，字幕永远拿不到');
 } else ok('粘贴纯 Cookie 值（无 SESSDATA= 前缀）也能识别');
+
+/* ---- 26) 发现页 ---- */
+console.log('\n[25] 发现页：');
+const navBlock = (html.match(/<nav class="nav" id="nav">([\s\S]*?)<\/nav>/) || [])[1] || '';
+if (!/data-view="discovery"[\s\S]*?<span>发现<\/span>[\s\S]*?data-view="search"/.test(navBlock)) {
+  err('侧边栏「发现」没有排在「搜索」之前');
+} else ok('侧边栏「发现」位于「搜索」之前');
+if (!/const DISCOVERY_KEYWORDS = \['歌曲', '音乐'\]/.test(appjs) || !/api\('search', keyword, 1\)/.test(appjs)) {
+  err('发现页没有通过现有搜索 API 查询「歌曲」和「音乐」');
+} else ok('发现页通过现有搜索 API 查询歌曲与音乐');
+if (!/discoverySearchCache = new Map\(\)/.test(appjs) || !/unique\.has\(track\.bvid\)/.test(appjs) || !/pool\.slice\(0, DISCOVERY_SIZE\)/.test(appjs)) {
+  err('发现页缺少会话搜索缓存、bvid 去重或随机展示数量限制');
+} else ok('发现页有会话内缓存、bvid 去重与最多 12 条抽样');
+if (!/id="btnRefreshDiscovery"/.test(appjs) || !/function renderDiscovery/.test(appjs) || !/发现失败：/.test(appjs) || !/正在为你发现音乐/.test(appjs)) {
+  err('发现页缺少刷新或加载 / 空 / 错误状态 UI');
+} else ok('发现页有刷新按钮及加载、空、错误状态');
+if (!/currentView === 'discovery'\) return discoveryResults/.test(appjs) || !/id === 'btnPlayDiscovery'/.test(appjs)) {
+  err('发现页曲目没有接入当前播放列表与播放全部行为');
+} else ok('发现页曲目接入播放、收藏与歌单交互');
+
+/* ---- 27) 本地记忆与分享隐私 ---- */
+console.log('\n[26] 本地记忆与分享隐私：');
+if (!/app\.setPath\('userData',\s*STABLE_USER_DATA_DIR\)/.test(mainjs) || !/path\.join\(app\.getPath\('appData'\),\s*'neko-music'\)/.test(mainjs)) {
+  err('userData 没固定到 %APPDATA%\\neko-music —— 开发版与安装版可能读写不同目录');
+} else ok('本地数据目录固定在 %APPDATA%\\neko-music');
+if (!/function migrateKnownUserFiles\(\)/.test(mainjs) || !/if \(!fs\.existsSync\(to\) && fs\.existsSync\(from\)\) fs\.copyFileSync/.test(mainjs) || !/fs\.cpSync\(oldBg, newBg/.test(mainjs)) {
+  err('旧用户数据迁移缺失 —— 固定目录后可能读不到原有存档 / Cookie / 背景');
+} else ok('旧存档、Cookie、背景仅复制到稳定目录，不覆盖也不删除原文件');
+/* ★ 存档读写的真凶：store:load / store:save 返回的是 {ok, data} 外壳。
+   界面若直接调 window.neko.loadData() 而不走 api() 解包，DB 会变成外壳对象，
+   DB.settings 是 undefined —— 每次启动都读不到存档、全变默认，"设置像从没保存过"。 */
+/* 只看真正会跑的代码：verify 已挖掉块注释，但没挖 // 行注释，
+   而上面的说明里正好举了 window.neko.loadData 这个反例，会误报。这里再滤掉整行 // 注释。 */
+const appCode = appjs.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+if (/window\.neko\.(loadData|saveData)\(/.test(appCode)) {
+  err('app.js 直接调 window.neko.loadData/saveData —— 拿到 {ok,data} 外壳，设置每次启动都被重置');
+} else if (!/api\(\s*'loadData'/.test(appCode) || !/api\(\s*'saveData'/.test(appCode)) {
+  err("存档读写没有走 api('loadData'/'saveData') —— 外壳没解包，设置与歌单无法持久化");
+} else ok('存档读写都经 api() 解包（DB 不会变成 {ok,data} 外壳）');
+if (!/mainWindow\.on\('close',[\s\S]*?requestMainWindowClose\(\)/.test(mainjs) || !/win:prepare-close/.test(preload) || !/flushPersistence\(\)[\s\S]*?closeReady\(saved\)/.test(appjs)) {
+  err('关闭路径没有等待渲染端 flush 保存 —— 窗口关闭时 300ms 防抖写入可能丢失');
+} else ok('关闭按钮 / Alt+F4 都等待最后一次存档成功再退出');
+if (!/JSON\.parse\(JSON\.stringify\(DB\)\)/.test(appjs) || !/return false/.test(appjs) || !/toast\('本机保存失败：'/.test(appjs)) {
+  err('保存没有快照 / 失败反馈 —— 用户仍可能无提示地丢失本机数据');
+} else ok('保存使用快照，失败会给出可见提示（关窗失败也不会把窗口卡住）');
+if (!/\.workbuddy\//.test(gitignore) || !/node_modules\//.test(gitignore) || !/同步到GitHub\.bat/.test(gitignore)) {
+  err('Git 忽略规则没有排除项目记忆 / 依赖目录 / 本机同步脚本');
+} else ok('Git 排除项目记忆、依赖目录与本机同步工具');
+if (!/用户记忆[\s\S]*?本机 `%APPDATA%\\neko-music\\`[\s\S]*?不会随 Git 上传/.test(read('README.md'))) {
+  err('README 缺少用户记忆留在本机、不随 Git 上传的说明');
+} else ok('README 说明用户记忆留在本机应用目录且不随 Git 上传');
 
 /* ---- 汇总 ---- */
 console.log('\n========================================');
@@ -693,5 +745,5 @@ if (!/^\s*syncTopbarHeight\(\);$/m.test(appjs)) {
   err('启动时没有调用 syncTopbarHeight()（--topbar-h 还是 CSS 里的兜底值）');
 } else ok('启动时量过顶部工具栏高度并写进 --topbar-h');
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 25 大类检查）');
+if (fail === 0) console.log('全部静态自检通过 ✅（共 26 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

@@ -15,8 +15,33 @@ const fs = require('fs');
 
 const bili = require('./bilibili');
 
+// 固定开发版与安装版共用的本机存储目录，避免 Electron 按不同应用显示名
+// 分配出两个 userData 目录，导致用户感觉设置和歌单“消失”。
+const LEGACY_USER_DATA_DIR = app.getPath('userData');
+const STABLE_USER_DATA_DIR = path.join(app.getPath('appData'), 'neko-music');
+app.setPath('userData', STABLE_USER_DATA_DIR);
+
+// 仅在旧位置与新位置不同、且新位置还没有对应文件时复制旧数据；不覆盖、不删除。
+function migrateKnownUserFiles() {
+  if (path.resolve(LEGACY_USER_DATA_DIR) === path.resolve(STABLE_USER_DATA_DIR)) return;
+  try {
+    fs.mkdirSync(STABLE_USER_DATA_DIR, { recursive: true });
+    for (const name of ['neko-data.json', 'cookie.txt']) {
+      const from = path.join(LEGACY_USER_DATA_DIR, name);
+      const to = path.join(STABLE_USER_DATA_DIR, name);
+      if (!fs.existsSync(to) && fs.existsSync(from)) fs.copyFileSync(from, to);
+    }
+    const oldBg = path.join(LEGACY_USER_DATA_DIR, 'backgrounds');
+    const newBg = path.join(STABLE_USER_DATA_DIR, 'backgrounds');
+    if (!fs.existsSync(newBg) && fs.existsSync(oldBg)) fs.cpSync(oldBg, newBg, { recursive: true, errorOnExist: true });
+  } catch (err) {
+    console.error('[store] legacy userData migration failed:', err.message);
+  }
+}
+migrateKnownUserFiles();
+
 // app.getPath('userData') 是系统给我们分配的专用文件夹，
-// 比如 C:\Users\Neo\AppData\Roaming\neko-music
+// 现在固定为 %APPDATA%\\neko-music
 const DATA_FILE = path.join(app.getPath('userData'), 'neko-data.json');
 // 用户自己填的 B 站登录 Cookie（可选，填了搜索会更稳）
 const COOKIE_FILE = path.join(app.getPath('userData'), 'cookie.txt');
@@ -31,6 +56,9 @@ const BG_MIME = {
 };
 
 let mainWindow = null;
+let closeInProgress = false;
+let allowCloseOnce = false;
+let closeTimeout = null;
 
 // ============================================================
 //  第 1 部分：bili:// 协议 —— 音频流的"偷渡通道"
@@ -164,7 +192,33 @@ function clearBgDir() {
 // ============================================================
 //  第 2 部分：创建窗口
 // ============================================================
+function requestMainWindowClose() {
+  if (!mainWindow || mainWindow.isDestroyed() || closeInProgress) return;
+  closeInProgress = true;
+  if (closeTimeout) clearTimeout(closeTimeout);
+  closeTimeout = setTimeout(() => finishMainWindowClose(false), 8000);
+  try {
+    mainWindow.webContents.send('win:prepare-close');
+  } catch (err) {
+    finishMainWindowClose(false);
+  }
+}
+
+function finishMainWindowClose(saved) {
+  if (!closeInProgress) return;
+  closeInProgress = false;
+  if (closeTimeout) { clearTimeout(closeTimeout); closeTimeout = null; }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  // 无论最终存盘成功与否都放行关闭：宁可丢一次改动，也不能让用户关不掉窗口。
+  // （日常改动的保存失败，界面侧会弹提示，见 app.js 的 persist()。）
+  if (!saved) console.error('[store] renderer did not confirm final save before close');
+  allowCloseOnce = true;
+  mainWindow.close();
+}
+
 function createWindow() {
+  closeInProgress = false;
+  allowCloseOnce = false;
   mainWindow = new BrowserWindow({
     width: 1180,
     height: 760,
@@ -199,6 +253,13 @@ function createWindow() {
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+  });
+
+  // 所有关闭方式（自绘按钮、系统窗口按钮、Alt+F4）都先请求渲染进程 flush 存档。
+  mainWindow.on('close', (event) => {
+    if (allowCloseOnce) { allowCloseOnce = false; return; }
+    event.preventDefault();
+    requestMainWindowClose();
   });
 
   // 主窗口关掉时，悬浮歌词也要一起关（不然会剩一个孤零零的窗口挂在桌面上）
@@ -365,14 +426,24 @@ function registerHandlers() {
     return true;
   });
 
-  handle('store:load', () => migrate(readDataFile() || DEFAULT_DATA));
+  handle('store:load', () => {
+    const saved = readDataFile();
+    return migrate(saved || DEFAULT_DATA);
+  });
 
   // 存档写成"原子操作"：先写临时文件，写完了再改名顶替。
   // 这样万一写到一半断电/崩溃，原来的好文件还在，不会出现"存档变空"的惨剧。
   handle('store:save', (data) => {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('存档数据格式无效');
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
     const tmp = DATA_FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tmp, DATA_FILE);
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+      fs.renameSync(tmp, DATA_FILE);
+    } catch (err) {
+      try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
+      throw err;
+    }
     return true;
   });
 
@@ -384,7 +455,8 @@ function registerHandlers() {
     if (mainWindow.isMaximized()) mainWindow.unmaximize();
     else mainWindow.maximize();
   });
-  ipcMain.on('win-close', () => { if (mainWindow) mainWindow.close(); });
+  ipcMain.on('win-close', () => requestMainWindowClose());
+  ipcMain.on('win:close-ready', (_event, ok) => finishMainWindowClose(!!ok));
   ipcMain.on('win:fullscreen', (flag) => { if (mainWindow) mainWindow.setFullScreen(!!flag); });
 
   // ---- 自定义背景 ----
