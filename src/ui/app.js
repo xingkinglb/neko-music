@@ -246,6 +246,10 @@ async function playAt(index) {
   // 换歌了：清掉上一首的歌词（自动模式开着的话会顺手取新的）
   resetLyricsOnTrackChange();
 
+  // 「打开视频」按钮：没有 bvid 就没有页面可开，置灰
+  const openBtn = $('btnOpenBili');
+  if (openBtn) openBtn.classList.toggle('disabled', !track.bvid);
+
   try {
     // 如果这首歌还不知道自己的 cid（搜索来的），先查一次补上
     await ensureCid(track);
@@ -1147,8 +1151,9 @@ function showLyricTip(msg) {
 /** 把失败原因翻译成人话。reason 由主进程给出（见 bilibili.js 的 getSubtitle） */
 function lyricFailText(reason, fallback) {
   if (reason === 'no-cookie') return '还没填 B站 Cookie，先去设置里填一下';
-  if (reason === 'none')      return '这首没有字幕';
-  if (reason === 'limit')     return '被 B 站限流了，等会儿再试';
+  if (reason === 'none')      return '这首没有字幕（可点「打开视频」去B 站看）';
+  if (reason === 'limit')     return '被 B 站限流了，等一分钟再点一次';
+  if (reason === 'decoy')     return 'B 站返回的不是这首歌的字幕，稍后再试';
   return fallback || '歌词获取失败';
 }
 
@@ -1342,6 +1347,27 @@ function bindLyrics() {
 
   const close = $('btnLyricClose');
   if (close) close.addEventListener('click', () => toggleLyrics(false));
+
+  // 「打开视频」：用默认浏览器打开当前这首的 B 站页面。
+  // 字幕取不到或不对劲时，这是最直接的核对/替代办法 ——
+  // B 站网页版自带字幕，而且不会踩接口限流的坑。
+  const openBtn = $('btnOpenBili');
+  if (openBtn) {
+    openBtn.addEventListener('click', async () => {
+      const t = queue.tracks[queue.index];
+      if (!t || !t.bvid) {
+        showLyricTip('还没有在放歌');
+        return;
+      }
+      const p = t.page > 1 ? `?p=${t.page}` : '';
+      try {
+        await api('openExternal', `https://www.bilibili.com/video/${t.bvid}/${p}`);
+        toast('已在浏览器里打开');
+      } catch (err) {
+        showLyricTip('打不开浏览器');
+      }
+    });
+  }
 
   // Esc 收起歌词
   document.addEventListener('keydown', (e) => {

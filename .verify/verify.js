@@ -334,5 +334,35 @@ if (!/body\.length\s*===\s*0[\s\S]*?reason\s*=\s*'limit'/.test(biliSrc)) {
   err("getSubtitle 没有识别'轨道非空但内容为空'的限流假象");
 } else ok('识别"轨道存在但内容为空"的限流假象（不会误报成没字幕）');
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 15 大类检查）');
+/* 实测：被限流时 B 站会塞"别的视频的字幕"，甚至给不同视频返回同一份
+   "♪ 音乐 ♪"占位。这些诱饵每次都不一样 → 唯一可靠的办法是重试撞到真的那份。 */
+if (!/DECOY_PATTERNS/.test(biliSrc)) {
+  err('没有识别 B 站诱饵字幕的特征（如"♪ 音乐 ♪"占位）—— 会把别的视频的歌词当成功显示');
+} else if (!/reason\s*=\s*'decoy'/.test(biliSrc)) {
+  err("诱饵字幕没有被标成 reason='decoy'");
+} else ok('能识别 B 站的诱饵字幕（♪音乐♪ 等占位内容）');
+
+if (!/SUBTITLE_ATTEMPTS/.test(biliSrc) || !/attempt\s*<=\s*SUBTITLE_ATTEMPTS/.test(biliSrc)) {
+  err('取字幕没有重试机制 —— 诱饵/限流时一次就放弃了，必然取错');
+} else if (!/err\.reason\s*!==\s*'none'/.test(biliSrc)) {
+  err("重试没有把 reason='none'（0 轨道）算进去 —— 实测限流时就会返回 0 轨道");
+} else ok(`取字幕最多重试 ${(biliSrc.match(/SUBTITLE_ATTEMPTS\s*=\s*(\d+)/) || [])[1]} 次（含 0 轨道的情况）`);
+
+/* ---- 17) 「打开视频」按钮 ---- */
+console.log('\n[16] 打开 B 站视频：');
+['btnOpenBili', 'btnLyric'].forEach((id) => {
+  if (!htmlIds.has(id)) err(`index.html 里缺少 #${id}`);
+});
+if (!htmlIds.has('i-open-bili')) err('缺少 #i-open-bili 图标');
+if (!/openExternal:\s*\(url\)/.test(preload)) err('preload 没有暴露 openExternal');
+if (!/shell:open/.test(mainjs)) err("main.js 没有 handle('shell:open')");
+if (!/api\(\s*'openExternal'/.test(appjs)) err('app.js 没有调用 openExternal');
+if (/https?:\/\/\$\{/.test(mainjs) && !/\/\^https\?:\\\/\\\//i.test(mainjs)) {
+  err('shell:open 没有校验协议 —— 可能被拿去打开本地文件（file://）');
+}
+if (htmlIds.has('btnOpenBili') && /api\(\s*'openExternal'/.test(appjs) && /shell:open/.test(mainjs)) {
+  ok('播放条有「打开视频」按钮：默认浏览器打开，且只放行 http/https');
+}
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 16 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

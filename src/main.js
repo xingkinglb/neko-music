@@ -9,7 +9,7 @@
  * ============================================================
  */
 
-const { app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -335,6 +335,18 @@ function registerHandlers() {
 
   // 界面用它来决定"词"按钮提示什么（还是提前提示去填 Cookie）
   handle('bili:hasCookie', () => bili.hasLoginCookie());
+
+  // 用系统默认浏览器打开网页（播放条上的「打开视频」按钮）。
+  // ⚠️ 一定要自己校验：网页那边如果被注入恶意内容，
+  //   就能借这个接口去打开 file:// 之类的本地路径。只放行 http/https。
+  handle('shell:open', async (url) => {
+    const u = String(url || '').trim();
+    if (!/^https?:\/\//i.test(u)) {
+      throw new Error('只能打开 http/https 网址');
+    }
+    await shell.openExternal(u);
+    return true;
+  });
 
   // 读取 / 保存用户填的 B 站 Cookie
   handle('cookie:get', () => {

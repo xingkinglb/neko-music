@@ -142,6 +142,12 @@
       <path d="M4 6h16M4 11.2h11M4 16.4h8"/>
       <path d="M20.4 15.6v-4.2l-1.9 1M20.4 11.4a1.6 1.6 0 1 0 1.5 2"/>
     </symbol>
+    <!-- ---- 在浏览器里打开当前这首的B 站页面 ---- -->
+    <symbol id="i-open-bili" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M14 4h6v6"/>
+      <path d="M20 4l-8.5 8.5"/>
+      <path d="M18 14.5V19a1.6 1.6 0 0 1-1.6 1.6H5.6A1.6 1.6 0 0 1 4 19V8.2a1.6 1.6 0 0 1 1.6-1.6H10"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -270,6 +276,10 @@
         <button class="lyric-btn" id="btnLyric" title="歌词（Ctrl+L）"><svg class="ic"><use href="#i-lyric"/></svg><span>词</span></button>
         <div class="lyric-tip" id="lyricTip"></div>
       </div>
+      <!-- 用默认浏览器打开当前这首的 B 站页面。字幕不对时最直接的核对办法 -->
+      <button class="ico-btn" id="btnOpenBili" title="在浏览器里打开这个视频">
+        <svg class="ic"><use href="#i-open-bili"/></svg>
+      </button>
       <span class="ico" id="volIcon"><svg class="ic"><use href="#i-vol-2"/></svg></span>
       <input type="range" id="volume" min="0" max="100" value="80" />
     </div>

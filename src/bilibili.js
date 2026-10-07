@@ -484,6 +484,9 @@ function hasLoginCookie() {
 const subtitleCache = new Map();
 const SUBTITLE_TTL = 10 * 60 * 1000;   // 10 分钟，够用且不会占多少内存
 
+/** 取字幕最多试几次（被限流时重试是唯一有效的办法，见 fetchSubtitleOnce 的注释） */
+const SUBTITLE_ATTEMPTS = 4;
+
 /**
  * 取某个视频（某一 P）的字幕，返回逐句歌词
  *
@@ -513,6 +516,50 @@ async function getSubtitle(bvid, cid) {
   const ck = bvid + ':' + (cid || '');
   const cached = subtitleCache.get(ck);
   if (cached && Date.now() - cached.at < SUBTITLE_TTL) return cached.data;
+
+  // ② 真正去取。**必须重试**：B 站被限流时不报错，而是返回一堆"诱饵"字幕
+  //    （实测见过"珍妮古道尔讲环保""很多父母和孩子沟通像驯化动物"，
+  //    甚至给不同视频返回同一份"♪ 音乐 ♪"占位字幕）。
+  //    这些诱饵每次都不一样，所以重试几次总会撞到真的那份。
+  let lastErr = null;
+  for (let attempt = 1; attempt <= SUBTITLE_ATTEMPTS; attempt++) {
+    if (attempt > 1) await sleep(900 * attempt);   // 1.8s / 2.7s / 3.6s 逐次加长
+    try {
+      const data = await fetchSubtitleOnce(bvid, cid);
+      const now = Date.now();
+      subtitleCache.set(ck, { at: now, data });
+      return data;
+    } catch (err) {
+      lastErr = err;
+      // 'none'（0 轨道）也要重试 —— 实测被限流时就会返回"没有字幕"，
+      // 而真的没字幕的视频重试几次仍然是 0 轨道，两边都能靠重试区分开：
+      //   ·中途某次拿到了 → 说明之前是限流，用这份
+      //   ·试完仍然 0 轨道 → 那就是真没字幕，报none 是诚实的
+      if (err.reason !== 'limit' && err.reason !== 'decoy' && err.reason !== 'none') throw err;
+      console.warn(`[getSubtitle] 第 ${attempt} 次没拿到字幕（${err.reason}），重试…`);
+    }
+  }
+  throw lastErr;
+}
+
+/** B 站被限流时塞给我们的假字幕特征（这些内容绝不可能是这首歌的歌词） */
+const DECOY_PATTERNS = [
+  /♪\s*音乐\s*♪/,          // 纯音乐占位
+  /^♪\s*纯音乐/,
+  /古道尔|珍·?古道尔/,      // 实测出现过的诱饵内容
+];
+
+/**
+ * 只取一次（不重试）。成功返回字幕，失败抛出带 reason 的错误。
+ * reason: 'no-cookie' | 'limit' | 'decoy' | 'none' | 'network'
+ */
+async function fetchSubtitleOnce(bvid, cid) {
+  // 没登录就别试了 —— 直接告诉界面"先去填 Cookie"，省一次被限流的机会
+  if (!hasLoginCookie()) {
+    const e = new Error('还没填 B 站 Cookie，拿不到字幕');
+    e.reason = 'no-cookie';
+    throw e;
+  }
 
   // ① 权威地查这个 bvid 真正的分 P 列表
   //    注意：多 P 视频的所有分 P 共用同一个 bvid，各 P 的 cid 不同。
@@ -597,7 +644,8 @@ async function getSubtitle(bvid, cid) {
     body = parsed && parsed.body;
   } catch (err) {
     const e = new Error(err.message || '字幕下载失败');
-    e.reason = 'network';
+    // URL 为空时 new URL() 会直接抛，那也是限流的信号，值得重试
+    e.reason = /URL|Invalid/i.test(e.message) ? 'limit' : 'network';
     throw e;
   }
 
@@ -617,6 +665,16 @@ async function getSubtitle(bvid, cid) {
     }))
     .filter((l) => l.text)          // 丢掉空行（有的是换行占位）
     .sort((a, b) => a.t - b.t);   // 保证按时间递增
+
+  // ★ 坑 4：B 站的"诱饵字幕"。实测被限流时它会返回**别的视频**的字幕，
+  //   甚至给完全不同的视频返回同一份"♪ 音乐 ♪"占位。
+  //   诱饵每次内容都不一样，所以唯一可靠的办法是**重试**，撞到真的那份为止。
+  const joined = lines.map((l) => l.text).join('');
+  if (DECOY_PATTERNS.some((re) => re.test(joined))) {
+    const e = new Error('B 站返回的不是这首歌的字幕（正在重试确认）');
+    e.reason = 'decoy';
+    throw e;
+  }
 
   // ★ 坑 3：被限流时 B 站有时不报错，而是**返回一份胡乱拼的假字幕**。
   //   实测连着快速请求几次，会拿到 200 多行"小瓶粉皮莱卡"这种完全无关的乱码。
@@ -649,12 +707,9 @@ async function getSubtitle(bvid, cid) {
     videoTitle,          // 这个字幕属于哪个视频 —— 万一还对不上，用户能一眼看出来
   };
 
-  // 缓存住这次的成功结果，10 分钟内再点「词」直接秒回，不再惊动 B 站。
-  // 两个键都写：调用方下次可能仍带着那个"脏 cid"，
-  // 那样查询键会变，必须也能命中，否则缓存等于白加。
-  const now = Date.now();
-  subtitleCache.set(ck, { at: now, data: result });
-  subtitleCache.set(bvid + ':' + usedPage.cid, { at: now, data: result });
+  // 缓存由外层 getSubtitle 统一写入（它才知道调用方带来的那个查询键），
+  // 同时按"实际使用的 cid"再写一份，保证下次无论带哪个 cid 都能命中。
+  subtitleCache.set(bvid + ':' + cid, { at: Date.now(), data: result });
   return result;
 }
 

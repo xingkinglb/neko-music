@@ -62,6 +62,11 @@ contextBridge.exposeInMainWorld('neko', {
   // 有没有填 B 站 Cookie（取字幕的前提，没填直接省掉一次白跑的请求）
   hasCookie: () => ipcRenderer.invoke('bili:hasCookie'),
 
+  // 用系统默认浏览器打开一个网址。
+  // 网页自己没法调系统浏览器，必须请主进程用系统的 shell 打开。
+  // 安全上只允许 http/https，主进程会再校验一次，防止被拿去打开本地文件。
+  openExternal: (url) => ipcRenderer.invoke('shell:open', url),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),

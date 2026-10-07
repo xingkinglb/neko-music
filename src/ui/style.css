@@ -605,6 +605,18 @@ ul { list-style: none; }
 .lyric-btn.none { color: var(--muted-2); }
 @keyframes neko-spin { to { transform: rotate(360deg); } }
 
+/* 「在浏览器里打开」按钮：只有图标，和旁边的音量图标同一档大小 */
+.ico-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 8px;
+  color: var(--muted);
+  transition: background 0.14s, color 0.14s;
+}
+.ico-btn .ic { width: 15px; height: 15px; }
+.ico-btn:hover { background: rgba(var(--accent-rgb), 0.2); color: var(--text); }
+.ico-btn:active { background: rgba(var(--accent-rgb), 0.32); }
+.ico-btn.disabled { color: var(--muted-2); pointer-events: none; }
+
 /* 没有字幕之类的提示：在按钮上方淡入 → 停留 → 淡出消散（JS 加/移 .show） */
 .lyric-tip {
   position: absolute; bottom: calc(100% + 9px); right: 0;
