@@ -3,5 +3,8 @@ dist/
 .tmp/
 .workbuddy/
 
+# 离屏渲染出来的预览图（.verify/render-shot.js 的产物，看一眼就行，不进仓库）
+.verify/shot-*.png
+
 # 本机专用同步工具（作者自己的工作流，不适合放进公开仓库）
 同步到GitHub.bat

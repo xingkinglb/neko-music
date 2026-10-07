@@ -155,13 +155,19 @@ function migrateSettings() {
   // 防止存档被手改过之后字号变成 999、不透明度变成 -3 这种离谱值。
   const w = (old.lyricWin && typeof old.lyricWin === 'object') ? old.lyricWin : {};
   const clampNum = (v, lo, hi, dft) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, Math.round(v))) : dft;
+  // 老版本存档（没有 barScale 这一项）里如果还停在旧的默认字号 22，就升到新的默认 28 ——
+  // 字号默认值调大过，不这样处理，老用户会觉得"我明明没改过怎么还是小字"。
+  const isOldFormat = (typeof w.barScale !== 'number');
+  const oldFontSize = (isOldFormat && w.fontSize === 22) ? DEFAULT_LYRIC_WIN.fontSize : w.fontSize;
   DB.settings.lyricWin = {
     on: w.on === true,
     x: typeof w.x === 'number' && isFinite(w.x) ? w.x : null,
     y: typeof w.y === 'number' && isFinite(w.y) ? w.y : null,
-    fontSize: clampNum(w.fontSize, 12, 48, DEFAULT_LYRIC_WIN.fontSize),
+    fontSize: clampNum(oldFontSize, 14, 72, DEFAULT_LYRIC_WIN.fontSize),
     opacity:  clampNum(w.opacity,  30, 100, DEFAULT_LYRIC_WIN.opacity),
     lines:    w.lines === 1 ? 1 : 2,
+    barScale: clampNum(w.barScale, 80, 180, DEFAULT_LYRIC_WIN.barScale),
+    bgStyle:  (w.bgStyle === 'card') ? 'card' : 'none',
     locked:       w.locked === true,
     clickThrough: w.clickThrough === true,
   };
@@ -1216,6 +1222,21 @@ function bindVolume() {
   };
   track.addEventListener('pointerup', stopDrag);
   track.addEventListener('pointercancel', stopDrag);
+
+  /* ---- 面板的显隐 ----
+     规矩：鼠标在喇叭图标或面板上 → 展开；移开后**多留 0.45 秒**再收起。
+     为什么要多留这一会儿：手从图标往上游走时，中间那几像素的空隙容易扫空一下，
+     没有这点缓冲，面板会在你正要够到它的时候消失。
+     （CSS 的 :hover 也管展开，这里再加一个 .open 类，专门负责"延迟收起"这一件事。） */
+  let hideTimer = null;
+  const showPop = () => { clearTimeout(hideTimer); wrap.classList.add('open'); };
+  const hidePopSoon = () => {
+    clearTimeout(hideTimer);
+    if (dragging) return;     // 正在拖滑杆，别把面板收走
+    hideTimer = setTimeout(() => wrap.classList.remove('open'), 450);
+  };
+  wrap.addEventListener('pointerenter', showPop);
+  wrap.addEventListener('pointerleave', hidePopSoon);
 }
 
 /* ============================================================
@@ -1606,9 +1627,11 @@ function bindLyrics() {
 const DEFAULT_LYRIC_WIN = {
   on: false,            // 悬浮窗是否开着
   x: null, y: null,     // 上次拖到的位置（null = 用默认位置）
-  fontSize: 22,         // 字号 12~48
-  opacity: 86,          // 底部不透明度 30~100
+  fontSize: 28,         // 歌词字号 14~72
+  opacity: 92,          // 底板与文字的不透明度 30~100
   lines: 2,             // 1 = 单行，2 = 双行
+  barScale: 130,        // 工具条与图标的大小（%）80~180
+  bgStyle: 'none',      // 'none' = 只有字（默认）/ 'card' = 半透明底板
   locked: false,        // 锁定位置：拖不动，但按钮还能点
   clickThrough: false,  // 鼠标穿透：点歌词会穿到下面的软件
 };
@@ -1619,10 +1642,17 @@ function lw() {
   return DB.settings.lyricWin;
 }
 
-/** 当前主题色，悬浮窗要用它染"当前这一句" */
-function currentAccent() {
-  const v = getComputedStyle(document.documentElement).getPropertyValue('--accent');
-  return (v || '').trim() || '#f472b6';
+/**
+ * 当前主题色，转成"逗号分隔的三个数"（例如 "255, 111, 165"）。
+ * 为什么转成逗号：悬浮窗要用 rgba(r, g, b, 透明度) 给"当前句"同时上色和上透明度，
+ * 而主窗口里的 --accent-rgb 是空格分隔的（rgb(255 111 165) 那种写法用），
+ * 两种写法不能混在一对括号里，所以在推过去之前先统一成逗号形式。
+ */
+function currentAccentRgb() {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--accent-rgb');
+  const t = (v || '').trim().replace(/\s+/g, ' ');
+  if (!/^\d+\s+\d+\s+\d+$/.test(t)) return '255, 111, 165';
+  return t.split(' ').join(', ');
 }
 
 /**
@@ -1642,13 +1672,14 @@ function pushLyricToDesktop() {
   });
 }
 
-/** 把悬浮窗的长相（字号 / 不透明度 / 行数 / 锁定 / 主题色）推过去 */
+/** 把悬浮窗的长相（字号 / 不透明度 / 行数 / 工具条大小 / 底板 / 锁定 / 主题色）推过去 */
 function pushLyricStyle() {
   if (!lw().on) return;
   const s = lw();
   window.neko.lyricStyle({
     fontSize: s.fontSize, opacity: s.opacity, lines: s.lines,
-    locked: s.locked, accent: currentAccent(),
+    barScale: s.barScale, bgStyle: s.bgStyle,
+    locked: s.locked, accentRgb: currentAccentRgb(),
   });
 }
 
@@ -1657,8 +1688,9 @@ function openDesktopLyric() {
   s.on = true;
   window.neko.lyricOpen({
     x: s.x, y: s.y, fontSize: s.fontSize, opacity: s.opacity,
-    lines: s.lines, locked: s.locked, clickThrough: s.clickThrough,
-    accent: currentAccent(),
+    lines: s.lines, barScale: s.barScale, bgStyle: s.bgStyle,
+    locked: s.locked, clickThrough: s.clickThrough,
+    accentRgb: currentAccentRgb(),
   });
   // 穿透状态要单独设一次：窗口刚创建时还来不及设
   window.neko.lyricThrough(!!s.clickThrough);
@@ -1702,8 +1734,11 @@ function syncLyricSettingsUI() {
   const s = lw();
   const desk = $('chkDesktopLyric');    if (desk)  desk.checked = !!s.on;
   const lines = $('selLyricLines');     if (lines) lines.value = String(s.lines);
+  const bg = $('selLyricBg');           if (bg)    bg.value = s.bgStyle;
   const font = $('rngLyricFont');
   if (font) { font.value = s.fontSize; $('valLyricFont').textContent = s.fontSize + 'px'; }
+  const bar = $('rngLyricBar');
+  if (bar) { bar.value = s.barScale; $('valLyricBar').textContent = s.barScale + '%'; }
   const op = $('rngLyricOpacity');
   if (op) { op.value = s.opacity; $('valLyricOpacity').textContent = s.opacity + '%'; }
   const lock = $('chkLyricLock');       if (lock)    lock.checked = !!s.locked;
@@ -1724,10 +1759,25 @@ function bindLyricSettings() {
     pushLyricStyle(); persistLater();
   });
 
+  // 底板：默认不要（屏幕上只有字）；想有个板子垫着就选「半透明底板」
+  const bg = $('selLyricBg');
+  if (bg) bg.addEventListener('change', () => {
+    lw().bgStyle = bg.value === 'card' ? 'card' : 'none';
+    pushLyricStyle(); persistLater();
+  });
+
   const font = $('rngLyricFont');
   if (font) font.addEventListener('input', () => {
     lw().fontSize = Number(font.value);
     $('valLyricFont').textContent = lw().fontSize + 'px';
+    pushLyricStyle(); persistLater();
+  });
+
+  // 工具条大小：调的是歌词上那排按钮和图标
+  const bar = $('rngLyricBar');
+  if (bar) bar.addEventListener('input', () => {
+    lw().barScale = Number(bar.value);
+    $('valLyricBar').textContent = lw().barScale + '%';
     pushLyricStyle(); persistLater();
   });
 
@@ -1778,7 +1828,7 @@ function bindDesktopLyric() {
       toast('已关闭桌面歌词');
     } else if (cmd === 'font') {
       const s = lw();
-      s.fontSize = Math.max(12, Math.min(48, s.fontSize + (Number(arg) || 0)));
+      s.fontSize = Math.max(14, Math.min(72, s.fontSize + (Number(arg) || 0)));
       pushLyricStyle();
       syncLyricSettingsUI();
       persistLater();

@@ -610,7 +610,7 @@ ul { list-style: none; }
 .vol-wrap.muted .ico-btn { color: #ff8a8a; }
 
 .vol-pop {
-  position: absolute; right: -6px; bottom: calc(100% + 10px);
+  position: absolute; right: -6px; bottom: calc(100% + 6px);
   z-index: 40;
   display: flex; flex-direction: column; align-items: center; gap: 8px;
   width: 40px; padding: 12px 0 13px;
@@ -623,8 +623,16 @@ ul { list-style: none; }
   pointer-events: none;
   transition: opacity 0.16s ease, transform 0.16s ease;
 }
-/* 悬停整个区域（图标或浮层自己）就展开 */
-.vol-wrap:hover .vol-pop, .vol-pop:hover {
+/* ★ 图标和面板之间那条"看不见的桥"。
+   面板底边和喇叭图标之间有 6px 空隙，鼠标从图标往上游走时必须穿过它 ——
+   没有这一条，鼠标一离开图标悬停就断了，面板会"唰"地消失（这就是之前"消失太快"的一半原因）。
+   这一条属于面板自己，鼠标走在空隙里也算"还在面板上"。 */
+.vol-pop::after {
+  content: "";
+  position: absolute; left: -8px; right: -8px; bottom: -8px; height: 10px;
+}
+/* 展开：鼠标在图标或面板上（CSS 管），或者 JS 加的 .open（管"移开后多留 0.45 秒"） */
+.vol-wrap:hover .vol-pop, .vol-pop:hover, .vol-wrap.open .vol-pop {
   opacity: 1; transform: none; pointer-events: auto;
 }
 .vol-num {

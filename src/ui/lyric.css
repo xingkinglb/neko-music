@@ -1,21 +1,25 @@
 /* ============================================================
    桌面歌词悬浮窗的样式
    ============================================================
-   三条硬规矩（都是实测出来的，别改）：
+   四条硬规矩（都是实测出来的，别改）：
      ① 整个页面必须透明 —— html/body 都不能有背景色，
-        否则透明窗口会变成一整块黑方块，只有 .lyric-win 自己带半透明底。
+        否则透明窗口会变成一整块黑方块。
      ② 不能用 backdrop-filter —— Windows 的透明窗口上毛玻璃效果不可靠，
         时灵时不灵；这里改成"半透明纯色 + 文字描边"，在任何壁纸和网页上都压得住。
-     ③ ★ 拖动是自己在 JS 里算的，没有用 -webkit-app-region: drag。
-        原因：Electron 的拖拽区会**吞掉鼠标事件**，用了它"单击弹工具条"就永远收不到点击。
-        所以改成：按下记屏幕坐标 → 移动时把新位置发给主进程 → 主进程 setPosition。
-        副作用是好的：拖多远、什么时候算拖动（位移 > 4px）全都能自己控制。
+     ③ ★ 拖动由主进程跟着光标做（见 main.js 的 lyric:drag-start）。
+        没有用 -webkit-app-region: drag —— 那个拖拽区会吞掉鼠标事件，
+        用了它"单击弹工具条"就永远收不到点击。
+     ④ ★ 默认**不画底板**（.bare）：屏幕上只有歌词文字，没有边框、没有方块。
+        那块"框"只在点出工具条的时候，以一条小胶囊的形式出现在工具条下面。
    ============================================================ */
 
 :root {
-  --fs: 22px;                 /* 字号，由 JS 按设置改 */
-  --accent: #f472b6;          /* 主题色，由主窗口推过来 */
-  --bg-alpha: 0.86;           /* 底部不透明度，由设置改 */
+  --fs: 28px;                 /* 歌词字号，由 JS 按设置改 */
+  --accent-rgb: 255, 111, 165;/* 主题色，写成"逗号分隔的三个数"（下面用 rgba(r,g,b,a) 套透明度） */
+  --bg-alpha: 0.92;           /* 底板 / 工具条的不透明度，由设置改 */
+  --fg-alpha: 1;              /* 当前句文字的不透明度，由设置改 */
+  --fg2-alpha: 0.5;           /* 下一句 / 提示文字的不透明度，由设置改 */
+  --bar-scale: 1.3;           /* 工具条与图标的大小倍数，由设置改 */
 }
 
 * { box-sizing: border-box; }
@@ -30,67 +34,94 @@ html, body {
   cursor: default;
 }
 
-/* 整块窗口：半透明深色圆角底 + 拖动区。
-   不透明度和主题色由 JS 写进 style，这里只给默认值。 */
+/* 整块窗口。底板和边框分两种模式：
+     · 默认 .bare —— 什么都不画，只有字（边框留成透明，保证切换模式时大小不跳）
+     · 关掉"不要底板" —— 半透明圆角底 + 一圈细边 */
 .lyric-win {
   padding: 10px 22px 12px;
   border-radius: 16px;
-  background: rgba(14, 14, 22, var(--bg-alpha));
-  border: 1px solid rgba(255, 255, 255, 0.10);
+  border: 1px solid transparent;
   text-align: center;
   transition: background 0.18s ease;
+}
+.lyric-win:not(.bare) {
+  background: rgba(14, 14, 22, var(--bg-alpha));
+  border-color: rgba(255, 255, 255, 0.10);
 }
 
 /* 锁定时：拖不动，但按钮还能点 —— 防的是"不小心把它拖走"。
    和"鼠标穿透"是两回事：穿透是点也点不到，锁定只是拖不动。 */
 .lyric-win.locked { cursor: default; }
 .lyric-win:not(.locked) { cursor: grab; }
-.lyric-win.dragging { cursor: grabbing; }
+.lyric-win.dragging { cursor: grabbing; transition: none; }
 
 /* ---- 工具条：平时收起，单击歌词才出现 ---- */
 .lyric-bar {
   display: flex; align-items: center; justify-content: center; gap: 2px;
-  margin-bottom: 6px;
-  height: 26px;
+  /* 宽度只包住这几个图标（不写 fit-content 的话它会撑满整个窗口，
+     出现时就是一条横贯屏幕的黑条，很丑）。margin:0 auto 让它水平居中。 */
+  width: fit-content;
+  margin: 0 auto 6px;
+  height: calc(26px * var(--bar-scale));
+  border: 1px solid transparent;   /* 先占住位置：出现时加底板不会把歌词挤动 */
+  border-radius: 999px;
   opacity: 0; transform: translateY(4px);
   pointer-events: none;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: opacity 0.16s ease, transform 0.16s ease, background 0.16s ease;
 }
 .lyric-bar.show { opacity: 1; transform: none; pointer-events: auto; }
 
+/* ★ 纯文字模式下，工具条出现时给它自己一条小底板。
+   平时屏幕上什么都没有，点一下歌词才浮出这一条 —— 该出现的那点"框"就在这一刻出现。 */
+.lyric-win.bare .lyric-bar.show {
+  background: rgba(14, 14, 22, var(--bg-alpha));
+  border-color: rgba(255, 255, 255, 0.10);
+  padding: 0 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);   /* 没有整块底板时，让这条小胶囊立起来 */
+}
+
 .lb {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 24px; height: 24px; padding: 0;
-  border: 0; border-radius: 7px;
-  background: transparent; color: rgba(255, 255, 255, 0.72);
+  width: calc(24px * var(--bar-scale));
+  height: calc(24px * var(--bar-scale));
+  padding: 0;
+  border: 0; border-radius: calc(7px * var(--bar-scale));
+  background: transparent; color: rgba(255, 255, 255, 0.78);
   cursor: pointer;
   transition: background 0.14s, color 0.14s;
 }
 .lb:hover { background: rgba(255, 255, 255, 0.14); color: #fff; }
-.lb svg { width: 15px; height: 15px; fill: currentColor; }
+.lb svg {
+  width: calc(15px * var(--bar-scale));
+  height: calc(15px * var(--bar-scale));
+  fill: currentColor;
+}
 .lb svg text { fill: currentColor; font-family: inherit; font-weight: 500; }
-.lb-sep { width: 1px; height: 14px; background: rgba(255, 255, 255, 0.16); margin: 0 4px; }
+.lb-sep {
+  width: 1px; height: calc(14px * var(--bar-scale));
+  background: rgba(255, 255, 255, 0.16); margin: 0 5px;
+}
 /* 锁定时那个锁图标换个颜色，一眼看出状态 */
-.lb.on { color: var(--accent); }
+.lb.on { color: rgba(var(--accent-rgb), 1); }
 
 /* ---- 歌词两行 ---- */
 .lyric-body { cursor: inherit; }
 
 .lyric-line {
   /* 文字描边 + 投影：浅色网页、花哨壁纸上都看得清。
-     描边用 -webkit-text-stroke，投影用两层，方向相反，等于描一圈黑边。 */
-  color: rgba(255, 255, 255, 0.92);
+     没有底板的时候，这两层投影就是歌词的"底"，所以别删。 */
+  color: rgba(255, 255, 255, var(--fg-alpha));
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9), 0 0 2px rgba(0, 0, 0, 0.75);
   line-height: 1.45;
   word-break: break-word;
   transition: color 0.2s ease, font-size 0.2s ease;
 }
 
-/* 当前这一句：主题色 + 稍大一点 */
+/* 当前这一句：主题色 + 加大加粗 */
 .lyric-line.cur {
   font-size: var(--fs);
-  font-weight: 500;
-  color: var(--accent);
+  font-weight: 600;
+  color: rgba(var(--accent-rgb), var(--fg-alpha));
   text-shadow: 0 1px 4px rgba(0, 0, 0, 0.95), 0 0 10px rgba(0, 0, 0, 0.6);
 }
 
@@ -98,15 +129,14 @@ html, body {
 .lyric-line.next {
   margin-top: 6px;
   font-size: calc(var(--fs) * 0.78);
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, var(--fg2-alpha));
 }
-
 /* 单行模式：把第二行藏掉 */
 .lyric-win.single .lyric-line.next { display: none; }
 
 /* 没有歌词 / 正在取歌词时的提示文字，字号小一点、颜色暗一点 */
 .lyric-line.hint {
   font-size: calc(var(--fs) * 0.72) !important;
-  color: rgba(255, 255, 255, 0.55) !important;
+  color: rgba(255, 255, 255, var(--fg2-alpha)) !important;
   font-weight: 400;
 }

@@ -443,14 +443,34 @@
         </div>
 
         <div class="field">
-          <div class="field-label">字号 <b id="valLyricFont">22px</b></div>
-          <input type="range" id="rngLyricFont" min="12" max="48" value="22" />
+          <div class="field-label">歌词底板</div>
+          <select id="selLyricBg">
+            <option value="none">不要底板（只有字，最干净）</option>
+            <option value="card">半透明底板（看得更清）</option>
+          </select>
+          <div class="field-hint">
+            默认没有底板：屏幕上只有歌词文字，边框和方块都不画。<br />
+            点一下歌词弹出工具条时，工具条会带一条自己的小底板 —— 平时看不到任何"框"。
+          </div>
         </div>
 
         <div class="field">
-          <div class="field-label">不透明度 <b id="valLyricOpacity">86%</b></div>
-          <input type="range" id="rngLyricOpacity" min="30" max="100" value="86" />
-          <div class="field-hint">调低更透，能看见底下的内容；调高更清楚</div>
+          <div class="field-label">歌词字号 <b id="valLyricFont">28px</b></div>
+          <input type="range" id="rngLyricFont" min="14" max="72" value="28" />
+        </div>
+
+        <div class="field">
+          <div class="field-label">工具条大小 <b id="valLyricBar">130%</b></div>
+          <input type="range" id="rngLyricBar" min="80" max="180" value="130" />
+          <div class="field-hint">调的是歌词上那排按钮和图标（上一首 / 播放 / 下一首 / 字号 / 锁定 / 关闭）。</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">不透明度 <b id="valLyricOpacity">92%</b></div>
+          <input type="range" id="rngLyricOpacity" min="30" max="100" value="92" />
+          <div class="field-hint">
+            底板和工具条越透越能看见桌面；歌词文字本身最低也有约七成可见，不会调到看不见。
+          </div>
         </div>
 
         <div class="field">

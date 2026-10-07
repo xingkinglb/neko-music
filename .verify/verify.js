@@ -465,6 +465,19 @@ if (!/href="lyric\.css"/.test(lyricHtml)) err('lyric.html 没有引 lyric.css');
 if (!/src="lyric\.js"/.test(lyricHtml))   err('lyric.html 没有引 lyric.js');
 if (/href="lyric\.css"/.test(lyricHtml) && /src="lyric\.js"/.test(lyricHtml)) ok('悬浮窗的 css / js 都挂在自己目录下');
 
+/* 悬浮窗自己的 CSS 变量也要都能对上 —— 少一个，整行字就会没颜色 / 没透明度。
+   这四类变量是设置页那几根滑杆的直接下游：字号、工具条大小、底板透明度、文字透明度。 */
+const lwCssVars = new Set([...lyricCss.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+const lwUsedVars = new Set([...lyricCss.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]));
+const lwUndef = [...lwUsedVars].filter((v) => !lwCssVars.has(v));
+if (lwUndef.length) err(`悬浮窗用了没定义的 CSS 变量：${lwUndef.join(', ')}`);
+else {
+  const need = ['--fs', '--bar-scale', '--bg-alpha', '--fg-alpha', '--fg2-alpha', '--accent-rgb'];
+  const lack = need.filter((v) => !lwCssVars.has(v));
+  if (lack.length) err(`悬浮窗缺少可调变量：${lack.join(', ')}（设置页的滑杆就白调了）`);
+  else ok(`悬浮窗的 ${lwUsedVars.size} 个 CSS 变量都有定义，且 6 个可调项齐全`);
+}
+
 /* ★ 鼠标穿透的关闭入口必须在主窗口：开启后悬浮窗点不到自己，关不掉自己 */
 if (!htmlIds.has('chkLyricThrough')) err('主窗口设置里没有「鼠标穿透」开关 —— 开了就关不掉了');
 else if (/clickThrough|穿透/.test(lyricHtml) || /clickThrough|穿透/.test(lyricJs)) {
@@ -475,31 +488,64 @@ else if (/clickThrough|穿透/.test(lyricHtml) || /clickThrough|穿透/.test(lyr
    那样"单击歌词弹工具条"永远收不到点击 */
 if (/app-region:\s*drag/.test(lyricCss)) {
   err('悬浮窗用了 -webkit-app-region: drag —— 拖拽区会吞掉点击，工具条弹不出来');
-} else if (!/window\.lyric\.move\(/.test(lyricJs)) {
-  err('悬浮窗没有自己实现拖动（lyric.move）—— 拖不动');
-} else ok('拖动由 JS 自己算（避开了拖拽区吞点击的问题）');
+} else if (!/window\.lyric\.dragStart\(/.test(lyricJs)) {
+  err('悬浮窗没有在拖动时发出 dragStart（拖不动）');
+} else ok('拖动绕开了拖拽区：按下后交给主进程跟着光标走');
 
 /* 工具条：点击才显示 + 3 秒自动收起 + 4px 区分单击与拖动 */
-if (!/moved > 4/.test(lyricJs)) err('没有"位移 > 4px 算拖动"的判定 —— 手抖会误弹工具条');
-else if (!/setTimeout\(hideBar, 3000\)/.test(lyricJs)) err('工具条没有 3 秒自动收起');
+if (!/moved <= 4/.test(lyricJs)) err('没有"位移超过 4px 才算拖动"的判定 —— 手抖会误弹工具条');
+else if (/e\.screenX/.test(lyricJs)) {
+  err('拖动判定用了 e.screenX（屏幕坐标）—— 它并不总是可靠，应该用窗口内坐标 e.clientX');
+} else if (!/Math\.abs\(e\.clientX - downAt\.x\)/.test(lyricJs)) {
+  err('拖动判定没有用窗口内坐标算位移');
+} else if (!/setTimeout\(hideBar, 3000\)/.test(lyricJs)) err('工具条没有 3 秒自动收起');
 else if (!/\.lyric-bar\.show/.test(lyricCss)) err('CSS 里没有 .lyric-bar.show（工具条显示不出来）');
 else ok('工具条：单击才出现、移开 3 秒收起、4px 以内算单击');
 
+/* ★ 默认不画底板：屏幕上只有字，边框只在点出工具条时出现。
+   实现是"基础规则什么都不画，:not(.bare) 才画" —— 两边都要验。 */
+const lwBase = (lyricCss.match(/\.lyric-win\s*\{([\s\S]*?)\}/) || [])[1] || '';
+if (!lwBase) err('找不到 .lyric-win 的基础样式');
+else if (/background:\s*(?!transparent)/.test(lwBase)) err('.lyric-win 基础样式带了背景色 —— 默认就不是"只有字"了');
+else if (!/\.lyric-win:not\(\.bare\)\s*\{[^}]*background:/.test(lyricCss)) err('选了「半透明底板」也没底色（:not(.bare) 缺背景）');
+else if (!/\.lyric-win\.bare \.lyric-bar\.show/.test(lyricCss)) err('工具条在纯文字模式下没有自己的底板 —— 点出来会看不清');
+else if (!/bgStyle === 'card'\) \? 'card' : 'none'/.test(lyricJs)) err('悬浮窗没有把"底板"当成两种模式处理（bgStyle 只认 card/none）');
+else ok('默认纯文字（无底无边框），底板只在点出工具条时露出来');
+
+/* 字号 / 工具条大小 / 不透明度都要能调，且范围在两端一致 */
+const fontRange = (html.match(/id="rngLyricFont"[^>]*min="(\d+)"[^>]*max="(\d+)"/) || []);
+if (fontRange[1] !== '14' || fontRange[2] !== '72') err('歌词字号滑杆范围不是 14~72（设置页与悬浮窗要对齐）');
+else if (!/Math\.max\(14, Math\.min\(72/.test(lyricJs)) err('悬浮窗没有把字号夹在 14~72');
+else if (!/Math\.max\(14, Math\.min\(72/.test(appjs)) err('工具条上的字号按钮没有把字号夹在 14~72');
+else ok('歌词字号 14~72（设置页与悬浮窗两侧都夹了范围）');
+if (!htmlIds.has('rngLyricBar') || !htmlIds.has('valLyricBar')) err('设置页缺少「工具条大小」滑杆');
+else if (!/--bar-scale/.test(lyricCss) || !/calc\(24px \* var\(--bar-scale\)\)/.test(lyricCss)) {
+  err('工具条与图标没有跟着 --bar-scale 缩放（图标还是原来的大小）');
+} else if (!/barScale:\s*s\.barScale/.test(appjs)) err('工具条大小没有推给悬浮窗');
+else ok('工具条与图标大小可调（80~180%）');
+
 /* IPC：悬浮窗那一侧的通道必须在 main.js 注册 */
 [['lyric:open', 1], ['lyric:close', 1], ['lyric:push', 1], ['lyric:style', 1],
- ['lyric:resize', 1], ['lyric:move', 1], ['lyric:through', 1], ['lyric:cmd', 1]]
+ ['lyric:resize', 1], ['lyric:drag-start', 1], ['lyric:drag-end', 1],
+ ['lyric:through', 1], ['lyric:cmd', 1]]
   .forEach(([ch]) => {
-    if (!new RegExp("ipcMain\\.on\\('" + ch.replace(':', ':') + "'").test(mainjs)) {
+    if (!new RegExp("ipcMain\\.on\\('" + ch + "'").test(mainjs)) {
       err(`main.js 没有注册 ${ch}`);
     }
   });
-if (!/onData:/.test(lyricPre) || !/onStyle:/.test(lyricPre) || !/cmd:/.test(lyricPre) || !/resize:/.test(lyricPre)) {
-  err('preload-lyric 暴露的桥不完整（onData / onStyle / cmd / resize）');
+if (!/onData:/.test(lyricPre) || !/onStyle:/.test(lyricPre) || !/cmd:/.test(lyricPre) || !/resize:/.test(lyricPre)
+    || !/dragStart:/.test(lyricPre) || !/dragEnd:/.test(lyricPre)) {
+  err('preload-lyric 暴露的桥不完整（onData / onStyle / cmd / resize / dragStart / dragEnd）');
 } else ok('悬浮窗的 IPC 通道两端都接上了');
 
-/* 主题色要传给悬浮窗，不然它永远是一个颜色 */
-if (!/accent:\s*currentAccent\(\)/.test(appjs)) err('推送样式时没有带上主题色（悬浮窗不会跟着换主题）');
-else ok('主题色会推给悬浮窗（换主题时当前句颜色跟着变）');
+/* 主题色要传给悬浮窗，不然它永远是一个颜色（传的是 "r g b" 三个数，好单独套不透明度） */
+if (!/accentRgb:\s*currentAccentRgb\(\)/.test(appjs)) err('推送样式时没有带上主题色（悬浮窗不会跟着换主题）');
+else if (!/--accent-rgb/.test(lyricCss)) err('悬浮窗 CSS 里没有用 --accent-rgb（当前句上不了主题色）');
+else if (!/split\(' '\)\.join\(', '\)/.test(appjs)) {
+  err('主题色没有转成逗号分隔就推过去了 —— rgba(r g b, a) 这种混写取不到颜色');
+} else if (/--accent-rgb:\s*\d+\s+\d+\s+\d+;/.test(lyricCss)) {
+  err('悬浮窗 CSS 里的 --accent-rgb 是空格分隔的（要和 JS 推过来的逗号形式一致）');
+} else ok('主题色会推给悬浮窗，且按逗号形式传（换主题时当前句颜色跟着变）');
 
 /* ---- 21) 音量：悬停展开的竖向滑杆 ---- */
 console.log('\n[20] 音量控件：');
@@ -519,6 +565,18 @@ else if (!/muteBtn\.addEventListener\('click'/.test(volFn)) err('点音量图标
 else if (!/addEventListener\('wheel'/.test(volFn)) err('滚轮调音量没接上');
 else ok('点图标静音 + 滚轮调音量 + 竖向滑杆拖动都已绑定');
 
+/* ★ 悬停不能"离开图标就消失"：图标与面板之间要有隐形桥，移开还要留一点缓冲。
+   之前少了这两样，鼠标从图标往上游走时面板会在半路消失。 */
+if (!/\.vol-pop::after/.test(css)) {
+  err('音量面板少了那条"隐形桥"（.vol-pop::after）—— 鼠标从图标往上滑时会中途消失');
+} else if (!/\.vol-wrap\.open \.vol-pop/.test(css)) {
+  err('音量面板没有"延迟收起"用的 .open 状态');
+} else if (!/setTimeout\(\(\) => wrap\.classList\.remove\('open'\), 450\)/.test(appjs)) {
+  err('音量面板没有"移开后延迟 0.45 秒再收起"');
+} else if (!/pointerenter'[\s\S]{0,200}?pointerleave'/.test(appjs)) {
+  err('音量面板的悬停进出没有接上（pointerenter / pointerleave）');
+} else ok('音量面板：图标与面板之间有隐形桥 + 移开后延迟 450ms 收起');
+
 /* ---- 22) 封面 = 整页歌词入口 ---- */
 console.log('\n[21] 封面进歌词页：');
 if (!/<button[^>]*id="npCover"/.test(html)) err('#npCover 不是按钮（点不动）');
@@ -531,17 +589,41 @@ else ok('Ctrl+D 可开关整页歌词');
 if (!/closest\('\.l'\)/.test(appjs)) err('整页歌词不支持"点某句跳到那一句"');
 else ok('整页歌词点某句可跳到那一句的时间');
 
-/* ---- 23) 存档：桌面歌词的设置要能自愈 ---- */
+/* ---- 23) 桌面歌词存档：换歌 / 改设置都不能丢 ---- */
 console.log('\n[22] 桌面歌词存档：');
-const lwKeys = ['on', 'x', 'y', 'fontSize', 'opacity', 'lines', 'locked', 'clickThrough'];
+const lwKeys = ['on', 'x', 'y', 'fontSize', 'opacity', 'lines', 'barScale', 'bgStyle', 'locked', 'clickThrough'];
 const lwDef = (appjs.match(/DEFAULT_LYRIC_WIN = \{([\s\S]*?)\n\};/) || [])[1] || '';
 const lwMiss = lwKeys.filter((k) => !new RegExp('\\b' + k + '\\s*:').test(lwDef));
 if (lwMiss.length) err(`DEFAULT_LYRIC_WIN 缺少字段：${lwMiss.join(', ')}`);
-else ok('桌面歌词设置 8 个字段都有默认值');
+else ok(`桌面歌词设置 ${lwKeys.length} 个字段都有默认值`);
 const lwMig = lwKeys.filter((k) => !new RegExp('\\b' + k + '\\s*:').test(mainjs) && !new RegExp('\\b' + k + '\\s*:').test(appjs));
 if (!/lyricWin:/.test(appjs)) err('migrateSettings 没有给 lyricWin 补默认值（老存档会取到 undefined）');
 else if (lwMig.length) err(`migrate 后仍缺少字段：${lwMig.join(', ')}`);
 else ok('老存档会自动补出 lyricWin（逐项夹到合法范围，不会被手改坏）');
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 23 大类检查）');
+/* ---- 24) 拖动顺滑：主进程跟着光标走，不逐帧走 IPC ---- */
+console.log('\n[23] 悬浮窗拖动顺滑：');
+if (/ipcMain\.on\('lyric:move'/.test(mainjs)) {
+  err("还留着逐帧的 lyric:move 通道 —— 鼠标一动就发一次消息，拖动又会一卡一卡");
+} else if (!/screen\.getCursorScreenPoint\(\)/.test(mainjs)) {
+  err('主进程没有读光标位置 —— 拖动跟不上手');
+} else if (!/setBounds\(\{ x, y, width: lyricDragSize\.w, height: lyricDragSize\.h \}, false\)/.test(mainjs)) {
+  err('拖动没有用 setBounds 一次挪到位');
+} else if (!/setInterval\([\s\S]*?\}, 16\);/.test(mainjs)) {
+  err('拖动跟随不是每 16 毫秒一次（太慢会顿、太快白烧 CPU）');
+} else if (!/lyricDragDeadline/.test(mainjs)) {
+  err('拖动没有安全绳（万一半路没收到"拖完"，窗口会一直黏着光标）');
+} else if (!/blur', \(\) => stopLyricDrag\(\)/.test(mainjs)) {
+  err('拖动时窗口失去焦点不会松手（会一直黏着光标）');
+} else if (!/if \(x === lyricDragLast\.x && y === lyricDragLast\.y\) return;/.test(mainjs)) {
+  err('拖动每帧都会去动窗口（光标没动时也在白干活，会更费 CPU）');
+} else ok('拖动：主进程每 16ms 跟着光标 setBounds + 有安全绳 + 失焦松手');
+
+/* 位置回传必须防抖：拖动时窗口每 16 毫秒动一次，每次都写盘会把拖动拖慢 */
+if (!/function scheduleLyricPosNotify\(\)/.test(mainjs)) err('位置回传没有防抖函数');
+else if (!/lyricWindow\.on\('moved', \(\) => scheduleLyricPosNotify\(\)\)/.test(mainjs)) {
+  err('moved 事件没有走防抖（拖动时会疯狂写盘）');
+} else ok('拖动中的位置回传防抖 140ms（不会边拖边写盘）');
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 24 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

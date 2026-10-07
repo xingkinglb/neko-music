@@ -425,12 +425,10 @@ function registerHandlers() {
     const [w] = lyricWindow.getSize();
     lyricWindow.setSize(w, hh, false);
   });
-  // 拖动中：悬浮窗自己算好了新位置，这里只负责把窗口挪过去
-  ipcMain.on('lyric:move', (_e, x, y) => {
-    if (!lyricWindow || lyricWindow.isDestroyed()) return;
-    if (typeof x !== 'number' || typeof y !== 'number') return;
-    lyricWindow.setPosition(Math.round(x), Math.round(y), false);
-  });
+  // 拖动：进入时把"光标相对窗口左上角的偏移"算出来，之后主进程自己跟着光标挪窗口。
+  // 中间不再逐帧收消息 —— 那正是之前拖动一卡一卡的原因。
+  ipcMain.on('lyric:drag-start', () => startLyricDrag());
+  ipcMain.on('lyric:drag-end',   () => { stopLyricDrag(); scheduleLyricPosNotify(); });
   ipcMain.on('lyric:through', (_e, on) => {
     if (!lyricWindow || lyricWindow.isDestroyed()) return;
     // forward:true —— 开启时把鼠标事件转给下面的软件，等于"点穿过去"
@@ -453,11 +451,14 @@ function registerHandlers() {
 //  四个必须知道的点：
 //    ① transparent:true + frame:false 才能做出"只有字、没有框"的效果；
 //       同时 backgroundColor 必须是 #00000000，否则会是一整块黑。
+//       底板和边框画不画，由页面里的 .bare 类决定（默认不画，只有字）。
 //    ② alwaysOnTop 用 'screen-saver' 这一级 —— 比普通置顶更高，
 //       别的软件全屏播放时也压得住（普通置顶会被全屏程序盖掉）。
-//    ③ 窗口高度不固定：字号 / 行数变了之后由 lyric.js 量完回报（lyric:resize）。
+//    ③ 窗口高度不固定：字号 / 行数 / 工具条大小变了之后由 lyric.js 量完回报（lyric:resize）。
 //    ④ 鼠标穿透（clickThrough）开启后，点击会穿到下面的软件，
 //       此时悬浮窗自己收不到点击 —— 所以关闭穿透的入口只能放在主窗口。
+//    ⑤ 拖动由主进程跟着光标做（startLyricDrag）：整段拖动只通信两次，
+//       逐帧走 IPC 会让拖动一卡一卡。
 // ============================================================
 
 let lyricWindow = null;
@@ -488,6 +489,64 @@ function lyricDefaultBounds() {
 function pushToLyric(channel, payload) {
   if (!lyricWindow || lyricWindow.isDestroyed()) return;
   try { lyricWindow.webContents.send(channel, payload); } catch (_) { /* 窗口正在关闭，忽略 */ }
+}
+
+/* ---- 拖动：由主进程跟着光标走 ----
+   为什么不让悬浮窗自己逐帧算：那样鼠标每动一下都要走一趟
+   "渲染进程算 → IPC → 主进程挪窗口"，鼠标快的时候一秒钟几十上百趟，就成了"一卡一卡"。
+   改成：开始拖的时候算一次"光标相对窗口左上角的偏移"，之后每 16 毫秒读一次真实光标位置，
+   直接 setBounds —— 整段拖动只有开始 / 结束两次通信，中间一帧都不过 IPC。 */
+let lyricDragOffset = null;   // 光标相对窗口左上角的偏移
+let lyricDragSize = null;     // 开始拖那一刻的窗口尺寸（整段拖动里不会变，先记住省得每帧再问系统）
+let lyricDragLast = null;     // 上一次设过去的位置（没变就不再去动窗口）
+let lyricDragTimer = null;    // 跟随用的定时器
+let lyricDragDeadline = 0;    // 安全绳
+
+function startLyricDrag() {
+  if (!lyricWindow || lyricWindow.isDestroyed()) return;
+  const p = screen.getCursorScreenPoint();
+  const b = lyricWindow.getBounds();
+  lyricDragOffset = { x: p.x - b.x, y: p.y - b.y };
+  lyricDragSize = { w: b.width, h: b.height };
+  lyricDragLast = { x: b.x, y: b.y };
+  lyricDragDeadline = Date.now() + 15000;   // 万一"拖完"那句没收到，15 秒后自动松手
+  if (lyricDragTimer) return;
+  lyricDragTimer = setInterval(() => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) { stopLyricDrag(); return; }
+    if (!lyricDragOffset || Date.now() > lyricDragDeadline) {
+      stopLyricDrag();
+      scheduleLyricPosNotify();
+      return;
+    }
+    const cur = screen.getCursorScreenPoint();
+    const x = Math.round(cur.x - lyricDragOffset.x);
+    const y = Math.round(cur.y - lyricDragOffset.y);
+    if (x === lyricDragLast.x && y === lyricDragLast.y) return;   // 没动就别白干活
+    lyricDragLast = { x, y };
+    lyricWindow.setBounds({ x, y, width: lyricDragSize.w, height: lyricDragSize.h }, false);
+  }, 16);
+}
+
+function stopLyricDrag() {
+  if (lyricDragTimer) { clearInterval(lyricDragTimer); lyricDragTimer = null; }
+  lyricDragOffset = null;
+  lyricDragSize = null;
+  lyricDragLast = null;
+}
+
+/* 窗口位置变了 → 隔 140 毫秒再把最终坐标告诉主窗口去存档。
+   为什么不等每次挪动都发：拖动时窗口每 16 毫秒动一下，
+   每次都发消息 + 每次都写盘，光这一项就能把拖动拖慢。 */
+let lyricPosTimer = null;
+function scheduleLyricPosNotify() {
+  clearTimeout(lyricPosTimer);
+  lyricPosTimer = setTimeout(() => {
+    lyricPosTimer = null;
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const [x, y] = lyricWindow.getPosition();
+    try { mainWindow.webContents.send('lyric:moved', { x, y }); } catch (_) { /* 忽略 */ }
+  }, 140);
 }
 
 /* 最后一次推过去的样式和歌词。
@@ -531,18 +590,12 @@ function createLyricWindow(opts) {
   lyricWindow.setAlwaysOnTop(true, 'screen-saver');
   lyricWindow.loadFile(path.join(__dirname, 'ui', 'lyric.html'));
 
-  // 拖动结束后把新坐标告诉主窗口，由它写进存档（下次打开还在原处）
-  lyricWindow.on('moved', () => {
-    if (!lyricWindow || lyricWindow.isDestroyed()) return;
-    const [x, y] = lyricWindow.getPosition();
-    // 顺便同步给悬浮窗自己：万一被系统吸附到边缘，它手里的坐标也能跟着校正
-    pushToLyric('lyric:pos', { x, y });
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try { mainWindow.webContents.send('lyric:moved', { x, y }); } catch (_) { /* 忽略 */ }
-    }
-  });
+  // 位置变了（拖动中会连续触发）→ 防抖后再告诉主窗口存档
+  lyricWindow.on('moved', () => scheduleLyricPosNotify());
 
-  lyricWindow.on('closed', () => { lyricWindow = null; });
+  lyricWindow.on('closed', () => { stopLyricDrag(); lyricWindow = null; });
+  // 拖到一半窗口被抢走焦点（比如误按 Alt+Tab）就松手，不然它会一直黏着光标
+  lyricWindow.on('blur', () => stopLyricDrag());
 
   // 页面画好了再亮相，避免闪一下白块
   lyricWindow.once('ready-to-show', () => {
@@ -550,18 +603,13 @@ function createLyricWindow(opts) {
     pushToLyric('lyric:style', o);
     if (o.clickThrough) lyricWindow.setIgnoreMouseEvents(true, { forward: true });
     lyricWindow.show();
-    // 告诉页面窗口现在在哪 —— 拖动时要以它为基准算偏移
-    const [px, py] = lyricWindow.getPosition();
-    pushToLyric('lyric:pos', { x: px, y: py });
   });
 
-  // 页面脚本跑完了：把之前可能丢掉的消息补发一遍，并同步一次位置
+  // 页面脚本跑完了：把之前可能丢掉的消息补发一遍
   lyricWindow.webContents.once('did-finish-load', () => {
     if (!lyricWindow || lyricWindow.isDestroyed()) return;
     pushToLyric('lyric:style', lastLyricStyle || o);
     if (lastLyricData) pushToLyric('lyric:data', lastLyricData);
-    const [px, py] = lyricWindow.getPosition();
-    pushToLyric('lyric:pos', { x: px, y: py });
   });
 }
 
