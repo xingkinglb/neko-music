@@ -63,8 +63,16 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
    第 2 部分：全局状态与存档
    ============================================================ */
 
-// 存档数据：歌单、收藏、历史
-let DB = { playlists: [], favorites: [], history: [], lastTrack: null };
+// 存档数据：歌单、收藏、历史、外观设置
+let DB = {
+  playlists: [], favorites: [], history: [], lastTrack: null,
+  settings: {
+    theme: 'pink',
+    volume: 80,
+    bg:    { file: null, dim: 0.55, blur: 0 },
+    glass: { blur: 18, alpha: 0.55 },
+  },
+};
 
 // 当前播放队列
 let queue = { tracks: [], index: -1, name: '' };
@@ -78,6 +86,63 @@ async function persist() {
     await window.neko.saveData(DB);
   } catch (e) {
     console.error('保存失败', e);
+  }
+}
+
+let persistTimer = null;
+/**
+ * "等一下再存"。拖滑杆时每一像素都会触发一次变更，
+ * 要是每次都写盘，硬盘会被刷爆。攒 300 毫秒一起写就够了。
+ */
+function persistLater() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(persist, 300);
+}
+
+/** 外观设置的默认值，用来给老存档补洞 */
+const DEFAULT_SETTINGS = {
+  theme: 'pink',
+  volume: 80,
+  bg:    { file: null, dim: 0.55, blur: 0 },
+  glass: { blur: 18, alpha: 0.55 },
+};
+
+/** 补齐 DB.settings 里缺的字段（老版本存档没有这一项） */
+function migrateSettings() {
+  const old = (DB.settings && typeof DB.settings === 'object') ? DB.settings : {};
+  DB.settings = {
+    theme:  DEFAULT_SETTINGS.theme,
+    volume: DEFAULT_SETTINGS.volume,
+    bg:     Object.assign({}, DEFAULT_SETTINGS.bg,    old.bg    || {}),
+    glass:  Object.assign({}, DEFAULT_SETTINGS.glass, old.glass || {}),
+  };
+  if (typeof old.theme === 'string') DB.settings.theme = old.theme;
+  if (typeof old.volume === 'number') DB.settings.volume = old.volume;
+}
+
+/** 把 DB.settings 里的外观设置"刷"到界面上 */
+function applyAppearance() {
+  const s = DB.settings;
+  const root = document.documentElement;
+
+  // 1) 主题（给 <html> 打标记，CSS 里的 [data-theme="xxx"] 就会生效）
+  root.dataset.theme = s.theme || 'pink';
+
+  // 2) 毛玻璃
+  root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 18) + 'px');
+  root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));
+
+  // 3) 背景图
+  const layer = $('bgLayer');
+  if (layer) {
+    const has = !!s.bg.file;
+    layer.style.setProperty('--bg-image', has ? `url("bg://local/${s.bg.file}")` : 'none');
+    layer.style.setProperty('--bg-dim',  String(s.bg.dim  ?? 0.55));
+    // blur(0px) 会让多余的图层一直占着显卡，直接用 none 更省
+    const b = Number(s.bg.blur) || 0;
+    layer.style.setProperty('--bg-blur', b > 0 ? b + 'px' : '0px');
+    layer.style.filter = b > 0 ? `blur(${b}px)` : 'none';
+    document.body.classList.toggle('has-bg', has);
   }
 }
 
@@ -141,7 +206,7 @@ async function playAt(index) {
     // B 站的真实地址带防盗链，主进程已经帮我们包装成 bili:// 内部地址。
     const info = await api('audioUrl', track.bvid, track.cid);
     audio.src = info.url;
-    audio.volume = ($('volume').value || 80) / 100;
+    audio.volume = (DB.settings.volume ?? 80) / 100;
 
     await audio.play();
 
@@ -493,6 +558,7 @@ function renderAll() {
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'history') renderHistory();
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
+  else if (currentView === 'parsed') renderParsed();
 }
 
 /* ============================================================
@@ -528,6 +594,140 @@ function deletePlaylist(id) {
   persist();
   currentView = 'search';
   renderAll();
+}
+
+/* ============================================================
+   第 4.8 部分：设置面板（外观 + B 站 Cookie）
+   ============================================================ */
+
+/** 显示设置面板 */
+function openSettings() {
+  $('modalMask').classList.add('show');
+  syncSettingsUI();
+}
+function closeSettings() {
+  $('modalMask').classList.remove('show');
+}
+
+/** 打开面板前，先把存档里的值回填到各个控件上 */
+function syncSettingsUI() {
+  const s = DB.settings;
+
+  $('themeGrid').querySelectorAll('.swatch').forEach((b) => {
+    b.classList.toggle('on', b.dataset.theme === s.theme);
+  });
+
+  $('bgHint').textContent = s.bg.file ? '当前：自定义背景 ✔' : '当前：默认深色背景';
+
+  $('rngDim').value = Math.round((s.bg.dim ?? 0.55) * 100);
+  $('valDim').textContent = $('rngDim').value + '%';
+
+  $('rngBgBlur').value = s.bg.blur ?? 0;
+  $('valBgBlur').textContent = $('rngBgBlur').value + 'px';
+
+  $('rngGlassBlur').value = s.glass.blur ?? 18;
+  $('valGlass').textContent = $('rngGlassBlur').value + 'px';
+
+  $('rngGlassAlpha').value = Math.round((s.glass.alpha ?? 0.55) * 100);
+  $('valAlpha').textContent = $('rngGlassAlpha').value + '%';
+
+  // Cookie 只在还没填过的时候拉一次，避免覆盖用户正在编辑的内容
+  if (!$('cookieInput').value) {
+    api('cookieGet').then((t) => { $('cookieInput').value = t || ''; }).catch(() => {});
+  }
+}
+
+function bindSettings() {
+  /* ---- 开关 ---- */
+  $('btnSettings').addEventListener('click', openSettings);
+  $('btnCloseModal').addEventListener('click', closeSettings);
+  $('btnDoneModal').addEventListener('click', closeSettings);
+  // 点面板外的暗色区域也能关
+  $('modalMask').addEventListener('click', (e) => {
+    if (e.target.id === 'modalMask') closeSettings();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeSettings();
+  });
+
+  /* ---- 左右两个 Tab ---- */
+  $('modalTabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('.tab');
+    if (!tab) return;
+    $('modalTabs').querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
+    document.querySelectorAll('.pane').forEach((p) => {
+      p.classList.toggle('active', p.dataset.pane === tab.dataset.tab);
+    });
+  });
+
+  /* ---- 主题色块 ---- */
+  $('themeGrid').addEventListener('click', (e) => {
+    const btn = e.target.closest('.swatch');
+    if (!btn) return;
+    DB.settings.theme = btn.dataset.theme;
+    applyAppearance();
+    syncSettingsUI();
+    persist();
+  });
+
+  /* ---- 背景图 ---- */
+  $('btnPickBg').addEventListener('click', async () => {
+    try {
+      const res = await api('pickBackground');
+      if (!res) return;                       // 用户点了取消
+      if (res.error) { toast(res.error); return; }
+      DB.settings.bg.file = res.file;
+      applyAppearance(); syncSettingsUI(); persist();
+      toast(res.sizeMB > 20
+        ? `背景已换（${res.sizeMB}MB，图有点大，可能会略卡）`
+        : '背景已换 ✔');
+    } catch (err) {
+      toast('选图失败：' + err.message);
+    }
+  });
+
+  $('btnClearBg').addEventListener('click', async () => {
+    try { await api('clearBackground'); } catch (e) { /* 目录本来就是空的 */ }
+    DB.settings.bg.file = null;
+    applyAppearance(); syncSettingsUI(); persist();
+    toast('已恢复默认背景');
+  });
+
+  /* ---- 四根调节杆：拖动时就看到效果，停手 300ms 才写盘 ---- */
+  function bindRange(rangeId, labelId, unit, apply) {
+    $(rangeId).addEventListener('input', (e) => {
+      const v = Number(e.target.value);
+      $(labelId).textContent = unit === '%' ? v + '%' : v + 'px';
+      apply(v);
+      applyAppearance();
+      persistLater();
+    });
+  }
+  bindRange('rngDim',        'valDim',    '%',  (v) => { DB.settings.bg.dim = v / 100; });
+  bindRange('rngBgBlur',     'valBgBlur', 'px', (v) => { DB.settings.bg.blur = v; });
+  bindRange('rngGlassBlur',  'valGlass',  'px', (v) => { DB.settings.glass.blur = v; });
+  bindRange('rngGlassAlpha', 'valAlpha',  '%',  (v) => { DB.settings.glass.alpha = v / 100; });
+
+  /* ---- 恢复默认外观 ---- */
+  $('btnResetAppearance').addEventListener('click', () => {
+    DB.settings.theme = 'pink';
+    DB.settings.bg    = { file: null, dim: 0.55, blur: 0 };
+    DB.settings.glass = { blur: 18, alpha: 0.55 };
+    api('clearBackground').catch(() => {});
+    applyAppearance(); syncSettingsUI(); persist();
+    toast('外观已恢复默认');
+  });
+
+  /* ---- 保存 Cookie ---- */
+  $('btnSaveCookie').addEventListener('click', async () => {
+    const text = $('cookieInput').value.trim();
+    try {
+      await api('cookieSet', text);
+      toast(text ? '已保存 ✔ 搜索会更稳定' : '已清空 Cookie');
+    } catch (err) {
+      toast('保存失败：' + err.message);
+    }
+  });
 }
 
 /* ============================================================
@@ -568,24 +768,8 @@ function bindEvents() {
     renderAll();
   });
 
-  /* ---- 设置：填 B 站 Cookie ---- */
-  $('btnSettings').addEventListener('click', async () => {
-    const cur = await api('cookieGet');
-    const text = prompt(
-      '填 B 站登录 Cookie，能大幅减少"搜索被限流"。\n\n' +
-      '怎么拿：\n' +
-      '1. 用浏览器打开 bilibili.com 并登录\n' +
-      '2. 按 F12 → 点「Application / 应用程序」\n' +
-      '3. 左边找 Cookies → www.bilibili.com\n' +
-      '4. 找到名叫 SESSDATA 的一行，复制它的值\n\n' +
-      '粘贴到这里即可（也可以把整串 Cookie 都贴进来）。\n' +
-      '不填也能用，只是偶尔会撞上限流。',
-      cur || ''
-    );
-    if (text === null) return;
-    await api('cookieSet', text.trim());
-    toast(text.trim() ? '已保存 ✔ 搜索会更稳定' : '已清空 Cookie');
-  });
+  /* ---- 设置面板（外观 + Cookie） ---- */
+  bindSettings();
 
   /* ---- 新建歌单 ---- */
   $('btnNewPlaylist').addEventListener('click', async () => {
@@ -616,8 +800,10 @@ function bindEvents() {
       return;
     }
 
-    // 块级按钮
-    const id = e.target.id;
+    // 块级按钮（用 closest('[id]') 而不是直接 e.target.id，
+    // 这样按钮里万一包了子元素，点子元素也能正确命中按钮本身）
+    const idEl = e.target.closest('[id]');
+    const id = idEl ? idEl.id : '';
     if (id === 'btnPlayAll') { playTracks(searchResults, 0, `搜索：${searchKeyword}`); return; }
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
@@ -677,17 +863,61 @@ function bindEvents() {
     if (t) toggleFav(t);
   });
 
-  /* ---- 进度条：点击跳转 ---- */
-  $('progress').addEventListener('click', (e) => {
-    if (!audio.duration || !isFinite(audio.duration)) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    audio.currentTime = ratio * audio.duration;
+  /* ---- 进度条：可以按住拖动 ---- */
+  // 关键思路：拖动过程中**只改画面**，真正的跳转留到松手那一刻。
+  // 因为 B 站的音频是边下边播的，拖动中途每动一下都去跳音频，
+  // 会疯狂发网络请求，直接卡成幻灯片。
+  let seeking = false;   // 现在是不是正按着在拖
+  let seekRatio = 0;     // 拖到了整条进度的百分之多少（0~1）
+
+  /** 鼠标位置换算成 0~1 的比例 */
+  function ratioFromEvent(e) {
+    const rect = $('progress').getBoundingClientRect();
+    return Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  }
+
+  /** 只画画面、不动音频 —— 拖动时的"预览" */
+  function paintSeek(ratio) {
+    $('progressFill').style.width = (ratio * 100) + '%';
+    $('progressKnob').style.left  = (ratio * 100) + '%';
+    $('timeNow').textContent = fmtTime(ratio * totalDuration());
+  }
+
+  const progress = $('progress');
+
+  progress.addEventListener('pointerdown', (e) => {
+    if (!totalDuration()) return;
+    seeking = true;
+    seekRatio = ratioFromEvent(e);
+    progress.classList.add('dragging');
+    // 捕获指针：就算手滑拖到进度条外面（甚至拖出窗口一点点），也照样跟手
+    progress.setPointerCapture(e.pointerId);
+    paintSeek(seekRatio);
   });
 
-  /* ---- 音量 ---- */
+  progress.addEventListener('pointermove', (e) => {
+    if (!seeking) return;
+    seekRatio = ratioFromEvent(e);
+    paintSeek(seekRatio);
+  });
+
+  function endSeek(e) {
+    if (!seeking) return;
+    seeking = false;
+    progress.classList.remove('dragging');
+    try { progress.releasePointerCapture(e.pointerId); } catch (_) { /* 指针已经没了，忽略 */ }
+    const d = (audio.duration && isFinite(audio.duration)) ? audio.duration : totalDuration();
+    if (d) audio.currentTime = seekRatio * d;   // 松手才真的跳
+  }
+  progress.addEventListener('pointerup', endSeek);
+  progress.addEventListener('pointercancel', endSeek);
+
+  /* ---- 音量：拖动即时生效，停手后写进存档（下次打开还是这个值） ---- */
   $('volume').addEventListener('input', (e) => {
-    audio.volume = e.target.value / 100;
+    const v = Number(e.target.value);
+    audio.volume = v / 100;
+    DB.settings.volume = v;
+    persistLater();
   });
 
   /* ---- 音频事件 ---- */
@@ -696,6 +926,8 @@ function bindEvents() {
   audio.addEventListener('waiting', () => { $('btnPlay').textContent = '⏳'; });
 
   audio.addEventListener('timeupdate', () => {
+    // 正在拖动时不要抢着刷新画面，否则进度条会被自己拖回去，疯狂抖动
+    if (seeking) return;
     const d = totalDuration();
     if (!d) return;
     const ratio = Math.min(1, audio.currentTime / d);
@@ -799,13 +1031,22 @@ async function boot() {
     console.error('读取存档失败', e);
   }
 
-  // 2) 绑事件
+  // 2) 补好外观设置，并把它刷到界面上（主题、背景、毛玻璃）
+  migrateSettings();
+  applyAppearance();
+
+  // 2.5) 音量记忆：把上次退出时的音量填回滑块和播放器
+  const vol = DB.settings.volume ?? 80;
+  $('volume').value = vol;
+  audio.volume = vol / 100;
+
+  // 3) 绑事件
   bindEvents();
 
-  // 3) 画界面
+  // 4) 画界面
   renderAll();
 
-  // 4) 如果上次有在听的歌，把信息显示在底部（不自动播放，免得吓一跳）
+  // 5) 如果上次有在听的歌，把信息显示在底部（不自动播放，免得吓一跳）
   if (DB.lastTrack) {
     $('npTitle').textContent = DB.lastTrack.title;
     $('npSub').textContent = DB.lastTrack.author || '';

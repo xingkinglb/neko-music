@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' bili:; img-src 'self' https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+        content="default-src 'self' bili:; img-src 'self' bg: https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
   <title>Neko Music</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -15,6 +15,14 @@
   右边 = 主区域（顶部搜索栏 + 中间内容列表）
   底部 = 播放控制条
 -->
+<!--
+  背景层：整个界面的"壁纸"。
+  它是 body 的第一个孩子，压在 .app 下面（z-index 0 vs 1）。
+  inset 故意写成 -24px（比窗口大一圈），是为了藏住模糊时边缘露出的白边。
+  注意：它只有 pointer-events:none，永远不会挡住鼠标点击。
+-->
+<div class="bg-layer" id="bgLayer"></div>
+
 <div class="app">
 
   <!-- ============ 左侧边栏 ============ -->
@@ -45,7 +53,7 @@
     </div>
 
     <div class="sidebar-foot">
-      <button class="ghost-btn" id="btnSettings" style="width:100%">⚙ 设置（填 Cookie）</button>
+      <button class="ghost-btn" id="btnSettings" style="width:100%">⚙ 设置</button>
       <div class="tip">按 F12 可打开调试工具</div>
     </div>
   </aside>
@@ -112,6 +120,98 @@
 
 <!-- 轻提示气泡 -->
 <div class="toast" id="toast"></div>
+
+<!--
+  设置面板：Cookie 和外观合并在这里。
+  默认隐藏（CSS 里 opacity:0 + 不可点），点左下角「⚙ 设置」才淡出来。
+-->
+<div class="modal-mask" id="modalMask">
+  <div class="modal">
+
+    <div class="modal-head">
+      <span class="modal-title">设置</span>
+      <button class="modal-close" id="btnCloseModal" title="关闭">✕</button>
+    </div>
+
+    <div class="modal-tabs" id="modalTabs">
+      <button class="tab active" data-tab="appearance">外观</button>
+      <button class="tab" data-tab="bilibili">B 站</button>
+    </div>
+
+    <div class="modal-body">
+
+      <!-- ========== 外观 ========== -->
+      <div class="pane active" data-pane="appearance">
+
+        <div class="field">
+          <div class="field-label">主题色</div>
+          <div class="theme-grid" id="themeGrid">
+            <button class="swatch" data-theme="pink"><i></i>樱粉</button>
+            <button class="swatch" data-theme="violet"><i></i>星夜紫</button>
+            <button class="swatch" data-theme="green"><i></i>薄荷绿</button>
+            <button class="swatch" data-theme="amber"><i></i>落日橙</button>
+            <button class="swatch" data-theme="cyan"><i></i>晴空蓝</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">背景图片</div>
+          <div class="btn-row">
+            <button class="ghost-btn" id="btnPickBg">选择图片</button>
+            <button class="ghost-btn" id="btnClearBg">清除背景</button>
+          </div>
+          <div class="field-hint" id="bgHint">当前：默认深色背景</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">背景压暗 <b id="valDim">55%</b></div>
+          <input type="range" id="rngDim" min="0" max="90" value="55" />
+          <div class="field-hint">数值越大背景越暗，文字越清楚</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">背景模糊 <b id="valBgBlur">0px</b></div>
+          <input type="range" id="rngBgBlur" min="0" max="24" value="0" />
+          <div class="field-hint">不喜欢太花哨的背景，可以糊掉它</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">毛玻璃强度 <b id="valGlass">18px</b></div>
+          <input type="range" id="rngGlassBlur" min="0" max="40" value="18" />
+        </div>
+
+        <div class="field">
+          <div class="field-label">玻璃透明度 <b id="valAlpha">55%</b></div>
+          <input type="range" id="rngGlassAlpha" min="10" max="95" value="55" />
+          <div class="field-hint">调低 = 更透，能看到更多背景</div>
+        </div>
+
+        <button class="ghost-btn" id="btnResetAppearance">恢复默认外观</button>
+      </div>
+
+      <!-- ========== B 站 ========== -->
+      <div class="pane" data-pane="bilibili">
+        <div class="field">
+          <div class="field-label">登录 Cookie（填 SESSDATA）</div>
+          <textarea id="cookieInput" rows="7" spellcheck="false"
+            placeholder="把浏览器里复制到的 SESSDATA 值粘贴到这里，也可以把整串 Cookie 都贴进来"></textarea>
+          <div class="field-hint">
+            怎么拿：浏览器打开 bilibili.com 并登录 → 按 F12 → 「Application / 应用程序」
+            → 左侧 Cookies → www.bilibili.com → 找到 <b>SESSDATA</b> 那一行复制它的值。<br>
+            填了之后搜索会稳定很多。不填也能用，只是偶尔要重试。<br>
+            🔒 只存在你自己电脑里，不会上传到任何地方。
+          </div>
+        </div>
+        <button class="primary-btn" id="btnSaveCookie">保存 Cookie</button>
+      </div>
+
+    </div>
+
+    <div class="modal-foot">
+      <button class="ghost-btn" id="btnDoneModal">完成</button>
+    </div>
+  </div>
+</div>
 
 <!-- 隐藏的音频播放核心 -->
 <audio id="audio"></audio>

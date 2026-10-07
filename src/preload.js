@@ -35,6 +35,13 @@ contextBridge.exposeInMainWorld('neko', {
   cookieGet: () => ipcRenderer.invoke('cookie:get'),
   cookieSet: (text) => ipcRenderer.invoke('cookie:set', text),
 
+  // ---------- 外观 ----------
+  // 弹出系统文件选择框，让用户挑一张背景图（内部会复制到应用目录）
+  pickBackground: () => ipcRenderer.invoke('bg:pick'),
+
+  // 清掉已选的背景图
+  clearBackground: () => ipcRenderer.invoke('bg:clear'),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),
