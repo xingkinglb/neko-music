@@ -106,6 +106,23 @@
       <path d="M20.4 12.6V14a4 4 0 0 1-4 4H3.6"/>
       <path d="M11.5 10.9 12.9 10v5"/>
     </symbol>
+    <!-- 顺序播放：三条线 + 右箭头 = "一条一条往下走，走完就停" -->
+    <symbol id="i-order" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 6h11"/>
+      <path d="M4 12h11"/>
+      <path d="M4 18h7"/>
+      <path d="m17 9 3 3-3 3"/>
+    </symbol>
+    <!-- 合集里单集的"启用"：圈 + 对勾 -->
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="8.4"/>
+      <path d="m8.4 12.3 2.5 2.5 4.7-5.1"/>
+    </symbol>
+    <!-- 合集里单集的"禁用"：圈 + 斜杠 -->
+    <symbol id="i-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="8.4"/>
+      <path d="m8.6 15.4 6.8-6.8"/>
+    </symbol>
 
     <!-- ---- 音量：喇叭固定，右边的弧线/叉按音量大小换 ---- -->
     <symbol id="i-vol-2" viewBox="0 0 24 24">
@@ -278,11 +295,15 @@
     <!-- 中：播放控制 -->
     <div class="controls">
       <div class="ctrl-row">
-        <button class="ctrl-btn" id="btnShuffle" title="随机播放"><svg class="ic"><use href="#i-shuffle"/></svg></button>
+        <!--
+          播放模式：一个按钮循环切换四种模式（列表循环 → 单曲循环 → 随机 → 顺序）。
+          以前左边一个"随机"、右边一个"循环"，两个能同时点亮，语义打架 —— 现在合成一个。
+          图标会跟着当前模式变，悬停提示里写着当前是什么模式。
+        -->
+        <button class="ctrl-btn" id="btnMode" title="播放模式：列表循环（点击切换）"><svg class="ic"><use href="#i-repeat"/></svg></button>
         <button class="ctrl-btn" id="btnPrev" title="上一首"><svg class="ic"><use href="#i-prev"/></svg></button>
         <button class="ctrl-btn big" id="btnPlay" title="播放/暂停"><svg class="ic"><use href="#i-play"/></svg></button>
         <button class="ctrl-btn" id="btnNext" title="下一首"><svg class="ic"><use href="#i-next"/></svg></button>
-        <button class="ctrl-btn" id="btnLoop" title="循环模式"><svg class="ic"><use href="#i-repeat"/></svg></button>
       </div>
       <div class="progress-row">
         <span class="time" id="timeNow">0:00</span>
@@ -375,6 +396,8 @@
       <button class="modal-close" id="btnCloseCollect" title="收起（Esc）">✕</button>
     </div>
     <div class="collect-bar">
+      <!-- 一键开关：整条合集里"想听的"和"不想听的"一次切完 -->
+      <button class="ghost-btn" id="btnCollectToggleAll">全部禁用</button>
       <button class="ghost-btn" id="btnPlayCollect">播放全部</button>
       <button class="ghost-btn" id="btnQueueCollect">加入队列</button>
       <input class="collect-search" id="collectSearch" placeholder="搜索选集…" autocomplete="off" />
@@ -399,7 +422,7 @@
       <button class="modal-close" id="btnCloseQueue" title="收起（Esc）">✕</button>
     </div>
     <div class="collect-bar">
-      <button class="ghost-btn" id="btnQueueShuffle">随机打乱</button>
+      <button class="ghost-btn" id="btnQueueShuffle">打乱顺序</button>
       <button class="ghost-btn" id="btnQueueClear">清空队列</button>
       <input class="collect-search" id="queueSearch" placeholder="在队列里找…" autocomplete="off" />
     </div>

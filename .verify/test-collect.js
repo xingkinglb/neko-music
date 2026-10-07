@@ -74,6 +74,16 @@ app.whenReady().then(async () => {
 
   await win.loadFile(path.join(ROOT, 'src', 'ui', 'index.html'));
   await sleep(1000);
+  /* ★ 沙箱没有音频设备：把 play 换成直接成功、把 src 的写入掐掉。
+     否则每首歌都会"播放失败 → 900ms 后自动跳下一首"，一路连环跳下去，
+     队列下标就变成随机的了（那是环境产物，不是应用缺陷）。 */
+  await win.webContents.executeJavaScript(`(() => {
+    const a = document.getElementById('audio');
+    a.play = () => Promise.resolve();
+    Object.defineProperty(a, 'src', { configurable: true, get: () => '', set: () => {} });
+    return true;
+  })()`);
+  await sleep(150);
 
   const clickAt = async (x, y) => {
     win.webContents.sendInputEvent({ type: 'mouseMove', x, y });
@@ -207,7 +217,10 @@ app.whenReady().then(async () => {
   if (queued.len === 134) ok('「加入队列」把整段 134 首塞进队列');
   else bad('加入队列数量不对：' + queued.len);
 
-  /* ---- 假阳性：标题像合集、其实只有 1P —— 点徽章应优雅回退成直接播 ---- */
+  /* ---- 假阳性：标题像合集、其实只有 1P —— 点徽章应优雅回退成直接播 ----
+     ★ 队列现在是"当前列表摊平后的结果"：列表里那条 134 集合集会摊成 134 首，
+       所以队列 = 134 + 其余 2 行 = 136。这跟"点一下只播它自己"不矛盾：
+       播放条上显示的必须是被点的那一行（无损精选 1首）。 */
   await evalJS(`queue = { tracks: [], index: -1, name: '' }; renderSearch();`);
   await sleep(200);
   const fb = await evalJS(`(() => {
@@ -222,10 +235,12 @@ app.whenReady().then(async () => {
     show: document.getElementById('collectMask').classList.contains('show'),
     np: document.getElementById('npTitle').textContent,
     queueLen: queue.tracks.length,
+    idx: queue.index,
   })`);
   say('\n--- 假阳性（标题像合集、其实 1P）---');
-  say('  面板显示=' + fallback.show + '，播放条「' + fallback.np + '」，队列=' + fallback.queueLen);
-  if (!fallback.show && fallback.queueLen === 3) ok('其实是单P时收面板、直接播（不报错、不留空面板）');
+  say('  面板显示=' + fallback.show + '，播放条「' + fallback.np + '」，队列=' + fallback.queueLen + '（下标 ' + fallback.idx + '）');
+  if (!fallback.show && fallback.np === '无损精选 1首' && fallback.queueLen === 136)
+    ok('其实是单P时收面板、直接播这一首（队列按当前列表摊平：134 集合集 + 2 行 = 136）');
   else bad('假阳性回退异常：' + JSON.stringify(fallback));
 
   /* ---- 截图 ---- */

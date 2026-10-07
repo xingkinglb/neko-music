@@ -152,7 +152,13 @@ const DEFAULT_SETTINGS = {
   glass: { blur: 18, alpha: 0.55 },
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
+  playMode: 'list',   // 播放模式：list 列表循环 / one 单曲循环 / shuffle 随机 / order 顺序
 };
+
+/** 这是一个合法的播放模式吗（以 PLAY_MODES 为唯一准绳，避免两处清单对不上） */
+function isPlayModeId(v) {
+  return PLAY_MODES.some((m) => m.id === v);
+}
 
 /** 补齐 DB.settings 里缺的字段（老版本存档没有这一项） */
 function migrateSettings() {
@@ -164,6 +170,8 @@ function migrateSettings() {
     glass:  Object.assign({}, DEFAULT_SETTINGS.glass, old.glass || {}),
     autoLyric: typeof old.autoLyric === 'boolean' ? old.autoLyric : DEFAULT_SETTINGS.autoLyric,
     lyricWin: null,   // 下面单独补（要逐项夹范围，不能整块照抄）
+    // 播放模式：老存档（以前是"随机开关 + 循环开关"两个字段）里没有这一项，就默认列表循环
+    playMode: isPlayModeId(old.playMode) ? old.playMode : DEFAULT_SETTINGS.playMode,
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -224,8 +232,42 @@ function applyAppearance() {
    ============================================================ */
 
 const audio = $('audio');
-let loopMode = 'list';   // list = 列表循环, one = 单曲循环, shuffle = 随机
-let shuffled = false;
+
+/**
+ * 播放模式：四种，用一个按钮循环切换。
+ * 以前是「随机」+「循环」两个独立按钮（能同时点亮，语义互相打架），现在合成一个状态机：
+ *   list    列表循环：播完最后一首回到第一首（默认）
+ *   one     单曲循环：一首反复播
+ *   shuffle 随机播放：下一首从队列里随机挑
+ *   order   顺序播放：播完最后一首就停
+ */
+const PLAY_MODES = [
+  { id: 'list',    icon: 'i-repeat',  name: '列表循环' },
+  { id: 'one',     icon: 'i-repeat1', name: '单曲循环' },
+  { id: 'shuffle', icon: 'i-shuffle', name: '随机播放' },
+  { id: 'order',   icon: 'i-order',   name: '顺序播放' },
+];
+let playMode = 'list';
+
+/**
+ * 播放顺序栈：记"刚才播的是队列里第几个"。
+ * 随机模式下"上一首"就靠它回退到真正听过的那首（不然随机模式里的上一首没有意义）。
+ */
+let playStack = [];
+
+/** 设置播放模式并刷新按钮外观（save=true 时写进存档，下次打开还是这个模式） */
+function setPlayMode(id, save) {
+  const m = PLAY_MODES.find((x) => x.id === id) || PLAY_MODES[0];
+  playMode = m.id;
+  const btn = $('btnMode');
+  if (btn) {
+    btn.innerHTML = ic(m.icon);
+    btn.title = `播放模式：${m.name}（点击切换）`;
+    // 顺序播放 = 什么循环都没开，不强亮；其余三种都点亮，一眼能看出"开着点什么"
+    btn.classList.toggle('on', m.id !== 'order');
+  }
+  if (save) { DB.settings.playMode = m.id; persistLater(); }
+}
 
 /** 判断两首歌是不是同一首（用 bvid + cid 当身份证） */
 function sameTrack(a, b) {
@@ -320,24 +362,74 @@ async function playAt(index) {
   }
 }
 
-/** 切上一首 / 下一首 */
-function next(step) {
-  if (!queue.tracks.length) return;
-  let i;
-  if (shuffled && step > 0) {
-    i = Math.floor(Math.random() * queue.tracks.length);
-  } else {
-    i = (queue.index + step + queue.tracks.length) % queue.tracks.length;
+/** 切到队列里的第 index 首，并把"刚才那首"记进顺序栈（随机模式的"上一首"要用） */
+function goTo(index) {
+  if (index < 0 || index >= queue.tracks.length) return;
+  if (index !== queue.index && queue.index >= 0) {
+    playStack.push(queue.index);
+    if (playStack.length > 100) playStack.shift();
   }
-  playAt(i);
+  playAt(index);
 }
 
-/** 把一组曲目设为播放队列并开始播放 */
-function playTracks(tracks, startIndex = 0, name = '') {
-  if (!tracks || !tracks.length) return;
-  queue = { tracks, index: -1, name };
-  playAt(startIndex);
+/** 顺序播放走到最后一首：停下（不绕回第一首） */
+function stopAtEnd() {
+  audio.pause();
+  toast('已经是最后一首了（顺序播放）');
 }
+
+/** 切上一首 / 下一首 —— 具体怎么走由当前播放模式决定 */
+function next(step) {
+  const n = queue.tracks.length;
+  if (!n) return;
+
+  // 随机播放：下一首从队列里随机挑，连点也不会连着两次同一首
+  if (playMode === 'shuffle' && step > 0) {
+    if (n === 1) { playAt(0); return; }
+    let i = queue.index;
+    for (let guard = 0; guard < 20 && i === queue.index; guard++) i = Math.floor(Math.random() * n);
+    goTo(i);
+    return;
+  }
+
+  const i = queue.index + step;
+  if (i >= n) {
+    if (playMode === 'order') { stopAtEnd(); return; }
+    goTo(0);
+    return;
+  }
+  if (i < 0) {
+    if (playMode === 'order') return;   // 顺序播放：第一首再往前也不绕到末尾
+    goTo(n - 1);
+    return;
+  }
+  goTo(i);
+}
+
+/** 「上一首」：随机模式按真正听过的顺序回退，其它模式按队列位置回退 */
+function prevTrack() {
+  if (playMode === 'shuffle') {
+    while (playStack.length) {
+      const i = playStack.pop();
+      if (queue.tracks[i]) { playAt(i); return; }
+    }
+  }
+  next(-1);
+}
+
+/**
+ * 把一组曲目设为播放队列并开始播放。
+ * ★ 队列存的是**副本**：源列表（收藏 / 歌单 / 搜索结果）之后怎么增删，
+ *   都不会悄悄改掉正在播的这一份。想同步，重新点一次"播放全部"。
+ */
+function playTracks(tracks, startIndex = 0, name = '') {
+  if (!tracks || !tracks.length) return false;
+  queue = { tracks: tracks.slice(), index: -1, name };
+  playStack = [];
+  playAt(Math.max(0, startIndex));
+  return true;
+}
+
 
 /* ============================================================
    第 4 部分：页面渲染
@@ -347,12 +439,11 @@ const content = () => $('content');
 
 /** 渲染一首歌的一行 */
 function trackRow(track, i, opts = {}) {
-  const playing = sameTrack(track, queue.tracks[queue.index]);
+  const playing = rowIsPlaying(track);
   const liked = isFav(track);
   // 长视频 / 疑似合集，在行上放一个「选集 N」小徽章当入口（详情见 expandCollection）
   const showBadge = opts.expand !== false && maybeCollection(track);
-  const badgeLabel = track.parts > 1 ? `选集 ${track.parts}`
-    : track.seasonCount > 1 ? `合集 ${track.seasonCount}` : '选集';
+  const badgeLabel = collectionBadgeLabel(track);
 
   // 作者名：知道 UP 的 mid 就做成可点的（点开看这个 UP 的全部视频），
   // 老数据 / 收藏夹导入来的没有 mid，就还是普通文字，不会点出个空页面。
@@ -405,13 +496,193 @@ function trackListHTML(tracks, opts = {}) {
 /** 猜这行是不是"多合一"长视频（搜索结果拿不到分P数，先用标题 + 时长猜） */
 const COLLECT_HINT_RE = /合集|合辑|歌单|串烧|连播|选集|\d+\s*首/;
 function maybeCollection(track) {
+  if (!track) return false;
   if (track.parts > 1) return true;          // 已经查过，确实是分P
   if (track.seasonCount > 1) return true;    // 已经查过，确实是合集
+  if (isCollectPart(track)) return false;    // 它自己就是某合集里的一集，不用再给一个入口
   if ((track.duration || 0) >= 30 * 60) return true;   // 半小时以上，多半是长合集
   return COLLECT_HINT_RE.test(track.title || '');
 }
 
-let collectState = null;   // 面板开着时才有值：{ title, sub, entries }
+/**
+ * 这一行本身是不是"某个合集里的一集"。
+ * 合集里的分P共用同一个 bvid，所以光看 bvid 分不出来 —— 要拿 cid 去摊开的曲目表里比对。
+ * 分出来有什么用：这些行不该再显示父合集的「选集 132/134」徽章（那是整条的数字，挂在每一集上只会让人看不懂）。
+ */
+function isCollectPart(track) {
+  const cached = DB.collectParts && DB.collectParts[track.bvid];
+  return !!(cached && cached.length > 1 && cached.some((e) => sameTrack(e, track)));
+}
+
+/**
+ * 这一行算不算"正在播放"。
+ * 合集展开后队列里躺的是它的一集一集，所以不能只比 cid：
+ * 正在播这个合集的第 5 集时，外面那一整行也要保持高亮（否则界面上没有任何一行是亮的）。
+ */
+function rowIsPlaying(track) {
+  const cur = queue.tracks[queue.index];
+  if (!cur || !track) return false;
+  if (sameTrack(track, cur)) return true;
+  if (!track.bvid || !cur.bvid) return false;
+  // 同一支视频的不同分P：正在播其中一集时，相关的行也算"在播"
+  if (track.bvid === cur.bvid) return true;
+  // 合集行 ↔ 它的某一集：合集的每一集自带 bvid，只能拿摊开的曲目表来认
+  const parts = DB.collectParts[track.bvid];
+  if (parts && parts.some((e) => sameTrack(e, cur))) return true;
+  const curParts = DB.collectParts[cur.bvid];
+  return !!(curParts && curParts.some((e) => sameTrack(e, track)));
+}
+
+/** 这个合集到底有多少集（优先用查过一次的结果，其次用本地缓存） */
+function collectionSize(track) {
+  if (track.parts > 1) return { n: track.parts, kind: '选集' };
+  if (track.seasonCount > 1) return { n: track.seasonCount, kind: '合集' };
+  if (isCollectPart(track)) return { n: 0, kind: '选集' };   // 它自己是一集，不报父合集的总数
+  const cached = DB.collectParts[track.bvid];
+  if (cached && cached.length > 1) return { n: cached.length, kind: track.seasonTitle ? '合集' : '选集' };
+  return { n: 0, kind: '选集' };
+}
+
+/** 徽章文字：没查过是「选集」；查过是「选集 134」；有禁用时是「选集 12/134」 */
+function collectionBadgeLabel(track) {
+  const { n, kind } = collectionSize(track);
+  if (!n) return '选集';
+  const on = enabledCount(track);
+  return (on != null && on < n) ? `${kind} ${on}/${n}` : `${kind} ${n}`;
+}
+
+/* ------------------------------------------------------------
+   合集里"单集启用 / 禁用"
+   ------------------------------------------------------------
+   一条合集动辄几十上百集，用户不可能整条都想听，所以每一集都能单独关掉。
+   存法：DB.collectOff = { 合集bvid: ['子曲目键', ...] } —— 存的是"被关掉的"。
+   · 没存过 = 全部启用 → 老存档不用迁移，行为跟以前一致
+   · 键 = bvid#cid：分P 靠 cid 区分，合集里每一集自带 bvid + cid，都能唯一定位
+   · 只存禁用键 + 一张剥掉封面 URL 的曲目表，几十集的合集也就一两 KB
+   ------------------------------------------------------------ */
+
+function entryKey(e) {
+  return `${e.bvid}#${e.cid != null && e.cid !== '' ? e.cid : 'p' + (e.page || 1)}`;
+}
+
+function isEntryOff(parentBvid, e) {
+  const off = DB.collectOff[parentBvid];
+  return !!off && off.indexOf(entryKey(e)) >= 0;
+}
+
+/** 开关某一集：off=true 表示禁用 */
+function setEntryOff(parentBvid, e, off) {
+  const list = DB.collectOff[parentBvid] || (DB.collectOff[parentBvid] = []);
+  const k = entryKey(e);
+  const i = list.indexOf(k);
+  if (off && i < 0) list.push(k);
+  else if (!off && i >= 0) list.splice(i, 1);
+  if (!list.length) delete DB.collectOff[parentBvid];
+  persistLater();
+}
+
+/** 只留启用的那几集（parent 只要带 bvid 就行，合集对象 / collectState 都可以传） */
+function enabledEntries(parent, entries) {
+  return (entries || []).filter((e) => !isEntryOff(parent.bvid, e));
+}
+
+/** 现在启用了几集；没摊开过（不知道有几集）时返回 null */
+function enabledCount(track) {
+  const cached = DB.collectParts[track.bvid];
+  if (!cached || !cached.length) return null;
+  return cached.filter((e) => !isEntryOff(track.bvid, e)).length;
+}
+
+/**
+ * 取一条合集的曲目表：先看本地缓存（摊开过一次就存下来了），没有才去查 B 站。
+ * 查到了顺手把规模（几集 / 是不是 UP 合集）记在曲目对象上，徽章才能从「选集」变成「选集 N」。
+ * 同一个 bvid 同时只查一次（播放和展开面板撞在一起也不会发两次请求）。
+ */
+const collectFetching = new Map();
+async function collectEntriesFor(track) {
+  const cached = DB.collectParts[track.bvid];
+  if (cached && cached.length > 1) return cached;
+
+  if (collectFetching.has(track.bvid)) return collectFetching.get(track.bvid);
+
+  const p = (async () => {
+    const info = await api('videoInfo', track.bvid);
+    const entries = buildCollectionEntries(info);
+    if (entries.length > 1) {
+      track.parts = info.pages ? info.pages.length : 1;
+      track.seasonCount = info.season ? info.season.episodes.length : 0;
+      if (info.season) track.seasonTitle = info.season.title;
+      // 存一份剥掉封面 URL 的曲目表（封面是长链接，上百集全存会把存档撑大）
+      DB.collectParts[track.bvid] = entries.map((e) => ({
+        bvid: e.bvid, cid: e.cid, page: e.page,
+        title: e.title, duration: e.duration, author: e.author,
+      }));
+      persistLater();
+    }
+    return entries;
+  })();
+
+  collectFetching.set(track.bvid, p);
+  try { return await p; } finally { collectFetching.delete(track.bvid); }
+}
+
+/**
+ * 把"界面上看到的列表"摊成"真正要按顺序播的一串"。
+ * ★ 这是本版的核心：合集行会被摊成它的一集一集（跳过被禁用的），
+ *   于是顺序 / 随机 / 列表循环都会把合集里的歌当成一个个独立曲目来走，
+ *   不会再出现"顺序播到合集只播了第 1 首就跳走"。
+ * 返回 { list, startOf }：list 是摊平后的播放序列；
+ * startOf[i] = 界面第 i 行在 list 里的起始下标（-1 = 这一行的曲目全被禁用了，不参与播放）。
+ */
+async function buildSequence(tracks) {
+  const list = [];
+  const startOf = [];
+  const entriesOf = new Map();   // 曲目对象 → 它的曲目表（null = 读取失败）
+  let failed = 0;
+
+  // ① 先把所有"看起来是合集"的行**并发**取一遍。
+  //    一条一条等会把等待时间叠起来（5 条长视频就是 5 次网络往返），
+  //    并发取完，点击后的等待就缩短成"最慢那一条"的时间。
+  //    第一次播放过后曲目表就存在本地了，之后点播放是瞬时的。
+  const pending = (tracks || []).filter((t) => maybeCollection(t));
+  if (pending.length) {
+    // 最多同时 4 个（B 站对短时间内的密集请求会限流，别一次把 20 条全发出去）
+    const workers = Array.from({ length: Math.min(4, pending.length) }, async () => {
+      while (pending.length) {
+        const t = pending.shift();
+        try { entriesOf.set(t, await collectEntriesFor(t)); }
+        catch (_) { entriesOf.set(t, null); }
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  // ② 再按界面上的顺序拼装（这一步只读内存，不再发请求）
+  for (let i = 0; i < (tracks || []).length; i++) {
+    const t = tracks[i];
+    startOf[i] = -1;
+    if (maybeCollection(t)) {
+      const got = entriesOf.get(t);
+      if (got === null) {
+        failed += 1;   // 读不到 → 这一行退化成"就播它本身"
+      } else if (got && got.length > 1) {
+        const on = enabledEntries(t, got);
+        if (!on.length) continue;   // 整行都被禁完了 → 这一行不参与播放
+        startOf[i] = list.length;
+        on.forEach((e) => list.push(e));
+        continue;
+      }
+    }
+    startOf[i] = list.length;
+    list.push(t);
+  }
+
+  // 某个合集读不到（断网 / 被风控）时只让它退化成"就播这一首"，不能让整张列表都播不了
+  if (failed) toast(`${failed} 个合集读取失败，这次先只播它本身`);
+  return { list, startOf };
+}
+
+let collectState = null;   // 面板开着时才有值：{ bvid, title, baseSub, entries }
 
 function closeCollectPanel() {
   const mask = $('collectMask');
@@ -419,47 +690,42 @@ function closeCollectPanel() {
   collectState = null;
 }
 
-/** 点「选集」徽章：查一次 videoInfo 把分P/合集摊开；若其实不是合集就直接播 */
+/** 点「选集」徽章：把分P / 合集摊开；若其实不是合集就直接播这一首 */
 async function expandCollection(track, fallback) {
   if (!track || !track.bvid) return;
 
-  collectState = { title: track.title, sub: '', entries: [] };
+  collectState = null;
   $('collectTitle').textContent = track.title;
   $('collectSub').textContent = '正在读取选集…';
   $('collectSearch').value = '';
   $('collectList').innerHTML = `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
   $('collectMask').classList.add('show');
 
-  let info;
+  let entries;
   try {
-    info = await api('videoInfo', track.bvid);
+    entries = await collectEntriesFor(track);   // 有本地缓存就直接用，不再等网络
   } catch (err) {
     $('collectSub').textContent = '';
     $('collectList').innerHTML = `<div class="err">读取失败：${esc(err.message)}</div>`;
     return;
   }
 
-  const entries = buildCollectionEntries(info);
   if (entries.length <= 1) {
     // 其实只有 1 个分P —— 不是合集，收起来直接播这一首
     closeCollectPanel();
-    if (fallback && fallback.tracks) playTracks(fallback.tracks, fallback.index, fallback.name);
+    if (fallback && fallback.list) playTracks(fallback.list, fallback.index, fallback.name);
     return;
   }
 
-  // 记下数量，让行上的徽章从「选集」变成「选集 N」
-  track.parts = info.pages ? info.pages.length : 1;
-  track.seasonCount = info.season ? info.season.episodes.length : 0;
-
   const total = entries.reduce((s, e) => s + (e.duration || 0), 0);
   collectState = {
-    title: info.title || track.title,
-    sub: (info.season
-      ? `合集「${info.season.title}」 · ${entries.length} 集`
+    bvid: track.bvid,
+    title: track.title,
+    baseSub: (track.seasonTitle
+      ? `合集「${track.seasonTitle}」 · ${entries.length} 集`
       : `${entries.length} 个分P`) + ` · 共 ${fmtTime(total)}`,
     entries,
   };
-  $('collectSub').textContent = collectState.sub;
   renderCollectList('');
   renderAll();   // 让行上的徽章同步成「选集 N」
 }
@@ -490,47 +756,87 @@ function renderCollectList(filter) {
   $('collectList').innerHTML = rows.length
     ? rows.map(({ e, i }) => {
       const liked = isFav(e);
+      const off = isEntryOff(collectState.bvid, e);
       return `
-        <div class="collect-row ${sameTrack(e, cur) ? 'on' : ''}" data-ci="${i}">
+        <div class="collect-row ${off ? 'off' : ''} ${sameTrack(e, cur) ? 'on' : ''}" data-ci="${i}">
           <span class="cn">${i + 1}</span>
           <span class="ct" title="${esc(e.title)}">${esc(e.title)}</span>
           <span class="cd">${fmtTime(e.duration)}</span>
           <span class="cops">
+            <button class="op-ic ${off ? '' : 'on'}" data-cact="toggle" data-ci="${i}" data-tip="${off ? '启用这一集' : '禁用这一集（不参与播放）'}">${ic(off ? 'i-off' : 'i-check')}</button>
             <button class="op-ic ${liked ? 'on' : ''}" data-cact="fav" data-ci="${i}" data-tip="${liked ? '取消收藏' : '收藏'}">${ic(liked ? 'i-heart-fill' : 'i-heart')}</button>
             <button class="op-ic" data-cact="add" data-ci="${i}" data-tip="加入歌单">${ic('i-plus')}</button>
           </span>
         </div>`;
     }).join('')
     : `<div class="err">没有匹配的条目</div>`;
+
+  syncCollectBar();
 }
 
-/** 点面板里的某一集：直接播这一集（用它的 cid 单独取音频） */
-function playCollectEntry(i) {
+/**
+ * 顶部的三个数字/文案跟当前启用状态对齐：
+ * 副标题写"已启用 x/y 集"、一键按钮写"全部禁用/全部启用"、两个批量按钮带上数量。
+ */
+function syncCollectBar() {
   if (!collectState) return;
   const entries = collectState.entries;
-  if (!entries[i]) return;
-  playTracks(entries, i, collectState.title);
+  const on = enabledEntries(collectState, entries);
+  $('collectSub').textContent = `${collectState.baseSub} · 已启用 ${on.length}/${entries.length} 集`;
+  const all = $('btnCollectToggleAll');
+  if (all) all.textContent = (on.length === entries.length) ? '全部禁用' : '全部启用';
+  const play = $('btnPlayCollect');
+  if (play) play.textContent = `播放全部 (${on.length})`;
+  const addQ = $('btnQueueCollect');
+  if (addQ) addQ.textContent = on.length ? `加入队列 (${on.length})` : '加入队列';
+}
+
+/** 一键全部启用 / 全部禁用（按当前状态决定往哪边切） */
+function toggleAllEntries() {
+  if (!collectState) return;
+  const entries = collectState.entries;
+  const on = enabledEntries(collectState, entries);
+  const turnOff = on.length === entries.length;   // 现在全开着 → 这一下是全关
+
+  if (turnOff) DB.collectOff[collectState.bvid] = entries.map(entryKey);
+  else delete DB.collectOff[collectState.bvid];   // 全开 = 不留记录（默认就是全开）
+  persistLater();
+
+  renderCollectList($('collectSearch').value);
+  renderAll();
+  toast(turnOff ? `已禁用全部 ${entries.length} 集` : `已启用全部 ${entries.length} 集`);
+}
+
+/** 点面板里的某一集：从这一集开始播（禁用中的那一集点开也照播，是用户主动点的） */
+function playCollectEntry(i) {
+  if (!collectState) return;
+  const e = collectState.entries[i];
+  if (!e) return;
+  const list = enabledEntries(collectState, collectState.entries);
+  let k = list.findIndex((x) => sameTrack(x, e));
+  if (k < 0) { list.unshift(e); k = 0; }
+  playTracks(list, k, collectState.title);
   renderCollectList($('collectSearch').value);   // 刷新"正在播放"高亮
 }
 
-/** 把整段合集塞进播放队列（队列空就直接播） */
+/** 把这条合集里"启用的那几首"塞进播放队列（队列空就直接播） */
 function queueCollection() {
   if (!collectState) return;
-  const entries = collectState.entries;
+  const on = enabledEntries(collectState, collectState.entries);
   const title = collectState.title;
-  if (!entries.length) return;
+  if (!on.length) { toast('这条合集里的曲目都被禁用了'); return; }
 
   if (!queue.tracks.length) {
     closeCollectPanel();
-    playTracks(entries.slice(), 0, title);
-    toast(`已开始播放 ${entries.length} 首`);
+    playTracks(on, 0, title);
+    toast(`已开始播放 ${on.length} 首`);
     return;
   }
   let added = 0;
-  entries.forEach((e) => {
+  on.forEach((e) => {
     if (!queue.tracks.some((t) => sameTrack(t, e))) { queue.tracks.push(e); added += 1; }
   });
-  toast(added ? `已加入队列 ${added} 首（播放条上的队列按钮可以查看）` : '这些都已经在队列里了');
+  toast(added ? `已追加 ${added} 首到当前队列` : '这些都已经在队列里了');
   closeCollectPanel();
   refreshQueueIfOpen();
 }
@@ -545,12 +851,17 @@ function bindCollect() {
   });
   $('collectSearch').addEventListener('input', (e) => renderCollectList(e.target.value));
   $('collectList').addEventListener('click', (e) => {
-    // 每一集右侧的图标按钮（收藏 / 加歌单）优先，不能顺手把整行"播放"也触发了
+    // 每一集右侧的图标按钮（启用开关 / 收藏 / 加歌单）优先，不能顺手把整行"播放"也触发了
     const act = e.target.closest('[data-cact]');
     if (act && collectState) {
       const entry = collectState.entries[Number(act.dataset.ci)];
       if (entry) {
-        if (act.dataset.cact === 'fav') { toggleFav(entry); renderCollectList($('collectSearch').value); }
+        if (act.dataset.cact === 'toggle') {
+          setEntryOff(collectState.bvid, entry, !isEntryOff(collectState.bvid, entry));
+          renderCollectList($('collectSearch').value);
+          renderAll();   // 行上的徽章要跟着变成「选集 12/134」
+        }
+        else if (act.dataset.cact === 'fav') { toggleFav(entry); renderCollectList($('collectSearch').value); }
         else if (act.dataset.cact === 'add') addToPlaylist(entry);
       }
       return;
@@ -558,12 +869,14 @@ function bindCollect() {
     const row = e.target.closest('.collect-row');
     if (row) playCollectEntry(Number(row.dataset.ci));
   });
+  $('btnCollectToggleAll').addEventListener('click', toggleAllEntries);
   $('btnPlayCollect').addEventListener('click', () => {
     if (!collectState) return;
-    const n = collectState.entries.length;
-    playTracks(collectState.entries, 0, collectState.title);
+    const on = enabledEntries(collectState, collectState.entries);
+    if (!on.length) { toast('这条合集里的曲目都被禁用了'); return; }
+    playTracks(on, 0, collectState.title);
     renderCollectList($('collectSearch').value);
-    toast(`开始播放 ${n} 首`);
+    toast(`开始播放 ${on.length} 首`);
   });
   $('btnQueueCollect').addEventListener('click', queueCollection);
   document.addEventListener('keydown', (e) => {
@@ -644,16 +957,21 @@ function bindQueue() {
     const rm = e.target.closest('[data-qact="remove"]');
     if (rm) { removeFromQueue(Number(rm.dataset.qi)); return; }
     const row = e.target.closest('.collect-row');
-    if (row) playAt(Number(row.dataset.qi));
+    if (row) goTo(Number(row.dataset.qi));   // 走 goTo：随机模式的"上一首"才回得去
   });
 
   $('btnQueueShuffle').addEventListener('click', () => {
     if (queue.tracks.length < 2) { toast('队列里的歌太少，不用打乱'); return; }
+    // 注意：这里只是把"队列摆放顺序"打乱一次，跟播放模式里的"随机播放"不是一回事
+    const cur = queue.tracks[queue.index];
     for (let i = queue.tracks.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [queue.tracks[i], queue.tracks[j]] = [queue.tracks[j], queue.tracks[i]];
     }
+    queue.index = cur ? queue.tracks.indexOf(cur) : -1;
+    playStack = [];
     renderQueueList($('queueSearch').value);
+    renderAll();
     toast('已打乱队列顺序');
   });
 
@@ -893,6 +1211,11 @@ function parseDuration(d) {
 
 /* ---------- 页面 2：解析链接（含合集自动展开） ---------- */
 let parsedView = null;   // 保存当前解析出来的视频/合集信息
+/**
+ * 从列表点「详情」进来时记下"来路"，好原路返回。
+ * 没有它的话点进详情页就出不去了（页面本身没有别的返回入口）。
+ */
+let parsedOrigin = null;   // { view, label, scroll }
 
 async function doParseLink(text) {
   content().innerHTML = `<div class="loading"><div class="spinner"></div>正在解析…</div>`;
@@ -935,10 +1258,16 @@ function renderParsed() {
   const hasSeason = seasonTracks.length > 0;
   const isMultiP = pages.length > 1;
 
+  // 从列表点进来 → 回原来那一页；直接粘链接解析的 → 回搜索页
+  const backLabel = parsedOrigin
+    ? `← 返回${parsedOrigin.label ? '：' + parsedOrigin.label : ''}`
+    : '← 返回搜索';
+
   content().innerHTML = `
     <div class="block-head">
       <div>
-        <div class="block-title">${esc(info.title)}</div>
+        <button class="ghost-btn" id="btnParsedBack">${esc(backLabel)}</button>
+        <div class="block-title" style="margin-top:12px">${esc(info.title)}</div>
         <div class="block-sub">
           UP 主：${esc(info.owner.name)}
           ${hasSeason ? ` · 已识别到合集「${esc(info.season.title)}」，共 ${seasonTracks.length} 集` : ''}
@@ -1478,6 +1807,7 @@ function bindEvents() {
     const text = $('linkInput').value.trim();
     if (!text) { toast('先粘贴一个 B 站链接或 BV 号'); return; }
     if (/space\.bilibili\.com/.test(text)) { doImportFav(text); return; }
+    parsedOrigin = null;   // 这是从链接框直接解析的，没有"来路"，返回按钮就回搜索页
     currentView = 'parsed';
     doParseLink(text);
   });
@@ -1553,7 +1883,13 @@ function bindEvents() {
     if (badge) {
       const i = Number(badge.dataset.i);
       const tracks = currentTracks();
-      if (tracks[i]) expandCollection(tracks[i], { tracks, index: i, name: queue.name || '' });
+      const t = tracks[i];
+      if (t) {
+        // 顺手把当前界面的播放序列算出来：万一这条"长视频"其实只有一个分P，
+        // 面板会收起来直接播它 —— 那时只有一份算好的序列才能播得对。
+        const seq = await buildSequence(tracks);
+        expandCollection(t, { list: seq.list, index: seq.startOf[i], name: viewLabel() });
+      }
       return;
     }
 
@@ -1569,7 +1905,13 @@ function bindEvents() {
       if (act === 'fav') { toggleFav(track); return; }
       if (act === 'add') { addToPlaylist(track); return; }
       if (act === 'remove') { removeFromCurrent(track); return; }
-      if (act === 'detail') { currentView = 'parsed'; doParseLink(track.bvid); return; }
+      if (act === 'detail') {
+        // 记下"来路"再跳走，详情页左上角才有得返回（连滚动位置一起还原）
+        parsedOrigin = { view: currentView, label: viewLabel(), scroll: content().scrollTop };
+        currentView = 'parsed';
+        doParseLink(track.bvid);
+        return;
+      }
       return;
     }
 
@@ -1577,20 +1919,35 @@ function bindEvents() {
     // 这样按钮里万一包了子元素，点子元素也能正确命中按钮本身）
     const idEl = e.target.closest('[id]');
     const id = idEl ? idEl.id : '';
-    if (id === 'btnPlayAll') { playTracks(searchResults, 0, `搜索：${searchKeyword}`); return; }
+    // 详情页返回：回原来那一页（直接粘链接解析进来的那种就回搜索页）
+    if (id === 'btnParsedBack') {
+      if (parsedOrigin) {
+        const o = parsedOrigin;
+        parsedOrigin = null;
+        currentView = o.view;
+        renderAll();
+        content().scrollTop = o.scroll || 0;
+      } else {
+        currentView = 'search';
+        renderAll();
+      }
+      return;
+    }
+    // 所有"播放"入口都先摊平合集，并用 viewLabel() 把来源界面的名字写进队列
+    if (id === 'btnPlayAll') { startFromView(searchResults, 0); return; }
     if (id === 'btnRefreshDiscovery') { loadDiscovery(true); return; }
-    if (id === 'btnPlayDiscovery') { playTracks(discoveryResults, 0, '发现'); return; }
+    if (id === 'btnPlayDiscovery') { startFromView(discoveryResults, 0); return; }
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
     if (id === 'btnUpBack') { currentView = 'search'; renderAll(); return; }
-    if (id === 'btnPlayUp') { if (upState) playTracks(upState.list, 0, upState.name); return; }
+    if (id === 'btnPlayUp') { if (upState) startFromView(upState.list, 0); return; }
     if (id === 'btnMoreUp') { if (upState) loadUp(upState.page + 1); return; }
-    if (id === 'btnPlayParsed') { playTracks(parsedView.tracks, 0, parsedView.info.title); return; }
+    if (id === 'btnPlayParsed') { startFromView(parsedView.tracks, 0); return; }
     if (id === 'btnAddParsed') { addManyToPlaylist(parsedView.tracks); return; }
-    if (id === 'btnPlayFav') { playTracks(DB.favorites, 0, '我喜欢'); return; }
+    if (id === 'btnPlayFav') { startFromView(DB.favorites, 0); return; }
     if (id === 'btnPlayPl') {
       const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
-      if (pl) playTracks(pl.tracks, 0, pl.name);
+      if (pl) startFromView(pl.tracks, 0);
       return;
     }
     if (id === 'btnRenamePl') {
@@ -1615,28 +1972,23 @@ function bindEvents() {
     if (row) {
       const i = Number(row.dataset.i);
       const tracks = currentTracks();
-      if (tracks.length) playTracks(tracks, i, queue.name || '');
+      if (tracks.length) startFromView(tracks, i);
     }
   });
 
-  /* ---- 播放条：播放/暂停、上下首、随机、循环 ---- */
+  /* ---- 播放条：播放/暂停、上下首、播放模式 ---- */
   $('btnPlay').addEventListener('click', () => {
     if (!audio.src) { toast('先选一首歌吧'); return; }
     audio.paused ? audio.play() : audio.pause();
   });
-  $('btnPrev').addEventListener('click', () => next(-1));
+  $('btnPrev').addEventListener('click', () => prevTrack());
   $('btnNext').addEventListener('click', () => next(1));
-  $('btnShuffle').addEventListener('click', () => {
-    shuffled = !shuffled;
-    $('btnShuffle').classList.toggle('on', shuffled);
-    toast(shuffled ? '随机播放：开' : '随机播放：关');
-  });
-  $('btnLoop').addEventListener('click', () => {
-    loopMode = loopMode === 'list' ? 'one' : 'list';
-    $('btnLoop').classList.toggle('on', loopMode === 'one');
-    // 单曲循环的图标右边多一个小 "1"，一眼就能看出当前是哪种模式
-    $('btnLoop').innerHTML = ic(loopMode === 'one' ? 'i-repeat1' : 'i-repeat');
-    toast(loopMode === 'one' ? '单曲循环' : '列表循环');
+  // 播放模式：点一次换一个，图标和提示跟着变（以前是两个按钮，现在合并成一个）
+  $('btnMode').addEventListener('click', () => {
+    const cur = PLAY_MODES.findIndex((m) => m.id === playMode);
+    const m = PLAY_MODES[(cur + 1) % PLAY_MODES.length];
+    setPlayMode(m.id, true);
+    toast(`播放模式：${m.name}`);
   });
 
   $('btnFav').addEventListener('click', () => {
@@ -1727,7 +2079,7 @@ function bindEvents() {
   audio.addEventListener('seeked', () => { syncLyric(true); pushLyricToDesktop(); });
 
   audio.addEventListener('ended', () => {
-    if (loopMode === 'one') { audio.currentTime = 0; audio.play(); return; }
+    if (playMode === 'one') { audio.currentTime = 0; audio.play(); return; }
     next(1);
   });
 
@@ -2581,6 +2933,38 @@ function currentTracks() {
   return searchResults;
 }
 
+/**
+ * 当前这个界面叫什么名字。
+ * 队列抽屉里的"来自「XXX」"用的就是它 —— 这样"从哪个界面点的播放，队列就写着哪个界面的名字"，
+ * 不会再出现"在搜索结果点播放、队列却写着上次那个歌单"的情况。
+ */
+function viewLabel() {
+  if (currentView === 'discovery') return '发现';
+  if (currentView === 'favorites') return '我喜欢';
+  if (currentView === 'history') return '最近播放';
+  if (currentView === 'up' && upState) return `${upState.name} 的视频`;
+  if (currentView === 'parsed' && parsedView) return parsedView.info.title;
+  if (currentView.startsWith('playlist:')) {
+    const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
+    return pl ? pl.name : '歌单';
+  }
+  return searchKeyword ? `搜索：${searchKeyword}` : '搜索结果';
+}
+
+/**
+ * 从"当前界面这一份列表"开始播放某一首。
+ * 统一入口：先把合集摊平成真正的播放序列（跳过被禁用的单集），再交给 playTracks，
+ * 并把来源界面的名字写进队列 —— 点整行 / 播放全部 / 发现 / UP 主页 / 解析页 / 我喜欢 / 歌单 全走这里。
+ */
+async function startFromView(tracks, index) {
+  if (!tracks || !tracks.length) return;
+  const seq = await buildSequence(tracks);
+  if (!seq.list.length) { toast('这个列表里没有可播放的曲目'); return; }
+  const at = seq.startOf[index];
+  if (at < 0) { toast('这一行的曲目都被禁用了（在合集面板里可以重新启用）'); return; }
+  playTracks(seq.list, at, viewLabel());
+}
+
 /** 收藏 / 取消收藏 */
 async function toggleFav(track) {
   if (isFav(track)) {
@@ -2630,6 +3014,9 @@ async function boot() {
     DB.playlists = DB.playlists || [];
     DB.favorites = DB.favorites || [];
     DB.history = DB.history || [];
+    // 合集的"单集开关"与"曲目表缓存"：老存档没有这两项，补成空的（= 全部启用）
+    DB.collectOff = (DB.collectOff && typeof DB.collectOff === 'object') ? DB.collectOff : {};
+    DB.collectParts = (DB.collectParts && typeof DB.collectParts === 'object') ? DB.collectParts : {};
   } catch (e) {
     console.error('读取存档失败', e);
   }
@@ -2637,6 +3024,9 @@ async function boot() {
   // 2) 补好外观设置，并把它刷到界面上（主题、背景、毛玻璃）
   migrateSettings();
   applyAppearance();
+
+  // 2.2) 播放模式：恢复上次选的那个（老存档没有 → 列表循环），并把按钮图标刷成对应形状
+  setPlayMode(DB.settings.playMode, false);
 
   // 2.5) 音量记忆：把上次退出时的音量填回播放器（浮层里的数字和滑块由 updateVolumeUI 同步）
   const vol = DB.settings.volume ?? 80;

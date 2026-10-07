@@ -587,6 +587,12 @@ ul { list-style: none; }
 /* 中：控制按钮 + 进度条 */
 .controls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .ctrl-row { display: flex; align-items: center; gap: 10px; }
+/*
+  播放模式合并成一个按钮后，这一行少了一个（5 个变 4 个），
+  播放键就会偏到中线的右边 —— 用等宽的空位把行"撑回" 5 个槽位，
+  让播放键继续跟下面的进度条严格对齐（宽度 = 一个 .ctrl-btn：17px 图标 + 7px×2 内边距）。
+*/
+.ctrl-row::after { content: ''; width: 31px; height: 31px; flex: 0 0 auto; }
 .ctrl-btn {
   color: var(--text-2);
   /* 用 flex 让图标稳稳居中，padding 撑出点击热区
@@ -605,9 +611,9 @@ ul { list-style: none; }
 .ctrl-btn.big:hover { transform: scale(1.06); }
 .ctrl-btn.on { color: var(--accent); }
 
-/* 图标尺寸分主次：随机/循环是"次要"按钮，小一点；
-   上下首是主操作，大一点。一排看过去才有层次，不会五个一样大像贴纸。 */
-#btnShuffle .ic, #btnLoop .ic { width: 17px; height: 17px; }
+/* 图标尺寸分主次：播放模式是"次要"按钮，小一点；
+   上下首是主操作，大一点。一排看过去才有层次，不会一样大像贴纸。 */
+#btnMode .ic { width: 17px; height: 17px; }
 #btnPrev .ic, #btnNext .ic { width: 21px; height: 21px; }
 #btnPlay .ic { width: 17px; height: 17px; }
 /* 正在缓冲时那个圆弧要转起来 */
@@ -1161,6 +1167,12 @@ ul { list-style: none; }
   cursor: pointer; transition: background 0.14s;
 }
 .collect-row:hover { background: var(--panel); }
+/* 被禁用的那一集：文字划掉 + 变暗，一眼能看出"这集不播" */
+.collect-row.off .cn,
+.collect-row.off .ct,
+.collect-row.off .cd { opacity: 0.38; text-decoration: line-through; }
+/* 禁用的行把按钮亮出来（否则不悬停就看不见"启用"开关，不知道该怎么把它放回来） */
+.collect-row.off .cops { opacity: 1; }
 /* 每一集也有"收藏 / 加歌单"：平时藏起来，鼠标移到这一行才淡出来 */
 .collect-row .cops { display: flex; gap: 6px; opacity: 0; transition: opacity 0.14s; }
 .collect-row:hover .cops { opacity: 1; }

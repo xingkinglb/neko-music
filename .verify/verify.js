@@ -12,10 +12,14 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const blankKeepLines = (m) => m.replace(/[^\n]/g, ' ');
 const stripHtml = (s) => s.replace(/<!--[\s\S]*?-->/g, blankKeepLines);
 const stripBlock = (s) => s.replace(/\/\*[\s\S]*?\*\//g, blankKeepLines);
+/* 行注释也要挖掉：说明文字里可能提到别的函数名 / 旧写法，
+   不挖就会把注释当代码 → 误报（假阳性）。挖的时候同样保留换行。 */
+const stripLine = (s) => s.replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
 const html = stripHtml(read('src/ui/index.html'));
 const css = stripBlock(read('src/ui/style.css'));
-const appjs = stripBlock(read('src/ui/app.js'));
+const rawAppjs = read('src/ui/app.js');
+const appjs = stripLine(stripBlock(rawAppjs));
 const preload = stripBlock(read('src/preload.js'));
 const mainjs = stripBlock(read('src/main.js'));
 const gitignore = read('.gitignore');
@@ -909,5 +913,207 @@ console.log('\n[28] 小弹窗 / 播放队列 / 图标操作 / UP 主页：');
   } else ok('搜索结果已带上 UP 的 mid（作者名才能点）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 28 大类检查）');
+/* ---------------------------------------------------------------
+   [29]~[34] 第六轮：详情返回 / 队列来源 / 合集单集开关 / 播放模式
+   --------------------------------------------------------------- */
+
+/* ---- 29) 详情页必须回得去 ---- */
+console.log('\n[29] 详情页返回：');
+{
+  if (!/id="btnParsedBack"/.test(appjs)) err('解析/详情页没有返回按钮（点进详情就出不来）');
+  else ok('详情页头部有返回按钮 #btnParsedBack');
+
+  // 有写入（点详情时记下来路）也要有读取（点返回时用到）
+  if (!/parsedOrigin\s*=\s*\{/.test(appjs)) err('点「详情」时没有记下来路（parsedOrigin 没写入）');
+  else if (!/const o = parsedOrigin;[\s\S]{0,300}?currentView\s*=\s*o\.view;/.test(appjs)) err('返回时没有还原原来的视图');
+  else if (!/parsedOrigin\s*=\s*null/.test(appjs)) err('返回后没有清掉来路记录（会残留脏数据）');
+  else ok('来路记录三件套齐全：写入 / 还原视图 / 用完清掉');
+
+  if (!/scrollTop\s*=\s*o\.scroll/.test(appjs)) err('返回时没有还原滚动位置');
+  else ok('返回时会还原原来那一页的滚动位置');
+
+  if (!/parsedOrigin\s*=\s*null;\s*\n\s*currentView\s*=\s*'parsed'/.test(appjs))
+    err('从链接框直接解析时没有清掉 parsedOrigin（返回按钮会指向错误的来路）');
+  else ok('粘贴链接解析时清掉来路 → 返回按钮回到搜索页');
+}
+
+/* ---- 30) 播放队列 = 来源界面的快照 ---- */
+console.log('\n[30] 播放队列跟随"你点播放的那个界面"：');
+{
+  if (!/function viewLabel\(/.test(appjs)) err('缺少 viewLabel()：队列的来源名没有统一出处');
+  else {
+    const need = [
+      /'discovery'\)\s*return\s*'发现'/, /'favorites'\)\s*return\s*'我喜欢'/,
+      /'history'\)\s*return\s*'最近播放'/, /upState\.name/, /parsedView\.info\.title/,
+    ];
+    const miss = need.filter((re) => !re.test(appjs));
+    if (miss.length) err(`viewLabel() 少了 ${miss.length} 种界面的名字`);
+    else ok('viewLabel() 覆盖 发现/我喜欢/最近播放/UP主页/解析页/歌单/搜索');
+  }
+
+  // 所有播放"整张列表"的入口都要经过 startFromView（否则又是旧的 queue.name）
+  const starts = [...appjs.matchAll(/startFromView\(([^,]+),/g)].map((m) => m[1].trim());
+  if (starts.length < 7) err(`只有 ${starts.length} 处走 startFromView()，播放入口没统一`);
+  else ok(`${starts.length} 处播放入口统一走 startFromView()`);
+
+  if (/playTracks\([^)]*queue\.name/.test(appjs)) err('还有播放入口在传旧队列名 queue.name');
+  else ok('没有任何播放入口再传旧队列名');
+
+  // 队列必须是副本：源列表后续增删不能改到正在播的这一份
+  if (!/queue\s*=\s*\{\s*tracks:\s*tracks\.slice\(\)/.test(appjs))
+    err('playTracks 没有把列表复制一份（队列还是源数组的引用，会被悄悄改掉）');
+  else ok('队列存的是 slice() 副本（源列表增删不影响正在播的队列）');
+
+  // 队列里的"随机打乱"跟"随机播放模式"不是一回事，名字要能区分
+  if (!/id="btnQueueShuffle">打乱顺序</.test(html)) err('队列里的"打乱"按钮没改名，跟随机播放模式容易混');
+  else ok('队列里的按钮叫「打乱顺序」，与随机播放模式区分开');
+}
+
+/* ---- 31) 播放模式合并成一个按钮 ---- */
+console.log('\n[31] 播放模式：一个按钮切换四种：');
+{
+  let dirty = 0;
+  ['loopMode', 'shuffled', 'btnShuffle', 'btnLoop'].forEach((w) => {
+    const hit = [['app.js', appjs], ['index.html', html], ['style.css', css]]
+      .filter(([, s]) => new RegExp('\\b' + w + '\\b').test(s)).map(([f]) => f);
+    if (hit.length) { dirty++; err(`旧的 ${w} 在 ${hit.join('/')} 里还有残留（两套状态会打架）`); }
+  });
+  if (!dirty) ok('旧的 loopMode / shuffled / btnShuffle / btnLoop 已全部清干净');
+
+  if (!/id="btnMode"/.test(html)) err('播放条上没有 #btnMode');
+  else if (!/\$\('btnMode'\)\.addEventListener/.test(appjs)) err('#btnMode 没有绑定点击');
+  else ok('播放模式按钮 #btnMode 存在且绑定了点击');
+
+  const ids = [...appjs.matchAll(/\{\s*id:\s*'(\w+)',\s*icon:\s*'(i-[\w-]+)'/g)].map((m) => [m[1], m[2]]);
+  const want = [['list', 'i-repeat'], ['one', 'i-repeat1'], ['shuffle', 'i-shuffle'], ['order', 'i-order']];
+  const bad = want.filter(([id, icon]) => !ids.some(([a, b]) => a === id && b === icon));
+  if (ids.length !== 4 || bad.length) err(`PLAY_MODES 四态不完整（缺：${bad.map((b) => b[0]).join('/') || '数量 ' + ids.length}）`);
+  else ok('四种模式齐全：列表循环 / 单曲循环 / 随机 / 顺序');
+
+  if (!/function setPlayMode\(/.test(appjs) || !/btn\.classList\.toggle\('on'/.test(appjs))
+    err('setPlayMode 没有同步按钮的图标/提示/高亮');
+  else if (!/btn\.title = .*播放模式：/.test(appjs)) err('按钮提示里没写当前模式名');
+  else ok('切模式时图标、提示文字、高亮一起变');
+
+  // 顺序播放走到最后一首要停，不能绕回第一首
+  if (!/function stopAtEnd\(/.test(appjs) || !/playMode === 'order'\)\s*\{\s*stopAtEnd\(\)/.test(appjs))
+    err('顺序播放走到最后一首不会停（会绕回第一首）');
+  else ok('顺序播放：走到最后一首会停（stopAtEnd）');
+
+  // 单曲循环 / 随机播放都读同一个 playMode
+  if (!/playMode === 'one'\)\s*\{\s*audio\.currentTime = 0/.test(appjs)) err('单曲循环没有读 playMode');
+  else if (!/playMode === 'shuffle'\)/.test(appjs)) err('随机播放没有读 playMode');
+  else ok('单曲循环 / 随机播放都读同一个 playMode（不会两套状态打架）');
+
+  // 模式要记住
+  if (!/playMode: 'list'/.test(appjs)) err('DEFAULT_SETTINGS 里没有 playMode 的默认值');
+  else if (!/playMode:\s*isPlayModeId\(old\.playMode\)/.test(appjs)) err('老存档迁移时没有校验 playMode');
+  else if (!/playMode = m\.id;/.test(appjs) || !/DB\.settings\.playMode = m\.id/.test(appjs))
+    err('切模式后没有写进存档');
+  else ok('模式默认列表循环 + 老存档校验 + 切换后写入存档');
+
+  // 播放键要仍然居中（4 个按钮 + 等宽占位）
+  if (!/\.ctrl-row::after\s*\{[^}]*width:\s*31px/.test(css))
+    err('.ctrl-row 少了一个槽位的等宽占位，播放键会偏右');
+  else ok('.ctrl-row::after 用 31px 等宽占位，播放键保持居中');
+}
+
+/* ---- 32) 合集单集启用 / 禁用 ---- */
+console.log('\n[32] 合集里单集启用 / 禁用：');
+{
+  // 兜底写法两种都算：`X = X || {}` 或 `X = (X && typeof X === 'object') ? X : {}`
+  const guarded = (name) => new RegExp(`DB\\.${name}\\s*=[^;]*?\\|\\|\\s*\\{\\}`).test(appjs)
+    || new RegExp(`DB\\.${name}\\s*=\\s*\\([^;]*?\\)\\s*\\?\\s*DB\\.${name}\\s*:\\s*\\{\\}`).test(appjs);
+
+  if (!guarded('collectOff'))
+    err('启动时没有给 DB.collectOff 兜底（老存档会读到 undefined）');
+  else if (!guarded('collectParts'))
+    err('启动时没有给 DB.collectParts 兜底');
+  else ok('存档字段 collectOff / collectParts 有兜底（老存档不会崩）');
+
+  if (!/function entryKey\(/.test(appjs) || !/return `\$\{e\.bvid\}#\$\{/.test(appjs))
+    err('没有 entryKey（单集的唯一键）：分P 靠 cid 区分，键必须带上它');
+  else ok('单集键 = bvid#cid（分P 与合集集数都能唯一定位）');
+
+  if (!/function isEntryOff\(/.test(appjs) || !/function setEntryOff\(/.test(appjs))
+    err('缺少单集开关的读 / 写函数');
+  else if (!/persistLater\(\);/.test(appjs.slice(appjs.indexOf('function setEntryOff'))))
+    err('setEntryOff 没有落盘（重启后开关就丢了）');
+  else ok('单集开关有读有写，且改动会写进存档');
+
+  if (!/function enabledEntries\(/.test(appjs) || !/function enabledCount\(/.test(appjs))
+    err('缺少只取"启用的那几集"的函数（播放 / 数量统计都要用）');
+  else ok('enabledEntries / enabledCount 齐全');
+
+  if (!/data-cact="toggle"/.test(appjs)) err('合集面板每一行没有启用/禁用开关');
+  else if (!/id: 'i-off'|i-off/.test(appjs)) err('禁用态没有图标');
+  else ok('合集面板每一行都有启用/禁用图标按钮');
+
+  if (!/id="btnCollectToggleAll"/.test(html)) err('合集面板顶部没有"一键全部启用/禁用"按钮');
+  else if (!/btnCollectToggleAll'\)\.addEventListener/.test(appjs)) err('一键按钮没有绑定');
+  else ok('顶部一键「全部启用 / 全部禁用」存在且绑定');
+
+  if (!/已启用 \$\{on\.length\}\/\$\{entries\.length\} 集/.test(appjs))
+    err('副标题没有显示"已启用 x/y 集"');
+  else ok('副标题实时显示"已启用 x/y 集"');
+
+  if (!/function collectionBadgeLabel\(/.test(appjs) || !/\$\{kind\} \$\{on\}\/\$\{n\}/.test(appjs))
+    err('列表行徽章没有显示启用数（看不出一行被筛过）');
+  else ok('徽章在有禁用时显示「选集 12/134」');
+
+  if (!/\.collect-row\.off \.ct/.test(css) || !/text-decoration: line-through/.test(css))
+    err('禁用的那一集没有视觉区分（划掉 / 变暗）');
+  else ok('禁用的那一集文字划掉并变暗，且按钮保持可见（好放回来）');
+}
+
+/* ---- 33) 合集摊平进播放序列 ---- */
+console.log('\n[33] 合集摊平进播放序列（顺序/随机/循环都算上它）：');
+{
+  if (!/async function buildSequence\(/.test(appjs)) err('缺少 buildSequence()：合集还是只当一行播');
+  else ok('有 buildSequence() 负责把合集摊平成真正的播放序列');
+
+  const body = appjs.slice(appjs.indexOf('async function buildSequence'), appjs.indexOf('/** 点面板里的某一集'));
+  if (!/const on = enabledEntries\(t, got\)/.test(body)) err('摊平时没有过滤被禁用的单集');
+  else if (!/if \(!on\.length\) continue;/.test(body)) err('整行被禁完时没有跳过这一行');
+  else if (!/on\.forEach\(\(e\) => list\.push\(e\)\)/.test(body)) err('摊平后没有把每一集放进序列');
+  else ok('摊平时跳过被禁用的单集；整行禁完则跳过该行');
+
+  if (!/Promise\.all\(workers\)/.test(body) || !/Math\.min\(4, pending\.length\)/.test(body))
+    err('合集的曲目表不是并发预取的（列表里有多条合集时，点击后要一条一条等）');
+  else ok('合集曲目表并发预取（最多同时 4 条，避免 B 站限流）');
+
+  if (!/startOf\[i\] = list\.length/.test(body)) err('没有记录"界面第 i 行对应序列的哪个位置"（点行播放会播错）');
+  else ok('用 startOf[] 记住每一行在序列里的起点（点哪一行就从哪一行开始播）');
+
+  if (!/if \(got === null\)/.test(body) || !/list\.push\(t\);/.test(body))
+    err('合集读取失败时没有退化成"只播这一首"');
+  else ok('合集读取失败只退化成单曲，不会让整张列表播不了');
+
+  if (!/await buildSequence\(tracks\)/.test(appjs)) err('startFromView 没有调用 buildSequence');
+  else ok('所有播放入口经 startFromView → buildSequence');
+
+  // 正在播合集的某一集时，外面那一行要跟着高亮
+  if (!/function rowIsPlaying\(/.test(appjs) || !/DB\.collectParts\[track\.bvid\]/.test(appjs))
+    err('列表高亮没有认领"正在播的合集子条目"（会没有任何一行是亮的）');
+  else if (!/const playing = rowIsPlaying\(track\)/.test(appjs)) err('trackRow 没有用 rowIsPlaying');
+  else ok('正在播合集的第 N 集时，外面那一行保持高亮');
+
+  // 缓存：展开过一次就不再等网络；存的是剥掉封面的曲目表
+  if (!/DB\.collectParts\[track\.bvid\] = entries\.map\(\(e\) => \(\{/.test(appjs))
+    err('摊平结果没有缓存到本地（每次播放都要等网络）');
+  else if (!/bvid: e\.bvid, cid: e\.cid, page: e\.page,/.test(appjs))
+    err('缓存里存了多余字段（封面 URL 是长链接，上百集会把存档撑大）');
+  else ok('摊平结果剥掉封面后缓存到 collectParts，第二次起即时开播');
+
+  if (!/const collectFetching = new Map\(\)/.test(appjs)) err('没有合并同一 bvid 的并发请求');
+  else ok('同一个合集同时只查一次（播放与面板撞一起也不重复发请求）');
+
+  // 合集里的一集自己和父合集共用 bvid，要靠 cid 比对认出来；认出来了就别再挂父合集的数量
+  if (!/function isCollectPart\(/.test(appjs)) err('没有 isCollectPart：分不出"一条合集"和"合集里的一集"');
+  else if (!/if \(isCollectPart\(track\)\) return false;/.test(appjs))
+    err('分P 行仍会挂上父合集的徽章（每一集都写"选集 132/134"，看不懂）');
+  else ok('分P 行被认出是"合集中的一集"，不再挂父合集的徽章数量');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 34 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
