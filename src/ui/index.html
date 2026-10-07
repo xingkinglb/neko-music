@@ -329,6 +329,7 @@
 
     <div class="modal-tabs" id="modalTabs">
       <button class="tab active" data-tab="appearance">外观</button>
+      <button class="tab" data-tab="lyric">歌词</button>
       <button class="tab" data-tab="bilibili">B 站</button>
     </div>
 
@@ -380,7 +381,18 @@
           <div class="field-hint">调低 = 更透，能看到更多背景</div>
         </div>
 
-        <!-- 歌词开关：默认关。不开的时候也能用播放条上的「词」按钮手动取一次 -->
+        <button class="ghost-btn" id="btnResetAppearance">恢复默认外观</button>
+      </div>
+
+      <!-- ========== 歌词 ========== -->
+      <!--
+        歌词单独一页（主流软件都是这么分类的）。
+        两个开关是联动的，逻辑写在 app.js 里：
+          自动加载歌词 = 供词能力（能不能取到词）
+          桌面歌词     = 用词方式（要不要把词浮在桌面上）
+      -->
+      <div class="pane" data-pane="lyric">
+
         <div class="field">
           <label class="switch-row">
             <span class="switch-label">自动加载歌词</span>
@@ -388,13 +400,70 @@
             <span class="switch"></span>
           </label>
           <div class="field-hint">
-            开启后每首歌会自动取字幕并显示歌词。<br />
-            关着的时候，点播放条上的 <b>词</b> 按钮手动取一次。<br />
+            开启后每首歌都会自动去取字幕。<b>开着桌面歌词时它必须开着</b> ——
+            不然换歌之后悬浮窗没词可显示。<br />
             取字幕需要先在「B 站」标签页填 Cookie，否则拿不到。
           </div>
         </div>
 
-        <button class="ghost-btn" id="btnResetAppearance">恢复默认外观</button>
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">桌面歌词</span>
+            <input type="checkbox" id="chkDesktopLyric" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">
+            开 = 在桌面上挂一个悬浮歌词窗，浮在所有软件最上面；换歌不消失，再点一次「词」关掉。
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">显示行数</div>
+          <select id="selLyricLines">
+            <option value="2">双行（当前句 + 下一句）</option>
+            <option value="1">单行（只显示当前句）</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <div class="field-label">字号 <b id="valLyricFont">22px</b></div>
+          <input type="range" id="rngLyricFont" min="12" max="48" value="22" />
+        </div>
+
+        <div class="field">
+          <div class="field-label">不透明度 <b id="valLyricOpacity">86%</b></div>
+          <input type="range" id="rngLyricOpacity" min="30" max="100" value="86" />
+          <div class="field-hint">调低更透，能看见底下的内容；调高更清楚</div>
+        </div>
+
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">锁定位置</span>
+            <input type="checkbox" id="chkLyricLock" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">锁上之后拖不动它，防止误操作把它挪走；悬浮窗上的按钮照样能点。</div>
+        </div>
+
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">鼠标穿透</span>
+            <input type="checkbox" id="chkLyricThrough" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">
+            开启后，点击会直接穿到下面的软件上（适合边玩边看词）。<br />
+            <b>注意：穿透时悬浮窗自己收不到点击</b>，工具条也就弹不出来了 ——
+            想关掉它只能回到这一页。
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="btn-row">
+            <button class="ghost-btn" id="btnLyricResetPos">恢复默认位置</button>
+          </div>
+          <div class="field-hint">万一把它拖到屏幕外找不回来，点这里让它回到屏幕底部中间。</div>
+        </div>
       </div>
 
       <!-- ========== B 站 ========== -->

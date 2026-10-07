@@ -191,6 +191,9 @@ function applyAppearance() {
     layer.style.filter = b > 0 ? `blur(${b}px)` : 'none';
     document.body.classList.toggle('has-bg', has);
   }
+
+  // 4) 主题换了，桌面歌词悬浮窗的"当前句"颜色也要跟着换
+  pushLyricStyle();
 }
 
 /* ============================================================
@@ -1499,16 +1502,27 @@ function bindLyrics() {
     }
   });
 
-  // 设置面板里的开关
+  // 「自动加载歌词」= 供词能力。
+  // ★ 关掉它时，如果桌面歌词正开着，就一起关 —— 没有词可显示，悬浮窗就没意义了。
   const chk = $('chkAutoLyric');
   if (chk) {
     chk.addEventListener('change', () => {
       DB.settings.autoLyric = chk.checked;
       persist();
-      if (chk.checked) loadLyrics(false);   // 开着就立刻给当前这首歌补上
-      toast(chk.checked ? '已开启自动歌词' : '已关闭自动歌词');
+      if (chk.checked) {
+        loadLyrics(false);        // 开着就立刻给当前这首歌补上
+        toast('已开启自动歌词');
+      } else if (lw().on) {
+        closeDesktopLyric();
+        syncLyricSettingsUI();
+        toast('已关闭自动歌词，桌面歌词也一起关了');
+      } else {
+        toast('已关闭自动歌词');
+      }
     });
   }
+
+  bindLyricSettings();
 }
 
 /* ============================================================
@@ -1608,10 +1622,73 @@ function toggleDesktopLyric(want) {
   else pushLyricToDesktop();
 }
 
-/** 设置面板里那几个歌词控件的值 ← 读设置 */
+/** 设置面板「歌词」页里所有控件 ← 读设置（开关窗口 / 改字号后也要跟着变） */
 function syncLyricSettingsUI() {
   const chkAuto = $('chkAutoLyric');
   if (chkAuto) chkAuto.checked = !!DB.settings.autoLyric;
+
+  const s = lw();
+  const desk = $('chkDesktopLyric');    if (desk)  desk.checked = !!s.on;
+  const lines = $('selLyricLines');     if (lines) lines.value = String(s.lines);
+  const font = $('rngLyricFont');
+  if (font) { font.value = s.fontSize; $('valLyricFont').textContent = s.fontSize + 'px'; }
+  const op = $('rngLyricOpacity');
+  if (op) { op.value = s.opacity; $('valLyricOpacity').textContent = s.opacity + '%'; }
+  const lock = $('chkLyricLock');       if (lock)    lock.checked = !!s.locked;
+  const through = $('chkLyricThrough'); if (through) through.checked = !!s.clickThrough;
+}
+
+/** 设置面板「歌词」页里所有控件 → 写设置 */
+function bindLyricSettings() {
+  const desk = $('chkDesktopLyric');
+  if (desk) desk.addEventListener('change', () => {
+    toggleDesktopLyric(desk.checked);
+    syncLyricSettingsUI();
+  });
+
+  const lines = $('selLyricLines');
+  if (lines) lines.addEventListener('change', () => {
+    lw().lines = lines.value === '1' ? 1 : 2;
+    pushLyricStyle(); persistLater();
+  });
+
+  const font = $('rngLyricFont');
+  if (font) font.addEventListener('input', () => {
+    lw().fontSize = Number(font.value);
+    $('valLyricFont').textContent = lw().fontSize + 'px';
+    pushLyricStyle(); persistLater();
+  });
+
+  const op = $('rngLyricOpacity');
+  if (op) op.addEventListener('input', () => {
+    lw().opacity = Number(op.value);
+    $('valLyricOpacity').textContent = lw().opacity + '%';
+    pushLyricStyle(); persistLater();
+  });
+
+  const lock = $('chkLyricLock');
+  if (lock) lock.addEventListener('change', () => {
+    lw().locked = lock.checked;
+    pushLyricStyle(); persistLater();
+  });
+
+  // 鼠标穿透：开启后悬浮窗自己点不到自己，所以开关只能放在主窗口这一页
+  const through = $('chkLyricThrough');
+  if (through) through.addEventListener('change', () => {
+    lw().clickThrough = through.checked;
+    window.neko.lyricThrough(through.checked);
+    persistLater();
+    toast(through.checked ? '已开启鼠标穿透（点歌词会穿到下面的软件）' : '已关闭鼠标穿透');
+  });
+
+  // 拖到屏幕外找不回来时的救急按钮
+  const reset = $('btnLyricResetPos');
+  if (reset) reset.addEventListener('click', () => {
+    lw().x = null; lw().y = null;
+    persistLater();
+    if (lw().on) { closeDesktopLyric(); openDesktopLyric(); pushLyricToDesktop(); }
+    toast('已恢复默认位置');
+  });
 }
 
 /** 悬浮窗上的按钮 → 在这里执行（切歌 / 播放暂停 / 字号 / 锁定 / 关闭） */

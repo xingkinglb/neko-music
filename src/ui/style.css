@@ -765,8 +765,22 @@ ul { list-style: none; }
 .lyric-close:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
 
 /* ============================================================
-   设置面板里的开关（自动歌词）
+   设置面板里的开关与下拉框（歌词页在用）
    ============================================================ */
+/* 下拉框（歌词显示行数）：跟着面板的深色走，别冒出系统那套白底 */
+.field select {
+  width: 100%; padding: 8px 10px;
+  font-size: 13px; font-family: inherit;
+  color: var(--text);
+  background: rgba(255,255,255,0.07);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.field select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* 下拉展开后的选项由系统绘制，深色模式下给它一个深色底 */
+.field select option { background: #1c1c28; color: var(--text); }
+
 .switch-row {
   display: flex; align-items: center; gap: 12px;
   cursor: pointer; user-select: none;
