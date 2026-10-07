@@ -791,17 +791,34 @@ function bindSettings() {
    ============================================================ */
 
 /**
- * 设置音量（0~100），顺手把喇叭图标也换掉。
+ * 设置音量（0~100），顺手把喇叭图标、浮层里的数字、滑块位置一起刷新。
  * 三档图标：0 = 静音（叉），小于一半 = 小声（一道弧），其余 = 大声（两道弧）。
  * save 为 true 时写进存档（拖动滑杆时用防抖版，避免一秒钟存上百次）。
  */
 function applyVolume(v, save) {
-  audio.volume = v / 100;
-  $('volIcon').innerHTML = ic(v === 0 ? 'i-vol-x' : (v < 50 ? 'i-vol-1' : 'i-vol-2'));
+  const val = Math.max(0, Math.min(100, Math.round(v)));
+  audio.volume = val / 100;
+  if (save && val > 0) volBeforeMute = val;   // 记住最后一次"有声"的音量
   if (save) {
-    DB.settings.volume = v;
+    DB.settings.volume = val;
     persistLater();
   }
+  updateVolumeUI(val);
+}
+
+/** 静音前的音量，用来在点"取消静音"时还原。只在本次运行里记，不写进存档。 */
+let volBeforeMute = 80;
+
+/** 把音量的三处显示同步：喇叭图标 + 浮层数字 + 竖向滑块 */
+function updateVolumeUI(v) {
+  const val = (v === undefined) ? Math.round((audio.volume || 0) * 100) : v;
+  const icon = $('btnMute');
+  if (icon) icon.innerHTML = ic(val === 0 ? 'i-vol-x' : (val < 50 ? 'i-vol-1' : 'i-vol-2'));
+  const wrap = $('volWrap');
+  if (wrap) wrap.classList.toggle('muted', val === 0);
+  const num = $('volNum');    if (num)  num.textContent = String(val);
+  const fill = $('volFill');  if (fill) fill.style.height = val + '%';
+  const knob = $('volKnob');  if (knob) knob.style.bottom = val + '%';
 }
 
 function bindEvents() {
@@ -998,10 +1015,8 @@ function bindEvents() {
   progress.addEventListener('pointerup', endSeek);
   progress.addEventListener('pointercancel', endSeek);
 
-  /* ---- 音量：拖动即时生效，停手后写进存档（下次打开还是这个值） ---- */
-  $('volume').addEventListener('input', (e) => {
-    applyVolume(Number(e.target.value), true);
-  });
+  /* ---- 音量：点图标静音、滚轮 ±5、竖向滑杆拖动（见 bindVolume） ---- */
+  bindVolume();
 
   /* ---- 音频事件 ---- */
   // 播放/暂停/缓冲三个状态，换的是图标本身。
@@ -1091,7 +1106,6 @@ function bindEvents() {
     if (e.key === 'ArrowUp') {
       e.preventDefault();
       const v = Math.min(100, Math.round((audio.volume || 0) * 100) + 5);
-      $('volume').value = v;
       applyVolume(v, true);
       toast('音量 ' + v + '%');
       return;
@@ -1099,7 +1113,6 @@ function bindEvents() {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       const v = Math.max(0, Math.round((audio.volume || 0) * 100) - 5);
-      $('volume').value = v;
       applyVolume(v, true);
       toast('音量 ' + v + '%');
       return;
@@ -1120,6 +1133,60 @@ function bindEvents() {
 
   /* ---- 歌词 ---- */
   bindLyrics();
+}
+
+/**
+ * 音量交互：点图标静音 / 滚轮 ±5 / 竖向滑杆拖动。
+ * 滑杆平时是收起的（CSS 里 opacity:0 + 不可点），鼠标移进 .vol-wrap 才浮出来，
+ * 所以这里只管数值，不管显隐。
+ */
+function bindVolume() {
+  const wrap = $('volWrap');
+  const track = $('volTrack');
+  const muteBtn = $('btnMute');
+  if (!wrap || !track || !muteBtn) return;
+
+  // 点喇叭 = 静音 / 取消静音（网易云、Spotify 都是这个习惯）
+  muteBtn.addEventListener('click', () => {
+    const cur = Math.round((audio.volume || 0) * 100);
+    if (cur > 0) {
+      volBeforeMute = cur;
+      applyVolume(0, true);
+      toast('已静音');
+    } else {
+      applyVolume(volBeforeMute > 0 ? volBeforeMute : 80, true);
+    }
+  });
+
+  // 滚轮调音量：只在鼠标停在音量这一块上时才生效，
+  // 否则你在列表里随便滚一下就改了音量，很莫名。
+  wrap.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const cur = Math.round((audio.volume || 0) * 100);
+    applyVolume(cur + (e.deltaY < 0 ? 5 : -5), true);
+  }, { passive: false });
+
+  // 竖向滑杆：按住拖动即时生效，松手才写盘（拖动中每一像素都存一次会把硬盘刷爆）
+  let dragging = false;
+  const setFromEvent = (e) => {
+    const r = track.getBoundingClientRect();
+    const ratio = 1 - (e.clientY - r.top) / r.height;   // 底部 = 0，顶部 = 100
+    applyVolume(Math.max(0, Math.min(1, ratio)) * 100, false);
+  };
+  track.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    try { track.setPointerCapture(e.pointerId); } catch (_) { /* 指针已经没了，忽略 */ }
+    setFromEvent(e);
+  });
+  track.addEventListener('pointermove', (e) => { if (dragging) setFromEvent(e); });
+  const stopDrag = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    try { track.releasePointerCapture(e.pointerId); } catch (_) { /* 同上 */ }
+    persistLater();
+  };
+  track.addEventListener('pointerup', stopDrag);
+  track.addEventListener('pointercancel', stopDrag);
 }
 
 /* ============================================================
@@ -1533,9 +1600,9 @@ async function boot() {
   migrateSettings();
   applyAppearance();
 
-  // 2.5) 音量记忆：把上次退出时的音量填回滑块和播放器
+  // 2.5) 音量记忆：把上次退出时的音量填回播放器（浮层里的数字和滑块由 updateVolumeUI 同步）
   const vol = DB.settings.volume ?? 80;
-  $('volume').value = vol;
+  if (vol > 0) volBeforeMute = vol;
   applyVolume(vol, false);
 
   // 3) 绑事件

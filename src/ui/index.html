@@ -280,8 +280,23 @@
       <button class="ico-btn" id="btnOpenBili" title="在浏览器里打开这个视频">
         <svg class="ic"><use href="#i-open-bili"/></svg>
       </button>
-      <span class="ico" id="volIcon"><svg class="ic"><use href="#i-vol-2"/></svg></span>
-      <input type="range" id="volume" min="0" max="100" value="80" />
+      <!--
+        音量：平时只留一个喇叭图标，不占宽度。
+        鼠标移到这一块（图标或滑杆都算）才向上浮出竖向滑杆，移开 400ms 自动收起。
+        结构上 .vol-pop 是 .vol-wrap 的子元素，所以鼠标从图标移到滑杆上时不会中途消失。
+      -->
+      <div class="vol-wrap" id="volWrap">
+        <button class="ico-btn" id="btnMute" title="静音 / 取消静音（在图标上滚滚轮也能调）">
+          <svg class="ic"><use href="#i-vol-2"/></svg>
+        </button>
+        <div class="vol-pop" id="volPop">
+          <div class="vol-num" id="volNum">80</div>
+          <div class="vol-track" id="volTrack">
+            <div class="vol-fill" id="volFill"></div>
+            <div class="vol-knob" id="volKnob"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </footer>
 </div>

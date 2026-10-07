@@ -569,16 +569,64 @@ ul { list-style: none; }
 
 /* 右：音量 */
 .volume { display: flex; align-items: center; gap: 9px; justify-content: flex-end; }
-.volume .ico { color: var(--muted); }
-.volume .ico .ic { width: 16px; height: 16px; }
-/* 滑杆通用样式：播放条的音量 + 设置面板里的各种调节杆共用 */
-#volume, .field input[type="range"] {
+
+/* 音量：图标 + 悬停浮出的竖向滑杆（YouTube Music 那种）。
+   外层 .vol-wrap 负责"悬停区域"——图标和浮层都在它里面，
+   鼠标从图标移到浮层上时仍然算在区域内，不会中途收起。 */
+.vol-wrap { position: relative; display: flex; align-items: center; }
+.vol-wrap .ico-btn { color: var(--muted); }
+.vol-wrap .ico-btn:hover { color: var(--text-2); }
+.vol-wrap .ico-btn .ic { width: 16px; height: 16px; }
+/* 静音时喇叭变暗、带一点红，一眼能看出状态 */
+.vol-wrap.muted .ico-btn { color: #ff8a8a; }
+
+.vol-pop {
+  position: absolute; right: -6px; bottom: calc(100% + 10px);
+  z-index: 40;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  width: 40px; padding: 12px 0 13px;
+  background: rgba(20, 20, 30, 0.94);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  /* 收起态：透明 + 下沉一点点，鼠标穿透（不然会挡住下面的内容） */
+  opacity: 0; transform: translateY(8px) scale(0.96);
+  pointer-events: none;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+/* 悬停整个区域（图标或浮层自己）就展开 */
+.vol-wrap:hover .vol-pop, .vol-pop:hover {
+  opacity: 1; transform: none; pointer-events: auto;
+}
+.vol-num {
+  font-size: 11px; color: var(--text-2);
+  font-variant-numeric: tabular-nums; line-height: 1;
+}
+.vol-track {
+  position: relative; width: 6px; height: 86px;
+  border-radius: 3px; background: rgba(255, 255, 255, 0.16);
+  cursor: pointer; touch-action: none;
+}
+.vol-fill {
+  position: absolute; left: 0; bottom: 0; width: 6px; height: 80%;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+}
+.vol-knob {
+  position: absolute; left: 50%; bottom: 80%;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--accent);
+  transform: translate(-50%, 50%);
+  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.55);
+}
+
+/* 滑杆通用样式：设置面板里的各种调节杆共用（播放条的音量已改成自绘竖向滑杆） */
+.field input[type="range"] {
   width: 96px; height: 4px; border-radius: 2px;
   -webkit-appearance: none; appearance: none;
   background: rgba(255,255,255,0.14);
   cursor: pointer;
 }
-#volume::-webkit-slider-thumb,
 .field input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
   width: 11px; height: 11px; border-radius: 50%;
