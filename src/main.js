@@ -417,8 +417,8 @@ function registerHandlers() {
   // 主窗口负责"给内容"，这里负责"转发和操作窗口本身"。
   ipcMain.on('lyric:open',   (_e, opts) => createLyricWindow(opts));
   ipcMain.on('lyric:close',  () => closeLyricWindow());
-  ipcMain.on('lyric:push',   (_e, data) => pushToLyric('lyric:data', data));
-  ipcMain.on('lyric:style',  (_e, style) => pushToLyric('lyric:style', style));
+  ipcMain.on('lyric:push',   (_e, data) => { lastLyricData = data; pushToLyric('lyric:data', data); });
+  ipcMain.on('lyric:style',  (_e, style) => { lastLyricStyle = style; pushToLyric('lyric:style', style); });
   ipcMain.on('lyric:resize', (_e, h) => {
     if (!lyricWindow || lyricWindow.isDestroyed()) return;
     const hh = Math.max(LYRIC_MIN_H, Math.round(Number(h) || LYRIC_MIN_H));
@@ -490,6 +490,12 @@ function pushToLyric(channel, payload) {
   try { lyricWindow.webContents.send(channel, payload); } catch (_) { /* 窗口正在关闭，忽略 */ }
 }
 
+/* 最后一次推过去的样式和歌词。
+   为什么要存：窗口刚创建时页面还没跑完脚本，这时候发过去的消息会被丢掉 ——
+   等页面自己加载好了（did-finish-load）再补发一次，就不会出现"开着却是默认字号"。 */
+let lastLyricStyle = null;
+let lastLyricData = null;
+
 function createLyricWindow(opts) {
   const o = (opts && typeof opts === 'object') ? opts : {};
   if (lyricWindow && !lyricWindow.isDestroyed()) {
@@ -545,6 +551,15 @@ function createLyricWindow(opts) {
     if (o.clickThrough) lyricWindow.setIgnoreMouseEvents(true, { forward: true });
     lyricWindow.show();
     // 告诉页面窗口现在在哪 —— 拖动时要以它为基准算偏移
+    const [px, py] = lyricWindow.getPosition();
+    pushToLyric('lyric:pos', { x: px, y: py });
+  });
+
+  // 页面脚本跑完了：把之前可能丢掉的消息补发一遍，并同步一次位置
+  lyricWindow.webContents.once('did-finish-load', () => {
+    if (!lyricWindow || lyricWindow.isDestroyed()) return;
+    pushToLyric('lyric:style', lastLyricStyle || o);
+    if (lastLyricData) pushToLyric('lyric:data', lastLyricData);
     const [px, py] = lyricWindow.getPosition();
     pushToLyric('lyric:pos', { x: px, y: py });
   });
