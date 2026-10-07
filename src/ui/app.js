@@ -149,10 +149,6 @@ function applyAppearance() {
   // 1) 主题（给 <html> 打标记，CSS 里的 [data-theme="xxx"] 就会生效）
   root.dataset.theme = s.theme || 'pink';
 
-  // 把主色发给主进程，让它同步更新右上角系统按钮的颜色（见 main.js 的 titleBarOverlay）
-  const accentRgb = getComputedStyle(root).getPropertyValue('--accent-rgb').trim();
-  if (accentRgb) window.neko.setTitlebarTheme(accentRgb);
-
   // 2) 毛玻璃
   root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 18) + 'px');
   root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));
@@ -809,6 +805,19 @@ function bindEvents() {
 
   /* ---- 设置面板（外观 + Cookie） ---- */
   bindSettings();
+
+  /* ---- 右上角自绘窗口按钮：最小化 / 最大化(切换) / 关闭 ---- */
+  $('winMin').addEventListener('click', () => window.neko.winMin());
+  $('winMax').addEventListener('click', () => window.neko.winMax());
+  $('winClose').addEventListener('click', () => window.neko.winClose());
+  // 主进程告诉我们窗口已被最大化 / 还原（双击标题栏也会触发），
+  // 这里把"最大化"图标切换成"还原"图标，反之亦然。
+  window.neko.onWinState((max) => {
+    const use = $('winMax').querySelector('use');
+    if (use) use.setAttribute('href', max ? '#i-win-restore' : '#i-win-max');
+    $('winMax').title = max ? '还原' : '最大化';
+    $('winMax').setAttribute('aria-label', max ? '还原' : '最大化');
+  });
 
   /* ---- 新建歌单 ---- */
   $('btnNewPlaylist').addEventListener('click', async () => {

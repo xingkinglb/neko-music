@@ -35,13 +35,9 @@
   --glass-rgb:   16 16 26;  /* 玻璃本身带的底色（接近纯黑，保证白字可读） */
 
   /* ---- 顶部自绘标题栏 ---- */
-  /* ★ 这个值必须和 main.js 里 titleBarOverlay.height 一模一样，
-     否则系统画的 最小化/最大化/关闭 三个按钮会和这一条对不齐。 */
+  /* 标题栏的高度。系统按钮已经不要了（见 main.js 的 titleBarStyle: 'hidden'），
+     这个值只用来给 .titlebar 定高、和下面的内容错开，避免被盖住。 */
   --titlebar-h:  38px;
-
-  /* 标题栏底色 = 主色染过的半透明深色（和 main.js 里 titleBarOverlay 同一公式），
-     这样右上角系统按钮能和这一条无缝融合，并且换主题时一起变色 */
-  --titlebar-bg: color-mix(in srgb, var(--accent) 20%, rgba(16, 16, 26, 0.85));
 
   /* ---- 氛围光晕强度 ---- */
   --glow: 1;
@@ -158,20 +154,19 @@ ul { list-style: none; }
 .titlebar {
   grid-area: titlebar;
   display: flex; align-items: center; gap: 9px;
-  padding: 0 16px;
+  padding: 0 0 0 16px;   /* 右边不留内边距：让自绘的三个窗口按钮贴到窗口右边缘 */
 
   /* ★ 按住这里能把窗口拖着走，双击能最大化/还原。
      drag 会让整条变成"窗口把手"，所以这里千万别放按钮或输入框，
      否则它们会点不动（真要放，就得给那个元素单独写 -webkit-app-region: no-drag）。 */
   -webkit-app-region: drag;
 
-  /* 底色用的不是固定灰，而是主色染过的半透明深色（见 --titlebar-bg）。
-     两个原因：
-     ① 右上角那块按钮区是 Windows 用 titleBarOverlay.color 画的；我们让它的颜色和这一条
-        用同一套公式（主色染 20% 进深色），所以换主题时两者一起变色，且接缝看不出来。
-     ② 仍然不加 backdrop-filter —— 避开"drag 区域叠加 backdrop-filter 在 Windows 上
-        偶尔导致窗口拖不动"这个已知坑。 */
-  background: var(--titlebar-bg);
+  /* 和其它面板一样走"半透明磨砂"，而不是一条实心深色（那样顶栏又暗又闷）。
+     右上角那三个窗口按钮（最小化/最大化/关闭）是我们自己用 HTML 画的（见 .win-controls），
+     它们也用半透明 + 悬停染主题色，所以和这一条磨砂底天然一体、一起跟随主题色。
+     顶部正好是背景主题光晕最强的地方，于是这条顶栏会透出淡淡的主题色。 */
+  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) - 0.05));
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-bottom: 1px solid var(--line);
 }
 /* 标题栏里的品牌小圆点，比侧边栏时代小一点，免得压住文字 */
@@ -180,6 +175,28 @@ ul { list-style: none; }
   box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.65);
 }
 .titlebar .brand-text { font-size: 13.5px; letter-spacing: 0.4px; }
+
+/* 自绘的三个窗口按钮（最小化 / 最大化 / 关闭）。
+   整块必须标 no-drag，否则会被标题栏的拖动区吃掉点击、按不动；
+   margin-left:auto 把它们推到最右边。颜色走主题（悬停染主色，关闭沿用"变红"习惯）。 */
+.win-controls {
+  margin-left: auto;
+  align-self: stretch;
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+.win-btn {
+  width: 46px; height: 100%;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  background: transparent;
+  transition: background 0.14s, color 0.14s;
+}
+.win-btn .ic { width: 15px; height: 15px; }
+.win-btn:hover { background: rgba(var(--accent-rgb), 0.22); color: #fff; }
+.win-btn:active { background: rgba(var(--accent-rgb), 0.34); }
+.win-btn.close:hover { background: #e81123; color: #fff; }
+.win-btn.close:active { background: #c50f1f; }
 
 /* ============================================================
    左侧边栏
@@ -265,7 +282,6 @@ ul { list-style: none; }
 .playlist-row .del:hover { color: var(--accent); }
 
 .sidebar-foot { padding: 10px 10px 2px; }
-.sidebar-foot .tip { font-size: 11px; color: var(--muted-2); }
 
 /* ============================================================
    右侧主区域

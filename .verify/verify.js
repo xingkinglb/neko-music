@@ -73,19 +73,24 @@ const nekoCalls = new Set([
   ...appjs.matchAll(/api\(\s*'([\w]+)'/g).map((m) => m[1]),
   ...appjs.matchAll(/window\.neko\.([\w]+)\(/g).map((m) => m[1]),
 ]);
-/* 从 preload 抽出 方法名 → IPC channel 的真实映射 */
-const preloadMap = {};
-for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.invoke\(\s*'([^']+)'/gm)) {
-  preloadMap[m[1]] = m[2];
-}
+/* 从 preload 抽出三类桥：invoke（请求-响应）/ send（单向通知主进程）/ on（订阅主进程推送） */
+const preloadInvoke = {};
+const preloadSend = {};
+const preloadOn = {};
+for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.invoke\(\s*'([^']+)'/gm)) preloadInvoke[m[1]] = m[2];
+for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.send\(\s*'([^']+)'/gm))   preloadSend[m[1]]   = m[2];
+for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.on\(\s*'([^']+)'/gm))     preloadOn[m[1]]     = m[2];
 const handlers = new Set([...mainjs.matchAll(/handle\(\s*'([\w:]+)'/g)].map((m) => m[1]));
+const onHandlers = new Set([...mainjs.matchAll(/ipcMain\.on\(\s*'([\w:-]+)'/g)].map((m) => m[1]));
+const allChannels = new Set([...handlers, ...onHandlers]);
 let ipcBad = false;
 nekoCalls.forEach((name) => {
-  const ch = preloadMap[name];
+  const ch = preloadInvoke[name] || preloadSend[name] || preloadOn[name];
   if (!ch) { err(`neko.${name} 在 preload 里没有映射到任何 channel`); ipcBad = true; return; }
-  if (!handlers.has(ch)) { err(`neko.${name} 映射到 channel '${ch}'，但 main.js 没注册该 handle`); ipcBad = true; }
+  if (preloadOn[name]) return; // 订阅型：主进程主动推，不需要渲染端 handler，跳过
+  if (!allChannels.has(ch)) { err(`neko.${name} 映射到 channel '${ch}'，但 main.js 没注册该 handle/on`); ipcBad = true; }
 });
-if (!ipcBad) ok(`渲染层调用的 ${nekoCalls.size} 个 neko 方法全部经 preload 接通到 main.js 的 handle`);
+if (!ipcBad) ok(`渲染层调用的 ${nekoCalls.size} 个 neko 方法全部经 preload 接通到 main.js`);
 
 /* ---- 6) bg:// 协议两道安全闸（纯逻辑复刻） ---- */
 console.log('\n[5] bg:// 安全闸逻辑：');
@@ -120,6 +125,8 @@ const usedIcons = new Set([
   ...appjs.matchAll(/ic\(\s*'([^']+)'/g).map((m) => m[1]),
   // 三元里写的图标名（如 ic(v === 0 ? 'i-vol-x' : ...)）也要捞出来
   ...appjs.matchAll(/'(i-[\w-]+)'/g).map((m) => m[1]),
+  // 运行时通过 setAttribute('href', '#i-xxx') 切换的图标也要算上
+  ...appjs.matchAll(/#(i-[\w-]+)/g).map((m) => m[1]),
 ]);
 const iconMissing = [...usedIcons].filter((n) => !symbols.has(n));
 if (iconMissing.length) iconMissing.forEach((n) => err(`用了图标 #${n}，但图标库里没有 <symbol id="${n}">`));
@@ -127,25 +134,31 @@ else ok(`全部 ${usedIcons.size} 个图标引用都能找到定义`);
 const iconUnused = [...symbols].filter((n) => !usedIcons.has(n));
 if (iconUnused.length) console.log(`  · 提示：图标库里这些暂时没人用 → ${iconUnused.join(', ')}`);
 
-/* ---- 8) 自绘标题栏：CSS 高度必须等于主进程 titleBarOverlay 的高度 ---- */
+/* ---- 8) 自绘标题栏：高度、拖动区、系统按钮已隐藏 ---- */
 console.log('\n[7] 自绘标题栏一致性：');
-const cssTbH = (css.match(/--titlebar-h:\s*(\d+)px/) || [])[1];
-const jsTbH = (mainjs.match(/titleBarOverlay:\s*\{[\s\S]*?height:\s*(\d+)/) || [])[1];
-if (!cssTbH) err('style.css 里找不到 --titlebar-h');
-else if (!jsTbH) err('main.js 里找不到 titleBarOverlay.height');
-else if (cssTbH !== jsTbH) err(`--titlebar-h=${cssTbH}px，但 titleBarOverlay.height=${jsTbH}px —— 两者必须一致，否则系统按钮会和标题栏错位`);
-else ok(`标题栏高度两处一致（${cssTbH}px）`);
+if (!/--titlebar-h:\s*\d+px/.test(css)) err('style.css 里找不到 --titlebar-h（标题栏高度没定义，布局会乱）');
+else ok('.titlebar 有高度变量 --titlebar-h');
 
 const tbRule = (css.match(/\.titlebar\s*\{[\s\S]*?\n\}/) || [''])[0];
 if (!/app-region:\s*drag/.test(tbRule)) err('.titlebar 少了 -webkit-app-region: drag —— 窗口会拖不动（标题栏藏起来后就没有别的拖动区了）');
 else ok('.titlebar 是拖动区，窗口能拖着走');
 
+// 标题栏里放了自绘按钮（最小化/最大化/关闭），它们必须用 .win-controls 包起来并标 no-drag，
+// 否则会被 drag 区域吃掉点击。这里静态确认：按钮存在 + no-drag 存在。
 const tbHtml = (html.match(/<header class="titlebar">[\s\S]*?<\/header>/) || [''])[0];
-if (/<button|<input|<a\s/.test(tbHtml)) err('.titlebar 里放了可点击元素 —— drag 会让它们点不动（应给该元素单独加 no-drag）');
-else ok('.titlebar 里只有装饰内容，没有会被 drag 吃掉点击的控件');
+const hasBtns = /class="win-controls"/.test(tbHtml);
+if (/<button|<input|<a\s/.test(tbHtml) && !hasBtns) err('.titlebar 里有可点击元素，但没用 .win-controls 包起来 —— 会被 drag 吃掉点击');
+else if (/<button|<input|<a\s/.test(tbHtml) && !/no-drag/.test(css)) err('.titlebar 里有可点击按钮，但 CSS 里找不到 no-drag —— 按钮会点不动');
+else if (hasBtns) ok('.titlebar 里的自绘按钮在 .win-controls 中（已标 no-drag），点击不会被拖动区吃掉');
+else ok('.titlebar 里只有装饰内容');
 
 if (!/titleBarStyle:\s*'hidden'/.test(mainjs)) err("main.js 没有 titleBarStyle: 'hidden' —— 系统那条白色标题栏还在");
 else ok("main.js 已设置 titleBarStyle: 'hidden'（系统标题栏已隐藏）");
+
+// 关键：不能配 titleBarOverlay，否则 Windows 又会把系统按钮画回来（正是之前用户吐槽的"深色方块"）
+// 只在它作为"真正的配置项"（titleBarOverlay: ...）或调用（setTitleBarOverlay(）时才算数，注释里提到不算。
+if (/\btitleBarOverlay\s*[:\(]/.test(mainjs)) err('main.js 还配了 titleBarOverlay —— Windows 会重新画出系统按钮，和我们的自绘按钮重叠');
+else ok("main.js 没有配 titleBarOverlay（系统按钮彻底消失，只剩我们的自绘按钮）");
 
 /* ---- 9) 界面里不该再出现彩色 emoji ---- */
 console.log('\n[8] 彩色 emoji 残留检查：');
@@ -174,22 +187,32 @@ const lineDef = (css.match(/--line:\s*([^;]+);/) || [])[1] || '';
 if (!/var\(\s*--accent/.test(lineDef)) err('--line 没有引用 var(--accent) —— 分隔线/卡片边框不会跟着主题变色');
 else ok(`边框 --line 跟着主色走（${lineDef.trim()}）`);
 
-const tbBgDef = (css.match(/--titlebar-bg:\s*([^;]+);/) || [])[1] || '';
-if (!/var\(\s*--accent/.test(tbBgDef)) err('--titlebar-bg 没有引用 var(--accent) —— 标题栏不会跟着主题变色');
-else ok(`标题栏底色 --titlebar-bg 跟着主色走（${tbBgDef.trim()}）`);
+const tbRuleNow = (css.match(/\.titlebar\s*\{[\s\S]*?\n\}/) || [''])[0];
+if (!/backdrop-filter/.test(tbRuleNow)) err('.titlebar 没有 backdrop-filter —— 顶栏不是磨砂玻璃');
+else if (!/rgba\(\s*var\(\s*--glass-rgb/.test(tbRuleNow)) err('.titlebar 不是半透明玻璃底（太实、会显得暗）');
+else ok('.titlebar 是半透明磨砂玻璃，且能透出背景主题色');
 
-const tbBgUsed = /\.titlebar\s*\{[\s\S]*?background:\s*var\(\s*--titlebar-bg\s*\)/.test(css);
-if (!tbBgUsed) err('.titlebar 没有用 var(--titlebar-bg)，标题栏底色没接上');
-else ok('.titlebar 用上了 --titlebar-bg');
+/* ---- 11) 自绘窗口按钮的 IPC 链路（界面 → preload.send → main.ipcMain.on） ---- */
+console.log('\n[10] 自绘窗口按钮的 IPC 链路：');
+const winApi = ['winMin', 'winMax', 'winClose'];
+const winCh = {};
+let winBad = false;
+winApi.forEach((name) => {
+  const ch = preloadSend[name];
+  if (!ch) { err(`neko.${name} 在 preload 里没映射到 send channel`); winBad = true; return; }
+  if (!onHandlers.has(ch)) { err(`neko.${name} → '${ch}'，但 main.js 没用 ipcMain.on 注册`); winBad = true; }
+  winCh[name] = ch;
+});
+// 这三个按钮的 id 必须都存在于 index.html
+['winMin', 'winMax', 'winClose'].forEach((id) => {
+  if (!htmlIds.has(id)) { err(`index.html 里没有 #${id} 按钮`); winBad = true; }
+});
+// 最大化/还原切换：主进程要能主动把状态推回界面
+if (!/onWinState/.test(preload)) err('preload 没有暴露 onWinState（界面收不到最大化/还原状态）');
+else if (!/webContents\.send\(\s*'win:state'/.test(mainjs)) err("main.js 没有 webContents.send('win:state') —— 图标不会在最大化/还原间切换");
+else ok('主进程在最大化/还原时会通知界面（onWinState 已接通），图标能切换');
 
-/* ---- 11) 标题栏按钮颜色链路（preload → main → 调用 setTitleBarOverlay） ---- */
-console.log('\n[10] 标题栏按钮跟随主题的链路：');
-if (!preloadMap['setTitlebarTheme']) err('preload 没有暴露 setTitlebarTheme');
-else if (!handlers.has('theme:overlay')) err("main.js 没有 handle('theme:overlay')");
-else ok('换主题时主色经 setTitlebarTheme → theme:overlay 传到主进程');
-
-if (!/setTitleBarOverlay/.test(mainjs)) err('main.js 从未调用 setTitleBarOverlay —— 按钮颜色不会更新');
-else ok('main.js 会在换主题时重设 setTitleBarOverlay');
+if (!winBad) ok(`自绘窗口按钮 ${winApi.length} 个经 preload.send 接通到 main.js 的 ipcMain.on（${winApi.map((n) => winCh[n]).join(' / ')}）`);
 
 /* ---- 汇总 ---- */
 console.log('\n========================================');

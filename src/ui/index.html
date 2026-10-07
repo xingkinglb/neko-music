@@ -121,6 +121,21 @@
       <path d="M11.6 4.4 7 8.2H2.8v7.6H7l4.6 3.8z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
       <path d="m16.2 9.6 5 4.8M21.2 9.6l-5 4.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
     </symbol>
+
+    <!-- ---- 窗口控制：自绘的最小化 / 最大化 / 还原 / 关闭（替换掉系统按钮） ---- -->
+    <symbol id="i-win-min" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <path d="M5 12h14"/>
+    </symbol>
+    <symbol id="i-win-max" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+      <rect x="5.5" y="5.5" width="13" height="13" rx="2"/>
+    </symbol>
+    <symbol id="i-win-restore" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+      <rect x="8.5" y="4.5" width="11" height="11" rx="2"/>
+      <rect x="4.5" y="8.5" width="11" height="11" rx="2"/>
+    </symbol>
+    <symbol id="i-win-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <path d="M6 6 18 18M18 6 6 18"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -142,16 +157,21 @@
 
   <!--
     ============ 顶部标题栏（自己画的） ============
-    系统那圈白色的标题栏已经被藏掉了（见 main.js 的 titleBarStyle），
-    这一条由我们自己画，颜色就跟界面走，再也不会出现白边。
+    系统那条白色标题栏已经被藏掉了（见 main.js 的 titleBarStyle）；
+    连系统画的 最小化/最大化/关闭 三个按钮也不再要了（不再设 titleBarOverlay），
+    改成下面这三个自己画的按钮 —— 它们能跟着主题变色、还和磨砂标题栏天然一体。
 
-    · -webkit-app-region: drag 让它能"按住拖动窗口"，双击还能最大化/还原；
-    · 右上角那一小块是系统画的 最小化/最大化/关闭 三个按钮的地盘，
-      所以这条栏里只放左边的品牌，右边别摆东西（否则会被按钮压住、还点不动）。
+    · -webkit-app-region: drag 让整条能"按住拖动窗口"，双击还能最大化/还原；
+    · 三个按钮所在的那块必须标 no-drag（见 .win-controls），否则会被拖动区吃掉点击。
   -->
   <header class="titlebar">
     <span class="brand-dot"></span>
     <span class="brand-text">Neko Music</span>
+    <div class="win-controls">
+      <button class="win-btn" id="winMin" title="最小化" aria-label="最小化"><svg class="ic"><use href="#i-win-min"/></svg></button>
+      <button class="win-btn" id="winMax" title="最大化" aria-label="最大化"><svg class="ic"><use href="#i-win-max"/></svg></button>
+      <button class="win-btn close" id="winClose" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
+    </div>
   </header>
 
   <!-- ============ 左侧边栏 ============ -->
@@ -178,7 +198,6 @@
 
     <div class="sidebar-foot">
       <button class="ghost-btn" id="btnSettings" style="width:100%"><svg class="ic"><use href="#i-settings"/></svg><span>设置</span></button>
-      <div class="tip">按 F12 可打开调试工具</div>
     </div>
   </aside>
 

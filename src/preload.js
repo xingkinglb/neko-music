@@ -42,10 +42,15 @@ contextBridge.exposeInMainWorld('neko', {
   // 清掉已选的背景图
   clearBackground: () => ipcRenderer.invoke('bg:clear'),
 
-  // ---------- 标题栏主题 ----------
-  // 把当前主题的主色（"R G B" 三元组）发给主进程，
-  // 让右上角 最小化/最大化/关闭 三个系统按钮跟着主题一起变色
-  setTitlebarTheme: (rgbTriple) => ipcRenderer.invoke('theme:overlay', rgbTriple),
+  // ---------- 窗口控制（右上角自绘按钮） ----------
+  // 这三个按钮是界面自己画的 HTML 按钮，点一下就发个"请主进程帮忙"的消息。
+  winMin:   () => ipcRenderer.send('win-min'),     // 最小化
+  winMax:   () => ipcRenderer.send('win-max'),     // 最大化 / 还原（切换）
+  winClose: () => ipcRenderer.send('win-close'),   // 关闭
+
+  // 主进程告诉我们窗口现在是被最大化还是还原了（双击标题栏也会触发），
+  // 界面收到后用它来切换"最大化 / 还原"图标。
+  onWinState: (cb) => ipcRenderer.on('win:state', (_e, maximized) => cb(!!maximized)),
 
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）

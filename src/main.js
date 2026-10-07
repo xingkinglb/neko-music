@@ -151,37 +151,15 @@ function clearBgDir() {
 }
 
 // ============================================================
-//  第 2.5 部分：让右上角系统按钮跟着主题变色
+//  第 2.5 部分：右上角窗口按钮（自绘）
 // ============================================================
-//  右上角 最小化/最大化/关闭 三个按钮是 Windows 画的，颜色由 titleBarOverlay 决定，
-//  它不会自动读 CSS，所以换主题时得由界面把主色发过来，这里手动重设一次。
-//  公式和 CSS 里 .titlebar 的 --titlebar-bg 保持一致（主色染 20% 进深色），
-//  这样按钮底色和网页标题栏无缝融合，看不出接缝。
-function applyThemeOverlay(rgbTriple) {
-  if (!mainWindow) return;
-  const m = String(rgbTriple || '').trim().split(/\s+/).map(Number);
-  if (m.length !== 3 || m.some((n) => Number.isNaN(n))) return;
-  const [ar, ag, ab] = m;
-
-  // 按钮底色：主色染过的半透明深色（跟 .titlebar 同公式）
-  const p = 0.20, base = [16, 16, 26];
-  const r = Math.round(base[0] + (ar - base[0]) * p);
-  const g = Math.round(base[1] + (ag - base[1]) * p);
-  const b = Math.round(base[2] + (ab - base[2]) * p);
-  const color = `rgba(${r}, ${g}, ${b}, 0.88)`;
-
-  // 按钮符号：主色的浅粉调（仍够亮，深色底上清晰）
-  const sr = Math.round(ar * 0.45 + 255 * 0.55);
-  const sg = Math.round(ag * 0.45 + 255 * 0.55);
-  const sb = Math.round(ab * 0.45 + 255 * 0.55);
-  const symbolColor = `rgb(${sr}, ${sg}, ${sb})`;
-
-  try {
-    mainWindow.setTitleBarOverlay({ color, symbolColor, height: 38 });
-  } catch (err) {
-    console.error('更新标题栏按钮颜色失败：', err);
-  }
-}
+//  我们不再用系统画的 最小化/最大化/关闭 三个按钮（那是 titleBarOverlay，
+//  它既不读 CSS、又是个实心色块，没法做成"跟着主题变色的磨砂按钮"）。
+//  改由界面用 HTML 自己画三个按钮（见 index.html 的 .win-controls），
+//  它们天然跟着主题色走、还和磨砂标题栏一体。
+//  界面点按钮 → 经 IPC 调到这里的 mainWindow.minimize/maximize/close。
+//  另外，窗口被最大化/还原时（包括双击标题栏触发的），主动通知界面，
+//  让"最大化"按钮切换成"还原"图标。
 
 // ============================================================
 //  第 2 部分：创建窗口
@@ -203,16 +181,11 @@ function createWindow() {
     //   （见 index.html 里的 .titlebar）。
     //   'hidden' 的意思是：窗口边框、拖动、缩放这些系统能力都还在，
     //   只是标题栏那一条不画了，交给我们自己画。
+    //   关键点：不配 titleBarOverlay。官方文档写明 —— 在 Windows 上，
+    //   'hidden' 不配 titleBarOverlay 时"不会显示任何系统窗口控制按钮"，
+    //   于是右上角那三个系统按钮彻底消失，正好换成我们自己画的 .win-controls。
+    //   同时原生边框还在（圆角、阴影、拖到屏幕边缘自动半屏/全屏都保留）。
     titleBarStyle: 'hidden',
-    // 让 Windows 把 最小化 / 最大化 / 关闭 三个按钮画在右上角，
-    // 并且用我们指定的深色，而不是系统的白色。
-    titleBarOverlay: {
-      // 默认值（樱粉）。界面启动后会通过 applyThemeOverlay() 按实际主题再重设一次，
-      // 所以这里只是避免第一帧闪一下白按钮。
-      color: 'rgba(64, 35, 46, 0.88)',   // 樱粉染过的深色（= 主色 255 111 165 染 20% 进 16 16 26）
-      symbolColor: 'rgb(255, 190, 214)', // 樱粉的浅粉调
-      height: 38,              // ★ 必须和 CSS 里的 --titlebar-h 一模一样，否则会对不齐
-    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'), // 注入传话筒
       contextIsolation: true,  // 安全隔离，网页不能直接碰 Node.js
@@ -223,13 +196,15 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
-  // 先按默认主题（樱粉）把右上角按钮颜色设好，界面真正加载后会按用户保存的主题再同步一次
-  applyThemeOverlay('255 111 165');
-
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
+
+  // 窗口被最大化 / 还原时，通知界面，让"最大化"按钮切换成"还原"图标。
+  // （双击标题栏最大化、拖到顶部最大化，都会触发这里。）
+  mainWindow.on('maximize',   () => { try { mainWindow.webContents.send('win:state', true);  } catch (_) {} });
+  mainWindow.on('unmaximize', () => { try { mainWindow.webContents.send('win:state', false); } catch (_) {} });
 
   // 开发时方便调试：按 F12 打开开发者工具
   // 正式发布时可以把这段删掉
@@ -372,8 +347,15 @@ function registerHandlers() {
     return true;
   });
 
-  // 界面换主题时，同步右上角系统按钮（最小化/最大化/关闭）的颜色
-  handle('theme:overlay', (rgb) => { applyThemeOverlay(rgb); return true; });
+  // 界面右上角自绘的三个窗口按钮：最小化 / 最大化(切换) / 关闭
+  ipcMain.on('win-min', () => { if (mainWindow) mainWindow.minimize(); });
+  ipcMain.on('win-max', () => {
+    if (!mainWindow) return;
+    // 已经是最大化就还原，否则最大化（一个按钮兼顾两种状态）
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+  });
+  ipcMain.on('win-close', () => { if (mainWindow) mainWindow.close(); });
 
   // ---- 自定义背景 ----
   // 弹系统文件选择框 → 把选中的图复制到 backgrounds/ → 返回文件名
