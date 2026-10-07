@@ -43,6 +43,12 @@
   --sidebar-w: 240px;   /* 左边侧边栏宽度 */
   --player-h:92px;     /* 底部播放条高度 */
 
+  /* 顶部工具栏（搜索框那条）的高度。歌词大屏要从它的下沿才开始铺 ——
+     铺到标题栏下面的话会把搜索框整个盖住，那就变成"点了搜索框没反应"。
+     这个值只是兜底，真实高度由 app.js 的 syncTopbarHeight() 量出来覆盖，
+     因为换字体 / 系统缩放后写死的数值会错位。 */
+  --topbar-h: 68px;
+
   /* ---- 氛围光晕强度 ---- */
   --glow: 1;
 }
@@ -509,6 +515,10 @@ ul { list-style: none; }
 }
 .np-cover:hover::after { opacity: 1; }
 
+/* 歌词页正开着：封面上常驻一句"收起" —— 再点一下就返回原来的窗口，
+   不用猜它是不是个开关。（和"词"按钮一样，点了就有反馈。） */
+.np-cover.open::after { content: "收起"; opacity: 1; }
+
 /* 正在播放：外面套一圈慢慢转的弧线，像唱片在转 */
 .np-cover.spin::before {
   content: ""; position: absolute; inset: -5px;
@@ -727,7 +737,10 @@ ul { list-style: none; }
    精确避开标题栏 / 侧边栏 / 播放条，正好只盖住"内容区"那一块。 */
 .lyric-overlay {
   position: fixed;
-  top: var(--titlebar-h);
+  /* ★ 从"标题栏 + 顶部工具栏"的下沿开始铺。
+     只从标题栏下沿开始的话，搜索框 / 链接框会被整块盖住 —— 看着歌词页在"最上面"，
+     其实点了没反应。现在它们露在外面，点一下还能顺手把歌词页收起来。 */
+  top: calc(var(--titlebar-h) + var(--topbar-h));
   left: var(--sidebar-w);
   right: 0;
   bottom: var(--player-h);
@@ -743,10 +756,15 @@ ul { list-style: none; }
 
 /* 歌词容器：整块可滚动，自动滚到当前句 */
 /* 整页歌词顶上的信息条：歌名 + 歌手 + 「桌面歌词」开关 */
+/* 顶上的信息条。
+   ★ pointer-events: none 是必须的：这条横向铺满整幅歌词页（连它右边那段"留给 X 的空白"
+   也算在它的盒子里），如果它能接鼠标，就会把右上角那个 X 整个盖住 —— 表现就是"点 X 没反应"。
+   所以这里只当排版容器，真正要能点的按钮（桌面歌词、X）各自单独放行。 */
 .lyric-head {
   position: absolute; top: 0; left: 0; right: 0; z-index: 3;
   display: flex; align-items: center; gap: 14px;
   padding: 18px 78px 12px 28px;
+  pointer-events: none;
 }
 .lyric-head-meta { flex: 1; min-width: 0; }
 .lyric-head-title {
@@ -763,6 +781,7 @@ ul { list-style: none; }
   font-size: 12.5px; color: var(--muted);
   background: rgba(255,255,255,0.07);
   transition: background 0.14s, color 0.14s;
+  pointer-events: auto;   /* 信息条整条不接鼠标，这个按钮要单独放行 */
 }
 .lyric-head-btn:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
 .lyric-head-btn.on { color: var(--accent); background: rgba(var(--accent-rgb), 0.18); }
@@ -771,10 +790,29 @@ ul { list-style: none; }
 .lyric-box {
   position: absolute; inset: 0;
   overflow-y: auto;
-  /* 顶部留出信息条的高度，底部留一半屏幕，让当前句能停在正中间 */
-  padding: 92px 40px 46%;
+  padding: 0 40px;            /* 只留左右留白；上下居中靠下面两个伪元素撑 */
   text-align: center;
-  scroll-behavior: smooth;
+  /* ★ 上下"留半屏"的空白千万不能写成 padding: 50%：
+     本工程全局 box-sizing: border-box，而 .lyric-box 用 inset:0 被撑成铺满浮层的高（约 558）。
+     一旦上下各给 50%（按宽度算 ≈ 470px）的 padding，border-box 下内容区被压成 0，
+     clientHeight 反而会变成 941px —— 比浮层真正可见的 558px 还高；浮层用 overflow:hidden
+     只露 558px，于是"把当前句滚到正中间"是按 941px 算的、浮层实际只显示 558px，
+     当前句永远偏 (941-558)/2 = 191px（自测确实每项都偏 191）。
+     所以这里改用伪元素撑上下留白：它们算进 scrollHeight、不会撑大 clientHeight，
+     浮层的 clientHeight 就等于真正可见的 558px，居中公式 offsetTop - clientHeight/2 + 行高/2 才对得上。 */
+  scrollbar-width: none;
+}
+/* 上下留白撑高度（各半屏再多 40px，保证第一句 / 最后一句也能滚到正中而不被夹住）。
+   用伪元素而非 padding：伪元素是滚动内容的一部分（进 scrollHeight），但不改变 clientHeight，
+   这样 .lyric-box 的 clientHeight 始终等于浮层可见高度，居中公式不会偏。 */
+.lyric-box::before, .lyric-box::after {
+  content: ""; display: block;
+  height: calc(50% + 40px);
+}
+  /* ★ 这里**故意不写** scroll-behavior: smooth。
+     写了它，JS 里 scrollTo({behavior:'auto'}) 的含义就变成"听 CSS 的"= 永远平滑，
+     于是"打开歌词页时立刻定位到当前句"会变成从顶上慢慢滑下来。
+     平滑与否交给 JS 每次调用时指定：跟着播放逐句跟进用 'smooth'，跳转用 'auto'（立刻到位）。 */
   scrollbar-width: none;
 }
 .lyric-box::-webkit-scrollbar { width: 0; }
@@ -825,7 +863,7 @@ ul { list-style: none; }
   width: 30px; height: 30px; border-radius: 8px;
   color: var(--muted); font-size: 15px; line-height: 1;
   background: rgba(255,255,255,0.06);
-  z-index: 2;
+  z-index: 4;   /* 必须高过信息条（它 z-index: 3），否则又被盖住 */
 }
 .lyric-close:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
 

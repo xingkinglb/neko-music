@@ -421,12 +421,17 @@ if (/scrollIntoView/.test(appjs)) {
   err('缺少 scrollLyricTo() —— 歌词无法居中滚动');
 } else ok('歌词滚动自己算 scrollTop（只动歌词容器，不牵动整页）');
 
-/* 'auto' 会听 CSS 的 scroll-behavior: smooth，导致首次渲染/跳转时长距离惯性滑动 */
-if (/scrollTo\(\{[^}]*behavior:\s*instant\s*\|\|\s*far\s*\?\s*'auto'/.test(appjs)) {
-  err("scrollTo 的 behavior 用了 'auto' —— 它的含义是'听 CSS 的'，配上 scroll-behavior:smooth 就永远平滑，跳转时会长距离滑行");
-} else if (!/'instant'/.test(appjs)) {
-  err("scrollTo 没有用 behavior:'instant' —— 刚渲染/刚跳转时会看到长距离惯性滑动");
-} else ok("跳转/重渲染用 behavior:'instant'，逐句跟进用 smooth");
+/* ★ 滚动是否平滑，必须由 JS 每次调用显式指定，不能让 CSS 插手：
+     CSS 里写了 scroll-behavior: smooth 的话，behavior:'auto' 的含义就变成"听 CSS 的"
+     = 永远平滑 —— "打开歌词页立刻定位到当前句"会变成从顶上慢慢滑下来。
+     而 behavior:'instant' 看着更直观，却在部分内核里被当成非法值退回 auto，
+     一旦 CSS 里有 smooth 又会退化成"永远平滑"（实测踩过：三处测量都停在半路，偏 191px）。 */
+const cssSmooth = /\.lyric-box\s*\{[^}]*scroll-behavior:\s*smooth/.test(css);
+if (cssSmooth) {
+  err(".lyric-box 里写了 scroll-behavior: smooth —— 会让 behavior:'auto' 变成'永远平滑'，打开歌词页会从顶上慢慢滑下来");
+} else if (!/behavior:\s*\(instant \|\| far\)\s*\?\s*'auto'\s*:\s*'smooth'/.test(appjs)) {
+  err("scrollTo 没有显式区分 'auto'（立刻到位）与 'smooth'（平滑跟进）");
+} else ok("滚动行为由 JS 指定：跳转 / 刚渲染立刻到位，逐句跟进才平滑");
 
 /* ---- 20) 桌面歌词悬浮窗（第二个窗口） ---- */
 console.log('\n[19] 桌面歌词悬浮窗：');
@@ -625,5 +630,68 @@ else if (!/lyricWindow\.on\('moved', \(\) => scheduleLyricPosNotify\(\)\)/.test(
   err('moved 事件没有走防抖（拖动时会疯狂写盘）');
 } else ok('拖动中的位置回传防抖 140ms（不会边拖边写盘）');
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 24 大类检查）');
+/* ---- 25) 歌词页的开关与"点别处收起"（用户实机反馈的三条） ---- */
+console.log('\n[24] 歌词页开关与点别处收起：');
+
+/* 浮层必须从"标题栏 + 顶部工具栏"的下沿开始铺。
+   只从标题栏下沿开始 = 搜索框被整块盖住 = 看着歌词页"压在最上面"，点了却没反应。 */
+if (!/\.lyric-overlay\s*\{[^}]*top:\s*calc\(var\(--titlebar-h\)\s*\+\s*var\(--topbar-h\)\)/.test(css)) {
+  err('歌词浮层不是从顶部工具栏下沿开始铺 —— 会盖住搜索框（点了没反应）');
+} else if (!/--topbar-h:/.test(css)) {
+  err('--topbar-h 没有兜底值（脚本还没跑起来时浮层位置会错位）');
+} else if (!/function syncTopbarHeight\(\)/.test(appjs)) {
+  err('没有 syncTopbarHeight() —— 工具栏高度写死会在换字体 / 系统缩放后错位');
+} else if (!/window\.addEventListener\('resize', syncTopbarHeight\)/.test(appjs)) {
+  err('窗口大小变化后没有重新量工具栏高度');
+} else ok('歌词页从顶部工具栏下沿开始铺，搜索框始终露在外面');
+
+/* 封面必须是"能开也能收"的开关：写死 toggleLyrics(true) 就是"点了收不回去"的根因 */
+if (/if \(lyricState\.showing\) \{ toggleLyrics\(false\); return; \}/.test(appjs)) {
+  ok('点封面能开、再点能收（不是单程开关）');
+} else err('封面的点击处理没有"已展开就收起"的分支 —— 点它收不起来');
+
+/* 点歌词页以外的界面要收起；但播放条部件与标题栏不算"别的界面" */
+if (!/document\.addEventListener\('pointerdown'/.test(appjs)) {
+  err('没有"点歌词页以外就收起"的处理（点侧栏它会一直压在上面）');
+} else if (!/t\.closest\('#lyricOverlay'\)/.test(appjs) || !/t\.closest\('#player'\)/.test(appjs) || !/t\.closest\('\.titlebar'\)/.test(appjs)) {
+  err('收起逻辑没有把 歌词页自己 / 播放条 / 标题栏 排除掉（会误收或点不动）');
+} else ok('点歌词页以外会收起；播放条按钮与标题栏不受影响');
+
+/* ★ 用 pointerdown 而不是 click：click 的落点是"按下与松开两个元素的共同祖先"，
+   拖进度条时松手滑到别处会算成点在空白区，把歌词页莫名收掉。 */
+if (!/pointerdown', \(e\) => \{/.test(appjs)) {
+  err('收起判定没有用 pointerdown —— 拖进度条松手滑到别处会误收歌词页');
+} else ok('用 pointerdown 判定（拖进度条不会误收歌词页）');
+
+if (/\.np-cover\.open::after/.test(css) && /content:\s*"收起"/.test(css)) {
+  ok('歌词页开着时封面悬停显示「收起」');
+} else err('封面在歌词页开着时没有"收起"提示 —— 看不出再点一下是收起来');
+
+/* ★ 歌词容器上下必须各留"半屏"的空白，让它滚到任一句都能停在正中。
+   但本工程全局 box-sizing: border-box，而 .lyric-box 用 inset:0 被撑成铺满浮层的高（约 558）：
+   若用 padding: 50% 当上下留白，border-box 下内容区被压成 0、clientHeight 反而变成 ~941，
+   比浮层可见的 558 还高 —— 居中公式按 941 算、浮层只显示 558，当前句恒偏 (941-558)/2 = 191px
+   （自测确实每项都偏 191）。正确做法：用 .lyric-box::before / ::after 伪元素各撑半屏多 40px，
+   它们算进 scrollHeight、不撑大 clientHeight，clientHeight 始终等于浮层可见高，居中公式才对得上。 */
+const lboxBlock = (css.match(/\.lyric-box\s*\{([^}]*)\}/) || [])[1] || '';
+const lboxPad = ((lboxBlock.match(/padding:\s*([^;]+);/) || [])[1] || '').trim().split(/\s+/);
+const vertPctPad = lboxPad.length >= 3 && (lboxPad[0].endsWith('%') || lboxPad[2].endsWith('%'));
+const hasSpacer = /\.lyric-box::before[^{]*\{[^}]*height:\s*calc\(50%\s*\+\s*\d+px\)/.test(css)
+               && /\.lyric-box::after[^{]*\{[^}]*height:\s*calc\(50%\s*\+\s*\d+px\)/.test(css);
+if (vertPctPad) {
+  err('.lyric-box 上下用了百分比 padding —— 本工程 border-box + inset:0 会让 clientHeight 变成 ~941（不是浮层可见的 558），当前句恒偏 191px；请改用 ::before/::after 伪元素撑半屏');
+} else if (hasSpacer) {
+  ok('歌词容器上下用 ::before/::after 伪元素各撑半屏多 40px（不撑大 clientHeight，居中公式对得上）');
+} else {
+  err('歌词容器没有"上下各留半屏"的居中留白（伪元素 calc(50% + Npx) 或 padding 上/下 ≥45%）—— 第一句或最后一句滚不到正中');
+}
+if (!/scrollLyricTo\(idx, force\)/.test(appjs)) {
+  err('没有把当前句滚到中间的 scrollLyricTo(idx, force)');
+}
+
+if (!/^\s*syncTopbarHeight\(\);$/m.test(appjs)) {
+  err('启动时没有调用 syncTopbarHeight()（--topbar-h 还是 CSS 里的兜底值）');
+} else ok('启动时量过顶部工具栏高度并写进 --topbar-h');
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 25 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

@@ -1418,6 +1418,20 @@ function updateCoverSpin() {
 }
 
 /**
+ * 量一下顶部工具栏（搜索框那条）的实际高度，写进 CSS 变量 --topbar-h。
+ *
+ * 为什么非要量：歌词大屏要从它的下沿开始铺（见 style.css 里 .lyric-overlay 的 top）。
+ * 高度写死在 CSS 里的话，换了字体或系统缩放对不上，要么盖住搜索框、
+ * 要么露出一条缝。所以用真实测量值覆盖掉 CSS 里的兜底值。
+ */
+function syncTopbarHeight() {
+  const bar = document.querySelector('.topbar');
+  if (!bar) return;
+  const h = Math.round(bar.getBoundingClientRect().height);
+  if (h > 0) document.documentElement.style.setProperty('--topbar-h', h + 'px');
+}
+
+/**
  * 跟着播放进度更新高亮。
  * @param {boolean} force 强制重新定位（刚渲染完时用）
  */
@@ -1465,12 +1479,14 @@ function scrollLyricTo(idx, instant) {
   const max = Math.max(0, box.scrollHeight - box.clientHeight);
   const top = Math.min(Math.max(0, target), max);   // 夹在 [0, 最底] 之间，别滚出界
 
-  // 差得远（比如刚跳到副歌）就瞬间到位，差得近就平滑滑过去，看着不突兀。
-  // ★ 必须写 'instant' 而不是 'auto'：'auto' 在规范里的意思是"听 CSS 的"，
-  //   而 .lyric-box 上写了 scroll-behavior: smooth，写 auto 就永远都是平滑的，
-  //   刚渲染 / 刚跳转时会看到一段长长的"惯性滑动"。
+  // 差得远（比如刚跳到副歌）就立刻到位，差得近就平滑滑过去，看着不突兀。
+  // ★ 平滑与否必须在这里显式指定，不能靠 CSS：
+  //   · 'auto' 的含义是"听 CSS 的"，只要 .lyric-box 没写 scroll-behavior，它就是立刻到位；
+  //   · 'instant' 看着更直观，但在部分内核里会被当成非法值退回 auto —— 一旦 CSS 里
+  //     写着 scroll-behavior: smooth，就变成"永远平滑"，打开歌词页会看到从顶上慢慢滑下来。
+  //   所以：CSS 不写 scroll-behavior，这里用 'auto' = 立刻到位，'smooth' = 平滑跟进。
   const far = Math.abs(box.scrollTop - top) > box.clientHeight * 1.2;
-  if (box.scrollTo) box.scrollTo({ top, behavior: instant || far ? 'instant' : 'smooth' });
+  if (box.scrollTo) box.scrollTo({ top, behavior: (instant || far) ? 'auto' : 'smooth' });
   else box.scrollTop = top;
 }
 
@@ -1496,6 +1512,14 @@ function toggleLyrics(want) {
 
   const ov = $('lyricOverlay');
   if (ov) ov.classList.toggle('show', show);
+
+  // 封面是它的开关，得跟着亮/灭，不然点了不知道现在是什么状态
+  const cover = $('npCover');
+  if (cover) {
+    cover.classList.toggle('open', show);
+    cover.title = show ? '收起歌词（Ctrl+D）' : '查看歌词（Ctrl+D）';
+    cover.setAttribute('aria-label', show ? '收起歌词' : '查看歌词');
+  }
 
   if (show) updateLyricHead();
 
@@ -1523,16 +1547,35 @@ function bindLyrics() {
   const close = $('btnLyricClose');
   if (close) close.addEventListener('click', () => toggleLyrics(false));
 
-  // 播放条最左边那张封面 = 整页歌词的入口（悬停会浮出"歌词"两个字提示可点）
+  // 播放条最左边那张封面 = 整页歌词的开关（悬停会浮出"歌词"/"收起"提示）
   const cover = $('npCover');
   if (cover) {
     cover.addEventListener('click', () => {
+      // 正开着 → 再点一次就是收起，回到刚才那个列表（这就是"收起"该有的行为）
+      if (lyricState.showing) { toggleLyrics(false); return; }
       if (!queue.tracks[queue.index]) { toast('先放一首歌，再点封面看歌词'); return; }
-      // 还没取过就去取一次，取过（或已知取不到）就直接展开
+      // 还没取过就去取一次；取过了（或已知取不到）就直接展开
       if (!lyricState.lines.length && !lyricState.failed && !lyricState.loading) loadLyrics(false);
       toggleLyrics(true);
     });
   }
+
+  /* 点歌词页以外的任何地方 → 收起歌词页，露出下面的界面。
+     ★ 用 pointerdown 而不是 click：click 的落点是"按下与松开两个元素的共同祖先"，
+       拖进度条时松手滑到别处会算成点在空白区域，把歌词页莫名收掉。
+       pointerdown 的落点就是真正按下去的那个元素，不会误判。
+     播放条与标题栏不算"别的界面"：
+       · 播放条上是播放/暂停/切歌/音量，看歌词时还得接着控制播放；
+       · 标题栏是拖窗口用的，拖一下不该把歌词页收掉。 */
+  document.addEventListener('pointerdown', (e) => {
+    if (!lyricState.showing || e.button !== 0) return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest('#lyricOverlay')) return;   // 点在歌词页自己身上
+    if (t.closest('#player')) return;         // 播放条：继续控制播放
+    if (t.closest('.titlebar')) return;       // 标题栏：拖窗口
+    toggleLyrics(false);
+  });
 
   // 点某一句歌词 → 跳到那一句的时间（找副歌特别好用）
   const box = $('lyricBox');
@@ -1961,6 +2004,10 @@ async function boot() {
 
   // 4) 画界面
   renderAll();
+
+  // 4.5) 量出顶部工具栏的真实高度（歌词大屏要贴着它的下沿铺，不能盖住搜索框）
+  syncTopbarHeight();
+  window.addEventListener('resize', syncTopbarHeight);
 
   // 5) 如果上次有在听的歌，把信息显示在底部（不自动播放，免得吓一跳）
   if (DB.lastTrack) {
