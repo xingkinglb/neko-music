@@ -70,18 +70,25 @@ const REFERER = 'https://www.bilibili.com';
 //  签名的算法是：把参数排序 + 拼接 + 用一张固定的乱序表搅乱 + MD5。
 //  下面这张表是写死的，不用理解它的含义。
 
+// ★ 这张表必须是 0~63 的一次"全排列"（每个数字恰好出现一次）。
+//   之前这里是一张**坏表**：漏了 0 和 41，而 62 和 57 各重复了一次
+//   —— 等于把两位钥匙字符永远映射错了位置，算出来的签名从一开始就是错的。
+//   对照 downkyicore 的 WbiSign.cs 以及 B 站接口文档逐一核对过。
 const MIXIN_KEY_ENC_TAB = [
-  46, 47, 18, 2, 53, 8, 23, 32, 15, 57, 37, 45, 10, 31, 25, 4,
-  54, 60, 49, 58, 1, 52, 20, 19, 50, 29, 28, 6, 56, 27, 17, 62,
-  48, 24, 59, 5, 34, 14, 62, 61, 35, 30, 11, 42, 43, 21, 12, 38,
-  55, 39, 33, 3, 44, 13, 40, 22, 9, 16, 51, 57, 63, 26, 7, 36,
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+  37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+  22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52,
 ];
 
-// 签名用的两把"钥匙"，每天会变，所以启动时先去 B 站要一次，然后缓存起来
+// 签名用的两把"钥匙"，B 站每天会换一次，所以启动时先去要一次、然后缓存。
+// 缓存设 1 小时过期：万一软件开着跨过了换钥时刻，也能自己刷新回来。
 let cachedWbiKeys = null;
+let cachedWbiKeysAt = 0;
+const WBI_KEYS_TTL = 60 * 60 * 1000;   // 1 小时
 
 async function getWbiKeys() {
-  if (cachedWbiKeys) return cachedWbiKeys; // 已经要过了，直接用
+  if (cachedWbiKeys && Date.now() - cachedWbiKeysAt < WBI_KEYS_TTL) return cachedWbiKeys;
 
   // ⚠️ 注意：这个接口在未登录时会返回 code = -101，但数据里照样有我们要的钥匙。
   //    所以这里不能走 requestJSON（它会把 code≠0 当成失败），得手动解析。
@@ -95,15 +102,19 @@ async function getWbiKeys() {
     img: pick(nav.data.wbi_img.img_url),
     sub: pick(nav.data.wbi_img.sub_url),
   };
+  cachedWbiKeysAt = Date.now();
   return cachedWbiKeys;
 }
 
 // 给参数计算签名，返回拼好的查询字符串（xxx=1&yyy=2&w_rid=签名）
 async function signParams(params) {
   const { img, sub } = await getWbiKeys();
-  // 把两把钥匙拼起来（共 80 个字符），再按乱序表抽出 32 个
+  // 把两把钥匙拼起来（共 64 个字符），用整张 64 项的表逐位抽出 64 个字符，
+  // 再取前 32 个 —— 这才是 B 站的算法。
+  // ⚠️ 曾经的写法是"先取表的前 32 项、再用它们映射"，
+  //    那等于只用了半张表、也没做"先抽满再截断"，签名必然不对。
   const raw = img + sub;
-  const mixinKey = MIXIN_KEY_ENC_TAB.slice(0, 32).map((i) => raw[i]).join('');
+  const mixinKey = MIXIN_KEY_ENC_TAB.map((i) => raw[i]).join('').slice(0, 32);
 
   // 加上时间戳（B 站用它判断请求是否过期）
   const all = Object.assign({}, params, { wts: Math.round(Date.now() / 1000) });
@@ -143,24 +154,28 @@ async function throttle() {
 /**
  * 最底层的请求函数。返回 { status, body, headers }
  * @param {string} url      完整网址
- * @param {object} options  可选：{ headers, method, timeout }
+ * @param {object} options  可选：{ headers, method, timeout, noCookie }
+ *    noCookie: true 时不带登录 Cookie。去字幕 CDN 取文件时用得上 ——
+ *    那个域名（aisubtitle.hdslb.com）和 B 站主站不是一回事，
+ *    把 SESSDATA 发过去既没必要、也不安全。参考实现同样这么做。
  */
 function httpRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
+    const headers = {
+      'User-Agent': USER_AGENT,
+      Referer: REFERER,
+      Accept: 'application/json, text/plain, */*',
+      ...(options.headers || {}),
+    };
+    if (!options.noCookie) headers.Cookie = BASE_COOKIE;
     const req = https.request(
       {
         hostname: u.hostname,
         port: u.port || 443,
         path: u.pathname + u.search,
         method: options.method || 'GET',
-        headers: {
-          'User-Agent': USER_AGENT,
-          Referer: REFERER,
-          Cookie: BASE_COOKIE,
-          Accept: 'application/json, text/plain, */*',
-          ...(options.headers || {}),
-        },
+        headers,
         timeout: options.timeout || 15000,
       },
       (res) => {
@@ -455,20 +470,26 @@ async function getFavMedias(mediaId, pn = 1) {
 // ============================================================
 //  第 6 部分：字幕（拿来做滚动歌词）
 // ============================================================
-//  链路一共三步，跟B 站自己的播放器完全一致：
-//    ① /x/player/v2  → 这个视频有哪些字幕轨道（中文、AI 中文、英文……）
+//  链路一共三步，和 B 站自己的网页播放器完全一致：
+//    ① /x/player/wbi/v2 → 这个视频有哪些字幕轨道（中文、AI 中文、英文……）
 //    ② 挑一条中文轨道（优先真人字幕，其次 B 站自动生成的 AI 字幕）
 //    ③ 下载那条字幕的 JSON，里面是一句一句的 {from, to, content}
 //
-//  ⚠️ 三个必须知道的坑（都是实测踩出来的，别删）：
-//    1) **不登录基本拿不到**。匿名请求 /x/player/v2 返回的字幕列表是空的。
+//  ⚠️ 四个必须知道的坑（都是实测踩出来的，别删）：
+//    1) ★★★ **接口路径必须是 /x/player/wbi/v2，不能是旧的 /x/player/v2。**
+//       B 站已经把旧路径**主动降级**了：它不报错，而是随机返回**别的视频**的字幕。
+//       实测（同一个视频、同一个 cid，各请求 6 次）：
+//         旧 /x/player/v2  → 只有 1 次正确，其余 5 次是"♪ 音乐 ♪"
+//                            "今天吃几碗烧烤的总结就是两个字""2024年9月16号"……
+//         /x/player/wbi/v2 → 6/6 全部正确。
+//       而且两种情况都是 HTTP 200 + code 0，从返回值上完全看不出差别 ——
+//       这就是困扰我们好几轮的"歌词张冠李戴"的真正原因（与 Cookie、cid 都无关）。
+//    2) **不登录基本拿不到**。匿名请求返回的字幕列表是空的。
 //       所以没填 Cookie 时我们会提前返回"没登录"，不去白跑一趟请求。
-//    2) **cid 才是唯一依据，bvid 形同虚设**。把 A 的 bvid 和 B 的 cid 拼一起请求，
+//    3) **cid 才是唯一依据，bvid 形同虚设**。把 A 的 bvid 和 B 的 cid 拼一起请求，
 //       接口照样返回 code 0，还给出 B 的字幕，不报任何错。所以必须自己核对 cid。
-//    3) **被限流时它会给你一份"别的视频"的字幕**，而不是报错。
-//       实测连着快速请求几次，同一个 cid 会随机返回 1 条 / 6 条 / 0 条轨道，
-//       内容是"今天我们要飞1500km""可以保护别人啊"这类完全无关的文本。
-//       → 所以：a) 结果要缓存，别反复打 B 站；b) 内容要做乱码检测。
+//    4) 旧的降级路径偶尔仍会漏出"诱饵"（同一份占位给不同视频）。
+//       重试 + 乱码检测作为兜底留着 —— 换到 wbi 路径后基本不会再触发。
 
 /** 用户有没有填 Cookie —— 决定能不能取字幕 */
 function hasLoginCookie() {
@@ -484,8 +505,8 @@ function hasLoginCookie() {
 const subtitleCache = new Map();
 const SUBTITLE_TTL = 10 * 60 * 1000;   // 10 分钟，够用且不会占多少内存
 
-/** 取字幕最多试几次（被限流时重试是唯一有效的办法，见 fetchSubtitleOnce 的注释） */
-const SUBTITLE_ATTEMPTS = 4;
+/** 取字幕最多试几次。换到 wbi 路径后基本一次就成，这是纯粹的兜底 */
+const SUBTITLE_ATTEMPTS = 3;
 
 /**
  * 取某个视频（某一 P）的字幕，返回逐句歌词
@@ -517,13 +538,11 @@ async function getSubtitle(bvid, cid) {
   const cached = subtitleCache.get(ck);
   if (cached && Date.now() - cached.at < SUBTITLE_TTL) return cached.data;
 
-  // ② 真正去取。**必须重试**：B 站被限流时不报错，而是返回一堆"诱饵"字幕
-  //    （实测见过"珍妮古道尔讲环保""很多父母和孩子沟通像驯化动物"，
-  //    甚至给不同视频返回同一份"♪ 音乐 ♪"占位字幕）。
-  //    这些诱饵每次都不一样，所以重试几次总会撞到真的那份。
+  // ② 真正去取。**重试只作为兜底**：主因（旧路径被降级）已经在 fetchSubtitleOnce
+  //    里改成走 /x/player/wbi/v2 修掉了；这里保留重试是为了万一还漏出"诱饵"。
   let lastErr = null;
   for (let attempt = 1; attempt <= SUBTITLE_ATTEMPTS; attempt++) {
-    if (attempt > 1) await sleep(900 * attempt);   // 1.8s / 2.7s / 3.6s 逐次加长
+    if (attempt > 1) await sleep(700 * attempt);   // 0.7s / 1.4s，别让用户干等
     try {
       const data = await fetchSubtitleOnce(bvid, cid);
       const now = Date.now();
@@ -531,10 +550,8 @@ async function getSubtitle(bvid, cid) {
       return data;
     } catch (err) {
       lastErr = err;
-      // 'none'（0 轨道）也要重试 —— 实测被限流时就会返回"没有字幕"，
-      // 而真的没字幕的视频重试几次仍然是 0 轨道，两边都能靠重试区分开：
-      //   ·中途某次拿到了 → 说明之前是限流，用这份
-      //   ·试完仍然 0 轨道 → 那就是真没字幕，报none 是诚实的
+      // 'none'（0 轨道）也顺手重试：万一是被限流误报成"没字幕"。
+      // 但真的没字幕的视频重试几次仍然是 0 轨道 —— 那时报 none 是诚实的。
       if (err.reason !== 'limit' && err.reason !== 'decoy' && err.reason !== 'none') throw err;
       console.warn(`[getSubtitle] 第 ${attempt} 次没拿到字幕（${err.reason}），重试…`);
     }
@@ -542,7 +559,11 @@ async function getSubtitle(bvid, cid) {
   throw lastErr;
 }
 
-/** B 站被限流时塞给我们的假字幕特征（这些内容绝不可能是这首歌的歌词） */
+/**
+ * "诱饵字幕"的识别特征 —— 兜底用。
+ * 这些内容绝不可能是当前这首歌的歌词，见到就判为失败、交给外层重试。
+ * 主因（旧接口 /x/player/v2 被 B 站降级）已经换到 wbi 路径修掉了，这里只是保险。
+ */
 const DECOY_PATTERNS = [
   /♪\s*音乐\s*♪/,          // 纯音乐占位
   /^♪\s*纯音乐/,
@@ -566,10 +587,12 @@ async function fetchSubtitleOnce(bvid, cid) {
   //    所以不能简单粗暴地强制用第 1P —— 那样用户听第 3P 就会拿到第 1P 的字幕。
   let pages = [];
   let videoTitle = '';
+  let aid = 0;
   try {
     const info = await getVideoInfo(bvid);
     pages = info.pages || [];
     videoTitle = info.title || '';
+    aid = info.aid || 0;
     if (!pages.length) {
       const e = new Error('这个视频没有可播放的内容');
       e.reason = 'none';
@@ -599,11 +622,19 @@ async function fetchSubtitleOnce(bvid, cid) {
   if (usedPage.page > 1) videoTitle = `${videoTitle} - P${usedPage.page} ${usedPage.title || ''}`.trim();
 
   // ②拿字幕轨道列表
+  //   ★★ 这里必须走 /x/player/wbi/v2（带 WBI 签名），绝不能用旧的 /x/player/v2。
+  //      实测（同一个视频、同一个 cid，各请求 6 次）：
+  //        旧 /x/player/v2  → 只有 1 次返回真字幕，其余 5 次是**别的视频的字幕**
+  //                           （"♪ 音乐 ♪""今天吃几碗烧烤的总结就是两个字""2024年9月16号"……），
+  //                           而且 HTTP 200、code 0，从返回值上完全看不出出错。
+  //        /x/player/wbi/v2 → 6/6 全部正确。
+  //      B 站已经把旧路径主动"降级"了：不报错，只是给你喂别的视频的字幕。
+  //      这就是困扰我们好几轮的"歌词张冠李戴"的真正原因（不是 Cookie，不是 cid）。
+  //      downkyicore 等工具走的也是这条 wbi 路径。
   let list;
   try {
-    const json = await requestJSON(
-      `https://api.bilibili.com/x/player/v2?bvid=${bvid}&cid=${cid}`
-    );
+    const query = await signParams({ aid, bvid, cid });
+    const json = await requestJSON(`https://api.bilibili.com/x/player/wbi/v2?${query}`);
     list = (json.data && json.data.subtitle && json.data.subtitle.subtitles) || [];
   } catch (err) {
     // requestJSON 抛出来的多为限流类问题，换个 reason 让界面说人话
@@ -635,11 +666,11 @@ async function fetchSubtitleOnce(bvid, cid) {
   // subtitle_url 常常是 "//aisubtitle.hdslb.com/..." 这种省略协议的，必须补上 https:
   const subUrl = toHttps(pick.subtitle_url);
 
-  // ③下载字幕 JSON
+  // ③下载字幕 JSON（去 CDN 取，不带登录 Cookie）
   let body;
   try {
     await throttle();
-    const res = await httpRequest(subUrl);
+    const res = await httpRequest(subUrl, { noCookie: true });
     const parsed = JSON.parse(res.body);
     body = parsed && parsed.body;
   } catch (err) {
@@ -666,9 +697,8 @@ async function fetchSubtitleOnce(bvid, cid) {
     .filter((l) => l.text)          // 丢掉空行（有的是换行占位）
     .sort((a, b) => a.t - b.t);   // 保证按时间递增
 
-  // ★ 坑 4：B 站的"诱饵字幕"。实测被限流时它会返回**别的视频**的字幕，
-  //   甚至给完全不同的视频返回同一份"♪ 音乐 ♪"占位。
-  //   诱饵每次内容都不一样，所以唯一可靠的办法是**重试**，撞到真的那份为止。
+  // ★ 兜底：极少数情况下旧降级路径漏出的"诱饵"字幕（"♪ 音乐 ♪"这类占位）。
+  //   换成 wbi 路径后基本见不到了，留着以防万一 —— 见到就重试。
   const joined = lines.map((l) => l.text).join('');
   if (DECOY_PATTERNS.some((re) => re.test(joined))) {
     const e = new Error('B 站返回的不是这首歌的字幕（正在重试确认）');
@@ -676,10 +706,9 @@ async function fetchSubtitleOnce(bvid, cid) {
     throw e;
   }
 
-  // ★ 坑 3：被限流时 B 站有时不报错，而是**返回一份胡乱拼的假字幕**。
-  //   实测连着快速请求几次，会拿到 200 多行"小瓶粉皮莱卡"这种完全无关的乱码。
-  //   它同样是"轨道非空 + body 非空"，所以上面两道检查都拦不住。
-  //   判据：真正的歌词里不会有大段连续重复的乱词。
+  // ★ 兜底：真正的歌词里不会有大段连续重复的乱词。
+  //   实测旧路径被降级时会返回 200 多行"小瓶粉皮莱卡"这种完全无关的乱码。
+  //   判据：前 20 句里重复度极高（一半以上是同一句）或几乎不含中文 → 乱码。
   if (lines.length >= 20) {
     const head = lines.slice(0, 20).map((l) => l.text).join('');
     const uniq = new Set(lines.slice(0, 20).map((l) => l.text));

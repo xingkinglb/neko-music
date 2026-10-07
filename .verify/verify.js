@@ -316,12 +316,12 @@ else if (!/id="lyricWarn"[\s\S]{0,120}?class="lyric-box"|class="lyric-warn" id="
   err('#lyricWarn 与 #lyricBox 的相对位置不对 —— 警告必须在歌词容器之外');
 } else ok('#lyricWarn 在 .lyric-box 之外（不会打乱歌词高亮下标）');
 
-/* ---- 16) 限流会返回"别的视频的字幕"，必须缓存 + 检乱码 ---- */
-console.log('\n[15] 限流防护：');
-/* 实测：同一个 cid 连着快速请求，B 站会随机返回 0/1/6 条轨道，
-   内容是别的视频的文本（"今天我们要飞1500km"）。不防护就会显示别人的歌词。 */
+/* ---- 16) 旧路径被降级时会返回"别的视频的字幕"，必须缓存 + 检乱码 ---- */
+console.log('\n[15] 异常字幕防护：');
+/* 实测：旧接口降级时同一 cid 会随机返回 0/1/6 条轨道，内容是别的视频的文本
+   （"今天我们要飞1500km"）。不防护就会显示别人的歌词。 */
 if (!/subtitleCache\s*=\s*new Map\(\)/.test(biliSrc)) {
-  err('getSubtitle 没有字幕结果缓存 —— 连点「词」会反复打 B 站，触发限流后拿到别的视频的字幕');
+  err('getSubtitle 没有字幕结果缓存 —— 连点「词」会反复打 B 站');
 } else if (!/SUBTITLE_TTL/.test(biliSrc)) {
   err('字幕缓存没有过期时间 —— 会永远返回旧歌词');
 } else ok('字幕结果带 TTL 缓存（连点不再反复打 B 站，避免限流）');
@@ -334,8 +334,8 @@ if (!/body\.length\s*===\s*0[\s\S]*?reason\s*=\s*'limit'/.test(biliSrc)) {
   err("getSubtitle 没有识别'轨道非空但内容为空'的限流假象");
 } else ok('识别"轨道存在但内容为空"的限流假象（不会误报成没字幕）');
 
-/* 实测：被限流时 B 站会塞"别的视频的字幕"，甚至给不同视频返回同一份
-   "♪ 音乐 ♪"占位。这些诱饵每次都不一样 → 唯一可靠的办法是重试撞到真的那份。 */
+/* 实测：降级时 B 站会塞"别的视频的字幕"，甚至给不同视频返回同一份
+   "♪ 音乐 ♪"占位。这些诱饵每次都不一样 → 靠重试 + 特征识别兜底。 */
 if (!/DECOY_PATTERNS/.test(biliSrc)) {
   err('没有识别 B 站诱饵字幕的特征（如"♪ 音乐 ♪"占位）—— 会把别的视频的歌词当成功显示');
 } else if (!/reason\s*=\s*'decoy'/.test(biliSrc)) {
@@ -364,5 +364,38 @@ if (htmlIds.has('btnOpenBili') && /api\(\s*'openExternal'/.test(appjs) && /shell
   ok('播放条有「打开视频」按钮：默认浏览器打开，且只放行 http/https');
 }
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 16 大类检查）');
+/* ---- 18) 字幕接口路径 + WBI 签名（"歌词张冠李戴"的真正根因） ---- */
+console.log('\n[17] 字幕接口路径与 WBI 签名：');
+/* 实测：旧路径 /x/player/v2 被 B 站**主动降级** —— 同一个视频请求 6 次只有 1 次正确，
+   其余 5 次返回别的视频的字幕（"♪ 音乐 ♪""今天吃几碗烧烤的总结就是两个字"…），
+   而且 HTTP 200 + code 0，从返回值上完全看不出错。
+   真实网页播放器走 /x/player/wbi/v2，6/6 正确。downkyicore 走的也是这条。 */
+const subCall = (biliSrc.match(/requestJSON\(\s*`([^`]*player[^`]*)`/) || [])[1] || '';
+if (!/player\/wbi\/v2/.test(subCall)) {
+  err(`字幕接口没走 /x/player/wbi/v2（实际: ${subCall.slice(0, 70) || '找不到'}）—— 旧路径已被降级，会随机返回别的视频的字幕`);
+} else ok('字幕走 /x/player/wbi/v2（B 站真实播放器用的那条路径）');
+
+/* 乱序表必须是 0~63 的一次全排列。
+   这里曾经是一张坏表：漏了 0 和 41，而 62 和 57 各重复了一次 —— 签名从一开始就是错的。 */
+const tabBlock = (biliSrc.match(/MIXIN_KEY_ENC_TAB\s*=\s*\[([\s\S]*?)\]/) || [])[1] || '';
+const tabArr = (tabBlock.match(/\d+/g) || []).map(Number);
+const tabSet = new Set(tabArr);
+if (tabArr.length !== 64 || tabSet.size !== 64 || tabArr.some((n) => n < 0 || n > 63)) {
+  err(`MIXIN_KEY_ENC_TAB 不是 0~63 的全排列（${tabArr.length} 项 / 去重后 ${tabSet.size}）—— 签名必错`);
+} else ok('WBI 乱序表是 0~63 的合法全排列');
+
+/* mixinKey 的算法：用**整张 64 项的表**抽出 64 个字符，再取前 32 个。
+   写成 MIXIN_KEY_ENC_TAB.slice(0,32).map(...) 只用了半张表，是错的。 */
+if (/MIXIN_KEY_ENC_TAB\.slice\(/.test(biliSrc)) {
+  err('mixinKey 用了 MIXIN_KEY_ENC_TAB.slice(0,32) —— 算法写反了（必须整表抽满后再截前 32 位）');
+} else if (!/MIXIN_KEY_ENC_TAB\.map\([\s\S]{0,90}?\.slice\(0,\s*32\)/.test(biliSrc)) {
+  err('mixinKey 没按"整表抽满 → 截前 32 位"计算');
+} else ok('mixinKey 按 B 站算法计算（整表抽出后取前 32 位）');
+
+/* 去字幕 CDN 取文件时不应携带登录 Cookie（aisubtitle.hdslb.com 与主站不是一回事） */
+if (!/httpRequest\(subUrl,\s*\{\s*noCookie:\s*true\s*\}\)/.test(biliSrc)) {
+  err('下载字幕时把登录 Cookie 发给了字幕 CDN —— 既没必要也不安全');
+} else ok('下载字幕不带登录 Cookie（SESSDATA 不外发给 CDN）');
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 17 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
