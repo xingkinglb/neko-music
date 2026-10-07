@@ -9,7 +9,7 @@
  * ============================================================
  */
 
-const { app, BrowserWindow, ipcMain, protocol, net, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -163,6 +163,21 @@ function createWindow() {
     backgroundColor: '#12121c', // 窗口还没画出来时的底色，避免白闪
     autoHideMenuBar: true,       // 隐藏顶部菜单栏，更清爽
     show: false,                 // 等页面准备好再显示，避免白屏闪烁
+
+    // ★ 干掉窗口最上面那圈"白边"。
+    //   那圈白边是 Windows 自带的标题栏，它的颜色跟着系统是浅色还是深色走，
+    //   CSS 完全够不着它 —— 所以只能整条藏掉，换成网页里自己画的深色标题栏
+    //   （见 index.html 里的 .titlebar）。
+    //   'hidden' 的意思是：窗口边框、拖动、缩放这些系统能力都还在，
+    //   只是标题栏那一条不画了，交给我们自己画。
+    titleBarStyle: 'hidden',
+    // 让 Windows 把 最小化 / 最大化 / 关闭 三个按钮画在右上角，
+    // 并且用我们指定的深色，而不是系统的白色。
+    titleBarOverlay: {
+      color: '#12121c',        // 三个按钮所在那块方块的底色（跟界面底色一致，接缝就看不出来）
+      symbolColor: '#e6e6f2',  // 按钮里那几条符号（横杠/方框/叉）的颜色
+      height: 38,              // ★ 必须和 CSS 里的 --titlebar-h 一模一样，否则会对不齐
+    },
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'), // 注入传话筒
       contextIsolation: true,  // 安全隔离，网页不能直接碰 Node.js
@@ -350,6 +365,11 @@ function registerHandlers() {
 //  第 5 部分：启动
 // ============================================================
 app.whenReady().then(() => {
+  // 告诉 Electron 这个应用本身是"深色"的。
+  // 这样滚动条、右键菜单、系统弹窗这些"系统画的东西"也会跟着变深色，
+  // 不会突然冒出一块刺眼的白色。我们没有浅色主题，所以写死 dark 就行。
+  nativeTheme.themeSource = 'dark';
+
   // 如果用户之前填过 Cookie，启动时就装上
   try {
     if (fs.existsSync(COOKIE_FILE)) {

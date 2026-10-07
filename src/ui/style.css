@@ -34,6 +34,11 @@
   --glass-alpha: 0.55;  /* 不透明度：越小越透，能看到更多背景 */
   --glass-rgb:   16 16 26;  /* 玻璃本身带的底色（接近纯黑，保证白字可读） */
 
+  /* ---- 顶部自绘标题栏 ---- */
+  /* ★ 这个值必须和 main.js 里 titleBarOverlay.height 一模一样，
+     否则系统画的 最小化/最大化/关闭 三个按钮会和这一条对不齐。 */
+  --titlebar-h:  38px;
+
   /* ---- 氛围光晕强度 ---- */
   --glow: 1;
 }
@@ -71,6 +76,24 @@ ul { list-style: none; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.24); }
 ::-webkit-scrollbar-track { background: transparent; }
 
+/* ---------- 图标 ---------- */
+/* 图标库本体：<symbol> 里那些只是"图纸"，本身不该出现在页面上。
+   这里用 width/height=0 + overflow:hidden 把它藏起来，而不是 display:none ——
+   后者在个别浏览器上会让 <use> 引用不到里面的图形，前者最保险。 */
+.icon-sprite {
+  position: absolute; width: 0; height: 0;
+  overflow: hidden; pointer-events: none;
+}
+/* 所有用 <use href="#i-xxx"> 画出来的图标都带这个类。
+   这里给一个兜底尺寸，具体位置在下面按需覆盖。
+   display:block 是为了去掉 svg 默认的基线下空隙（不然会莫名其妙多几像素高度）。 */
+.ic { display: block; width: 16px; height: 16px; }
+/* 包着图标的小方框（导航项、搜索框、音量都在用），负责把图标稳稳居中 */
+.ico {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+
 /* ---------- 背景层：整面"壁纸"，压在界面下面 ---------- */
 .bg-layer {
   position: fixed;
@@ -96,14 +119,15 @@ ul { list-style: none; }
   background: rgba(0, 0, 0, var(--bg-dim));
 }
 
-/* ---------- 整体三栏布局 ---------- */
+/* ---------- 整体布局 ---------- */
 .app {
   display: grid;
   grid-template-columns: 240px 1fr;   /* 左 240px，右占满 */
-  grid-template-rows: 1fr 92px;       /* 上占满，下 92px 是播放条 */
+  grid-template-rows: var(--titlebar-h) 1fr 92px;
   grid-template-areas:
-    "sidebar main"
-    "player  player";
+    "titlebar titlebar"
+    "sidebar  main"
+    "player   player";
   height: 100vh;
 
   /* ★ 铁律：这个元素以及它的任何祖先，永远不许加 filter / opacity / transform / will-change。
@@ -112,6 +136,37 @@ ul { list-style: none; }
   position: relative;
   z-index: 1;
 }
+
+/* ============================================================
+   顶部标题栏（替换掉 Windows 那条白边）
+   ============================================================ */
+.titlebar {
+  grid-area: titlebar;
+  display: flex; align-items: center; gap: 9px;
+  padding: 0 16px;
+
+  /* ★ 按住这里能把窗口拖着走，双击能最大化/还原。
+     drag 会让整条变成"窗口把手"，所以这里千万别放按钮或输入框，
+     否则它们会点不动（真要放，就得给那个元素单独写 -webkit-app-region: no-drag）。 */
+  -webkit-app-region: drag;
+
+  /* 比其它面板实很多（0.9 而不是跟着 --glass-alpha 走）。
+     两个原因：
+     ① 右上角那块 138×38 的按钮区是 Windows 用纯色 #12121c 画的，透明度我们改不了。
+        这一条要是太透，跟那块方块之间就会出现一道色差 —— 等于把"白边"换成了"灰边"。
+        0.9 已经能透出一点背景，同时接缝看不出来。
+     ② 正因为已经 0.9 了，背后只剩 10% 能露出来，再加 backdrop-filter 模糊也看不出区别，
+        所以这里干脆不加 —— 顺便避开"drag 区域叠加 backdrop-filter 在 Windows 上
+        偶尔导致窗口拖不动"这个已知坑。 */
+  background: rgba(var(--glass-rgb), 0.9);
+  border-bottom: 1px solid var(--line);
+}
+/* 标题栏里的品牌小圆点，比侧边栏时代小一点，免得压住文字 */
+.titlebar .brand-dot {
+  width: 9px; height: 9px;
+  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.65);
+}
+.titlebar .brand-text { font-size: 13.5px; letter-spacing: 0.4px; }
 
 /* ============================================================
    左侧边栏
@@ -125,22 +180,19 @@ ul { list-style: none; }
   border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
-  padding: 18px 12px 10px;
+  padding: 14px 12px 10px;
   overflow: hidden;
 }
 
-.brand {
-  display: flex; align-items: center; gap: 9px;
-  padding: 4px 8px 20px;
-  font-size: 17px; font-weight: 700; letter-spacing: 0.5px;
-}
-/* 品牌小圆点，粉紫渐变 */
+/* 品牌小圆点，粉紫渐变（现在住在顶部标题栏里） */
 .brand-dot {
   width: 11px; height: 11px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.6);
 }
+/* 品牌文字：用渐变当"墨水"填进字形里 */
 .brand-text {
+  font-weight: 700; letter-spacing: 0.5px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   -webkit-background-clip: text;
   background-clip: text;
@@ -160,7 +212,8 @@ ul { list-style: none; }
   background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.18), rgba(var(--accent-2-rgb), 0.18));
   color: var(--text); font-weight: 600;
 }
-.nav-item .ico { font-size: 15px; width: 18px; text-align: center; }
+.nav-item .ico { width: 18px; }
+.nav-item .ico .ic { width: 16px; height: 16px; }
 
 /* 歌单区 */
 .playlist-section { margin-top: 22px; flex: 1; overflow: hidden; display: flex; flex-direction: column; }
@@ -171,9 +224,11 @@ ul { list-style: none; }
 }
 .mini-btn {
   width: 22px; height: 22px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
   background: var(--panel); color: var(--muted);
-  font-size: 15px; line-height: 1; transition: all 0.16s;
+  transition: all 0.16s;
 }
+.mini-btn .ic { width: 12px; height: 12px; }
 .mini-btn:hover { background: var(--accent); color: #fff; }
 
 .playlist-list { overflow-y: auto; flex: 1; padding-right: 2px; }
@@ -185,7 +240,12 @@ ul { list-style: none; }
 }
 .playlist-row:hover { background: var(--panel); }
 .playlist-row.active { background: var(--panel-2); color: #fff; }
-.playlist-row .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.playlist-row .name {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 7px;
+}
+.playlist-row .name .ic { width: 13px; height: 13px; color: var(--muted); }
+.playlist-row .name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .playlist-row .cnt { font-size: 11px; color: var(--muted); }
 .playlist-row .del { opacity: 0; color: var(--muted); font-size: 13px; padding: 0 3px; }
 .playlist-row:hover .del { opacity: 1; }
@@ -231,7 +291,8 @@ ul { list-style: none; }
   border-color: rgba(var(--accent-rgb), 0.55);
   background: var(--panel-2);
 }
-.search-box .ico { color: var(--muted); font-size: 14px; }
+.search-box .ico { color: var(--muted); }
+.search-box .ico .ic { width: 15px; height: 15px; }
 .search-box input, .link-box input {
   flex: 1; background: none; border: none; color: var(--text); font-size: 13.5px;
 }
@@ -261,8 +322,12 @@ ul { list-style: none; }
 .ghost-btn {
   background: var(--panel); border: 1px solid var(--line);
   color: var(--text-2); font-size: 12.5px; padding: 7px 14px; border-radius: 9px;
+  /* 用 flex 排版，是为了让"图标 + 文字"能自动上下居中对齐，
+     不用再靠空格和 line-height 去凑 */
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   transition: all 0.16s;
 }
+.ghost-btn .ic { width: 14px; height: 14px; }
 .ghost-btn:hover { background: var(--panel-2); color: #fff; border-color: rgba(var(--accent-rgb), 0.45); }
 
 /* ---------- 歌曲列表 ---------- */
@@ -278,10 +343,26 @@ ul { list-style: none; }
 .track.playing { background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.16), rgba(var(--accent-2-rgb), 0.13)); }
 
 .track .idx {
-  text-align: center; font-size: 12.5px; color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12.5px; color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 .track.playing .idx { color: var(--accent); }
+
+/* "正在播放"的那一行，序号位置换成三根上下跳动的柱子 */
+.idx .bars { width: 15px; height: 15px; }
+.idx .bars rect {
+  fill: currentColor;
+  transform-box: fill-box;    /* 让缩放基准是"每根柱子自己"，而不是整个画布 */
+  transform-origin: center;   /* 从中间往两头缩，才像在跳而不是在沉 */
+  animation: barPulse 1s ease-in-out infinite;
+}
+.idx .bars rect:nth-child(2) { animation-delay: 0.18s; }
+.idx .bars rect:nth-child(3) { animation-delay: 0.36s; }
+@keyframes barPulse {
+  0%, 100% { transform: scaleY(0.4); }
+  50%      { transform: scaleY(1); }
+}
 .track .cover {
   width: 56px; height: 36px; border-radius: 7px;
   background: var(--track-bg) center/cover no-repeat;
@@ -333,7 +414,8 @@ ul { list-style: none; }
 .empty {
   text-align: center; padding: 70px 20px; color: var(--muted);
 }
-.empty .big { font-size: 46px; margin-bottom: 14px; opacity: 0.55; }
+.empty .big { margin-bottom: 16px; opacity: 0.5; }
+.empty .big .ic { width: 46px; height: 46px; }
 .empty .msg { font-size: 14px; }
 .empty .hint { font-size: 12.5px; margin-top: 8px; color: var(--muted-2); }
 
@@ -379,27 +461,50 @@ ul { list-style: none; }
 .np-meta { min-width: 0; flex: 1; }
 .np-title { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-sub { font-size: 11.5px; color: var(--muted); margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.heart-btn { font-size: 18px; color: var(--muted); padding: 4px 6px; transition: all 0.16s; }
+.heart-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted); padding: 5px 6px; border-radius: 50%;
+  transition: color 0.16s, transform 0.16s;
+}
+.heart-btn .ic { width: 18px; height: 18px; }
 .heart-btn:hover { color: var(--accent); transform: scale(1.15); }
 .heart-btn.on { color: var(--accent); }
+/* 刚点下收藏时弹一下，给个"收到了"的反馈 */
+.heart-btn.on .ic { animation: heartPop 0.36s ease-out; }
+@keyframes heartPop {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
 
 /* 中：控制按钮 + 进度条 */
-.controls { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.ctrl-row { display: flex; align-items: center; gap: 14px; }
+.controls { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.ctrl-row { display: flex; align-items: center; gap: 10px; }
 .ctrl-btn {
-  font-size: 15px; color: var(--text-2); padding: 5px;
-  border-radius: 8px; transition: all 0.16s;
+  color: var(--text-2);
+  /* 用 flex 让图标稳稳居中，padding 撑出点击热区
+     （图标本身才 17px，不留热区会很难戳中） */
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 7px; border-radius: 50%;
+  transition: color 0.16s, transform 0.16s;
 }
 .ctrl-btn:hover { color: #fff; transform: scale(1.12); }
 .ctrl-btn.big {
-  width: 40px; height: 40px; border-radius: 50%;
+  width: 42px; height: 42px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  color: #fff; font-size: 15px;
-  display: flex; align-items: center; justify-content: center;
+  color: #fff;
   box-shadow: 0 3px 14px rgba(var(--accent-rgb), 0.35);
 }
-.ctrl-btn.big:hover { transform: scale(1.07); }
+.ctrl-btn.big:hover { transform: scale(1.06); }
 .ctrl-btn.on { color: var(--accent); }
+
+/* 图标尺寸分主次：随机/循环是"次要"按钮，小一点；
+   上下首是主操作，大一点。一排看过去才有层次，不会五个一样大像贴纸。 */
+#btnShuffle .ic, #btnLoop .ic { width: 17px; height: 17px; }
+#btnPrev .ic, #btnNext .ic { width: 21px; height: 21px; }
+#btnPlay .ic { width: 17px; height: 17px; }
+/* 正在缓冲时那个圆弧要转起来 */
+.ctrl-btn .ic.spin { animation: spin 0.9s linear infinite; }
 
 .progress-row { display: flex; align-items: center; gap: 10px; width: 100%; }
 .time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; width: 36px; text-align: center; }
@@ -431,7 +536,8 @@ ul { list-style: none; }
 
 /* 右：音量 */
 .volume { display: flex; align-items: center; gap: 9px; justify-content: flex-end; }
-.volume .ico { color: var(--muted); font-size: 14px; }
+.volume .ico { color: var(--muted); }
+.volume .ico .ic { width: 16px; height: 16px; }
 /* 滑杆通用样式：播放条的音量 + 设置面板里的各种调节杆共用 */
 #volume, .field input[type="range"] {
   width: 96px; height: 4px; border-radius: 2px;

@@ -5,11 +5,19 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
-const html = read('src/ui/index.html');
-const css = read('src/ui/style.css');
-const appjs = read('src/ui/app.js');
-const preload = read('src/preload.js');
-const mainjs = read('src/main.js');
+/* 检查前先把注释挖掉，只留下"真正会跑起来的代码"。
+   否则注释里举例说明用的字符（比如"以前这里是 🔍，现在换成 SVG"）
+   会被当成真代码误报 —— 这类误报最消耗信任。
+   注意：挖空时保留换行符，否则报告出来的行号会全部错位。 */
+const blankKeepLines = (m) => m.replace(/[^\n]/g, ' ');
+const stripHtml = (s) => s.replace(/<!--[\s\S]*?-->/g, blankKeepLines);
+const stripBlock = (s) => s.replace(/\/\*[\s\S]*?\*\//g, blankKeepLines);
+
+const html = stripHtml(read('src/ui/index.html'));
+const css = stripBlock(read('src/ui/style.css'));
+const appjs = stripBlock(read('src/ui/app.js'));
+const preload = stripBlock(read('src/preload.js'));
+const mainjs = stripBlock(read('src/main.js'));
 
 let fail = 0;
 const err = (m) => { console.log('  ✗ ' + m); fail++; };
@@ -104,7 +112,63 @@ cases.forEach(([inp, exp]) => {
 });
 if (!gateBad) ok('两道安全闸（文件名白名单 + 路径越界检查）行为正确');
 
+/* ---- 7) 图标：每个 <use href="#i-xxx"> 都能找到 <symbol id="i-xxx"> ---- */
+console.log('\n[6] 图标引用是否都能找到定义：');
+const symbols = new Set([...html.matchAll(/<symbol\s+id="([^"]+)"/g)].map((m) => m[1]));
+const usedIcons = new Set([
+  ...html.matchAll(/<use\s+href="#([^"]+)"/g).map((m) => m[1]),
+  ...appjs.matchAll(/ic\(\s*'([^']+)'/g).map((m) => m[1]),
+  // 三元里写的图标名（如 ic(v === 0 ? 'i-vol-x' : ...)）也要捞出来
+  ...appjs.matchAll(/'(i-[\w-]+)'/g).map((m) => m[1]),
+]);
+const iconMissing = [...usedIcons].filter((n) => !symbols.has(n));
+if (iconMissing.length) iconMissing.forEach((n) => err(`用了图标 #${n}，但图标库里没有 <symbol id="${n}">`));
+else ok(`全部 ${usedIcons.size} 个图标引用都能找到定义`);
+const iconUnused = [...symbols].filter((n) => !usedIcons.has(n));
+if (iconUnused.length) console.log(`  · 提示：图标库里这些暂时没人用 → ${iconUnused.join(', ')}`);
+
+/* ---- 8) 自绘标题栏：CSS 高度必须等于主进程 titleBarOverlay 的高度 ---- */
+console.log('\n[7] 自绘标题栏一致性：');
+const cssTbH = (css.match(/--titlebar-h:\s*(\d+)px/) || [])[1];
+const jsTbH = (mainjs.match(/titleBarOverlay:\s*\{[\s\S]*?height:\s*(\d+)/) || [])[1];
+if (!cssTbH) err('style.css 里找不到 --titlebar-h');
+else if (!jsTbH) err('main.js 里找不到 titleBarOverlay.height');
+else if (cssTbH !== jsTbH) err(`--titlebar-h=${cssTbH}px，但 titleBarOverlay.height=${jsTbH}px —— 两者必须一致，否则系统按钮会和标题栏错位`);
+else ok(`标题栏高度两处一致（${cssTbH}px）`);
+
+const tbRule = (css.match(/\.titlebar\s*\{[\s\S]*?\n\}/) || [''])[0];
+if (!/app-region:\s*drag/.test(tbRule)) err('.titlebar 少了 -webkit-app-region: drag —— 窗口会拖不动（标题栏藏起来后就没有别的拖动区了）');
+else ok('.titlebar 是拖动区，窗口能拖着走');
+
+const tbHtml = (html.match(/<header class="titlebar">[\s\S]*?<\/header>/) || [''])[0];
+if (/<button|<input|<a\s/.test(tbHtml)) err('.titlebar 里放了可点击元素 —— drag 会让它们点不动（应给该元素单独加 no-drag）');
+else ok('.titlebar 里只有装饰内容，没有会被 drag 吃掉点击的控件');
+
+if (!/titleBarStyle:\s*'hidden'/.test(mainjs)) err("main.js 没有 titleBarStyle: 'hidden' —— 系统那条白色标题栏还在");
+else ok("main.js 已设置 titleBarStyle: 'hidden'（系统标题栏已隐藏）");
+
+/* ---- 9) 界面里不该再出现彩色 emoji ---- */
+console.log('\n[8] 彩色 emoji 残留检查：');
+/* 这些字符在 Windows 上会被 Segoe UI Emoji 接管，渲染成五颜六色的小方块。
+   箭头（← →）和几个常见符号（★ ✕ ✓）是例外：它们在 Windows 上是单色的，留着无妨。
+   范围说明：1F000-1FAFF 图形符号 / 2600-27BF 杂项+装饰 / 2B00-2BFF / 25A0-25FF 几何图形
+   / 23E9-23FF 媒体控制键 / FE0F 变体选择符（它的作用就是"强制彩色"）。 */
+const OK_SYMBOLS = new Set(['★', '✕', '✓', '⏻']);
+const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{25A0}-\u{25FF}\u{23E9}-\u{23FF}\u{FE0F}]/gu;
+function findEmoji(text, label) {
+  const hits = [];
+  text.split('\n').forEach((line, i) => {
+    for (const ch of line.match(EMOJI_RE) || []) {
+      if (!OK_SYMBOLS.has(ch)) hits.push(`${label}:${i + 1} 出现 "${ch}" (U+${ch.codePointAt(0).toString(16).toUpperCase()})`);
+    }
+  });
+  return hits;
+}
+const emojiHits = [...findEmoji(html, 'index.html'), ...findEmoji(appjs, 'app.js'), ...findEmoji(css, 'style.css')];
+if (emojiHits.length) emojiHits.forEach((h) => err(`彩色 emoji 残留 → ${h}`));
+else ok('界面里已没有任何彩色 emoji（图标全部走 SVG）');
+
 /* ---- 汇总 ---- */
 console.log('\n========================================');
-if (fail === 0) console.log('全部静态自检通过 ✅（共 6 大类检查）');
+if (fail === 0) console.log('全部静态自检通过 ✅（共 8 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

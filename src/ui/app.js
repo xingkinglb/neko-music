@@ -20,6 +20,27 @@
 
 const $ = (id) => document.getElementById(id);
 
+/**
+ * 生成一个图标。
+ * 图标形状都定义在 index.html 顶部的"图标库"里（<symbol id="i-xxx">），
+ * 这里只是把它取出来用 —— <use> 引用同一个定义，不会重复画。
+ *
+ *   ic('i-play')          → 播放图标
+ *   ic('i-loading','spin')→ 加载图标，并且转起来
+ */
+function ic(name, extraClass) {
+  return `<svg class="ic${extraClass ? ' ' + extraClass : ''}"><use href="#${name}"/></svg>`;
+}
+
+/* "正在播放"那行的小动效：三根上下跳的柱子。
+   它没有放进图标库，因为动画需要 CSS 精确选中里面每一根柱子，
+   而 <use> 引用的内容在"影子树"里，外面的 CSS 选不中它。 */
+const BARS_ICON = `<svg class="ic bars" viewBox="0 0 24 24" aria-hidden="true">
+  <rect x="4"    y="9" width="3.4" height="6"  rx="1.7"/>
+  <rect x="10.3" y="5" width="3.4" height="14" rx="1.7"/>
+  <rect x="16.6" y="8" width="3.4" height="8"  rx="1.7"/>
+</svg>`;
+
 /** 秒 → "3:45" */
 function fmtTime(sec) {
   if (!sec || !isFinite(sec) || sec < 0) return '0:00';
@@ -193,9 +214,9 @@ async function playAt(index) {
   $('npSub').textContent = track.author || (queue.name || 'B 站');
   $('npCover').style.backgroundImage = track.cover ? `url("${track.cover}")` : 'none';
   $('npCover').style.backgroundSize = 'cover';
-  $('btnFav').textContent = isFav(track) ? '♥' : '♡';
+  $('btnFav').innerHTML = ic(isFav(track) ? 'i-heart-fill' : 'i-heart');
   $('btnFav').classList.toggle('on', isFav(track));
-  $('btnPlay').textContent = '⏳';
+  $('btnPlay').innerHTML = ic('i-loading', 'spin');
   $('timeTotal').textContent = fmtTime(track.duration);
 
   try {
@@ -254,7 +275,7 @@ function trackRow(track, i, opts = {}) {
   const liked = isFav(track);
   return `
     <div class="track ${playing ? 'playing' : ''}" data-i="${i}">
-      <div class="idx">${playing ? '♪' : i + 1}</div>
+      <div class="idx">${playing ? BARS_ICON : i + 1}</div>
       <div class="cover" style="background-image:url('${esc(track.cover || '')}')"></div>
       <div class="info">
         <div class="t">${esc(track.title)}</div>
@@ -273,7 +294,7 @@ function trackRow(track, i, opts = {}) {
 function trackListHTML(tracks, opts = {}) {
   if (!tracks.length) {
     return `<div class="empty">
-      <div class="big">${opts.emptyIcon || '🎧'}</div>
+      <div class="big">${ic(opts.emptyIcon || 'i-note')}</div>
       <div class="msg">${esc(opts.emptyText || '这里还什么都没有')}</div>
       <div class="hint">${esc(opts.emptyHint || '')}</div>
     </div>`;
@@ -289,7 +310,7 @@ let searchPage = 1;
 async function renderSearch() {
   if (!searchResults.length) {
     content().innerHTML = `<div class="empty">
-      <div class="big">🔍</div>
+      <div class="big">${ic('i-search')}</div>
       <div class="msg">输入关键词，去 B 站找歌吧</div>
       <div class="hint">也可以把 B 站链接贴到右边的框里，会自动识别合集哦</div>
     </div>`;
@@ -302,7 +323,7 @@ async function renderSearch() {
         <div class="block-sub">第 ${searchPage} 页 · 共 ${searchResults.length} 条</div>
       </div>
       <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayAll">▶ 播放全部</button>
+        <button class="ghost-btn" id="btnPlayAll">${ic('i-play')}<span>播放全部</span></button>
         <button class="ghost-btn" id="btnPrevPage">← 上一页</button>
         <button class="ghost-btn" id="btnNextPage">下一页 →</button>
       </div>
@@ -394,7 +415,7 @@ function renderParsed() {
         </div>
       </div>
       <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayParsed">▶ 播放全部 (${tracks.length})</button>
+        <button class="ghost-btn" id="btnPlayParsed">${ic('i-play')}<span>播放全部 (${tracks.length})</span></button>
         <button class="ghost-btn" id="btnAddParsed">＋ 全部加入歌单</button>
       </div>
     </div>
@@ -403,7 +424,7 @@ function renderParsed() {
       <div class="card-grid" style="margin-bottom:18px">
         <div class="card" style="cursor:default">
           <div class="thumb" style="background-image:url('${esc(info.season.cover || info.cover)}')"></div>
-          <div class="c-title">📚 ${esc(info.season.title)}</div>
+          <div class="c-title">${esc(info.season.title)}</div>
           <div class="c-sub">${seasonTracks.length} 集 · 已自动展开</div>
         </div>
       </div>` : ''}
@@ -417,16 +438,16 @@ function renderFavorites() {
   content().innerHTML = `
     <div class="block-head">
       <div>
-        <div class="block-title">💗 我喜欢</div>
+        <div class="block-title">我喜欢</div>
         <div class="block-sub">共 ${DB.favorites.length} 首</div>
       </div>
       <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayFav">▶ 播放全部</button>
+        <button class="ghost-btn" id="btnPlayFav">${ic('i-play')}<span>播放全部</span></button>
       </div>
     </div>
     ${trackListHTML(DB.favorites, {
       remove: true,
-      emptyIcon: '💗',
+      emptyIcon: 'i-heart',
       emptyText: '还没有收藏任何歌',
       emptyHint: '在列表里点「收藏」，或者按播放条上的小爱心',
     })}`;
@@ -438,12 +459,12 @@ function renderHistory() {
   content().innerHTML = `
     <div class="block-head">
       <div>
-        <div class="block-title">🕘 最近播放</div>
+        <div class="block-title">最近播放</div>
         <div class="block-sub">共 ${DB.history.length} 首</div>
       </div>
     </div>
     ${trackListHTML(DB.history, {
-      emptyIcon: '🕘',
+      emptyIcon: 'i-history',
       emptyText: '还没有播放记录',
     })}`;
 }
@@ -460,14 +481,14 @@ function renderPlaylist(playlistId) {
         <div class="block-sub">共 ${pl.tracks.length} 首</div>
       </div>
       <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayPl">▶ 播放全部</button>
+        <button class="ghost-btn" id="btnPlayPl">${ic('i-play')}<span>播放全部</span></button>
         <button class="ghost-btn" id="btnRenamePl">重命名</button>
         <button class="ghost-btn" id="btnDelPl">删除歌单</button>
       </div>
     </div>
     ${trackListHTML(pl.tracks, {
       remove: true,
-      emptyIcon: '📝',
+      emptyIcon: 'i-note',
       emptyText: '这个歌单还是空的',
       emptyHint: '去搜索页面，用「＋歌单」把歌加进来',
     })}`;
@@ -493,7 +514,7 @@ async function doImportFav(text) {
     content().innerHTML = `
       <div class="block-head">
         <div>
-          <div class="block-title">📁 选择要导入的收藏夹</div>
+          <div class="block-title">选择要导入的收藏夹</div>
           <div class="block-sub">共 ${folders.length} 个</div>
         </div>
       </div>
@@ -533,12 +554,12 @@ async function loadFavItems(mediaId) {
 function renderPlaylistSidebar() {
   const ul = $('playlistList');
   if (!DB.playlists.length) {
-    ul.innerHTML = `<li style="padding:8px 10px;font-size:12px;color:#6b6b83">还没有歌单，点 ＋ 建一个</li>`;
+    ul.innerHTML = `<li style="padding:8px 10px;font-size:12px;color:var(--muted-2)">还没有歌单，点 ＋ 建一个</li>`;
     return;
   }
   ul.innerHTML = DB.playlists.map((p) => `
     <li class="playlist-row ${currentView === 'playlist:' + p.id ? 'active' : ''}" data-pl="${p.id}">
-      <span class="name">🎵 ${esc(p.name)}</span>
+      <span class="name">${ic('i-note')}<span class="nm">${esc(p.name)}</span></span>
       <span class="cnt">${p.tracks.length}</span>
       <button class="del" data-del="${p.id}" title="删除">✕</button>
     </li>`).join('');
@@ -617,7 +638,7 @@ function syncSettingsUI() {
     b.classList.toggle('on', b.dataset.theme === s.theme);
   });
 
-  $('bgHint').textContent = s.bg.file ? '当前：自定义背景 ✔' : '当前：默认深色背景';
+  $('bgHint').textContent = s.bg.file ? '当前：自定义背景 ✓' : '当前：默认深色背景';
 
   $('rngDim').value = Math.round((s.bg.dim ?? 0.55) * 100);
   $('valDim').textContent = $('rngDim').value + '%';
@@ -680,7 +701,7 @@ function bindSettings() {
       applyAppearance(); syncSettingsUI(); persist();
       toast(res.sizeMB > 20
         ? `背景已换（${res.sizeMB}MB，图有点大，可能会略卡）`
-        : '背景已换 ✔');
+        : '背景已换 ✓');
     } catch (err) {
       toast('选图失败：' + err.message);
     }
@@ -723,7 +744,7 @@ function bindSettings() {
     const text = $('cookieInput').value.trim();
     try {
       await api('cookieSet', text);
-      toast(text ? '已保存 ✔ 搜索会更稳定' : '已清空 Cookie');
+      toast(text ? '已保存 ✓ 搜索会更稳定' : '已清空 Cookie');
     } catch (err) {
       toast('保存失败：' + err.message);
     }
@@ -733,6 +754,20 @@ function bindSettings() {
 /* ============================================================
    第 5 部分：事件绑定
    ============================================================ */
+
+/**
+ * 设置音量（0~100），顺手把喇叭图标也换掉。
+ * 三档图标：0 = 静音（叉），小于一半 = 小声（一道弧），其余 = 大声（两道弧）。
+ * save 为 true 时写进存档（拖动滑杆时用防抖版，避免一秒钟存上百次）。
+ */
+function applyVolume(v, save) {
+  audio.volume = v / 100;
+  $('volIcon').innerHTML = ic(v === 0 ? 'i-vol-x' : (v < 50 ? 'i-vol-1' : 'i-vol-2'));
+  if (save) {
+    DB.settings.volume = v;
+    persistLater();
+  }
+}
 
 function bindEvents() {
   /* ---- 顶部搜索框：按回车搜索 ---- */
@@ -855,6 +890,8 @@ function bindEvents() {
   $('btnLoop').addEventListener('click', () => {
     loopMode = loopMode === 'list' ? 'one' : 'list';
     $('btnLoop').classList.toggle('on', loopMode === 'one');
+    // 单曲循环的图标右边多一个小 "1"，一眼就能看出当前是哪种模式
+    $('btnLoop').innerHTML = ic(loopMode === 'one' ? 'i-repeat1' : 'i-repeat');
     toast(loopMode === 'one' ? '单曲循环' : '列表循环');
   });
 
@@ -914,16 +951,15 @@ function bindEvents() {
 
   /* ---- 音量：拖动即时生效，停手后写进存档（下次打开还是这个值） ---- */
   $('volume').addEventListener('input', (e) => {
-    const v = Number(e.target.value);
-    audio.volume = v / 100;
-    DB.settings.volume = v;
-    persistLater();
+    applyVolume(Number(e.target.value), true);
   });
 
   /* ---- 音频事件 ---- */
-  audio.addEventListener('play', () => { $('btnPlay').textContent = '⏸'; });
-  audio.addEventListener('pause', () => { $('btnPlay').textContent = '▶'; });
-  audio.addEventListener('waiting', () => { $('btnPlay').textContent = '⏳'; });
+  // 播放/暂停/缓冲三个状态，换的是图标本身。
+  // 用 innerHTML 换 <use> 引用的名字，视觉上就是"换了个图标"。
+  audio.addEventListener('play',    () => { $('btnPlay').innerHTML = ic('i-pause'); });
+  audio.addEventListener('pause',   () => { $('btnPlay').innerHTML = ic('i-play'); });
+  audio.addEventListener('waiting', () => { $('btnPlay').innerHTML = ic('i-loading', 'spin'); });
 
   audio.addEventListener('timeupdate', () => {
     // 正在拖动时不要抢着刷新画面，否则进度条会被自己拖回去，疯狂抖动
@@ -974,11 +1010,11 @@ async function toggleFav(track) {
     toast('已取消收藏');
   } else {
     DB.favorites = [track, ...DB.favorites];
-    toast('已加入我喜欢 💗');
+    toast('已加入我喜欢');
   }
   await persist();
   if (sameTrack(track, queue.tracks[queue.index])) {
-    $('btnFav').textContent = isFav(track) ? '♥' : '♡';
+    $('btnFav').innerHTML = ic(isFav(track) ? 'i-heart-fill' : 'i-heart');
     $('btnFav').classList.toggle('on', isFav(track));
   }
   renderAll();
@@ -1038,7 +1074,7 @@ async function boot() {
   // 2.5) 音量记忆：把上次退出时的音量填回滑块和播放器
   const vol = DB.settings.volume ?? 80;
   $('volume').value = vol;
-  audio.volume = vol / 100;
+  applyVolume(vol, false);
 
   // 3) 绑事件
   bindEvents();

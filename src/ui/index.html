@@ -10,6 +10,121 @@
 <body>
 
 <!--
+  ============================================================
+   图标库：所有图标在这里定义一次，别处用 <use href="#i-名字"> 引用
+  ============================================================
+  为什么要换成 SVG，而不是继续用 🔍 💗 ⏮ 这类 emoji？
+  因为在 Windows 上这些符号会被 Segoe UI Emoji 接管，渲染成一个个
+  五颜六色的小方块（蓝色三角形、绿色箭头……），颜色改不了、大小也对不齐，
+  跟深色界面放在一起非常跳。换成 SVG 之后：
+    · 颜色统一用 currentColor —— 谁引用它，它就跟着谁的文字颜色走，
+      所以"鼠标悬停变白""选中变主题色"这些效果全都自动生效，不用额外写代码；
+    · 粗细、圆角、间距可以统一成一套，播放条看起来才干净；
+    · 只有一份定义，以后想改形状只改这一处。
+  ============================================================
+-->
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+  <defs>
+    <!-- ---- 通用线性图标：统一 2.1 描边 + 圆头圆角 ---- -->
+    <symbol id="i-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="7"/>
+      <path d="M20.2 20.2 16.4 16.4"/>
+    </symbol>
+
+    <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3.4"/>
+      <path d="M12 7.8V5.8M12 16.2v2M7.8 12H5.8M16.2 12h2M14.97 9.03l1.41-1.41M9.03 9.03 7.62 7.62M14.97 14.97l1.41 1.41M9.03 14.97l-1.41 1.41"/>
+    </symbol>
+
+    <symbol id="i-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7z"/>
+    </symbol>
+
+    <symbol id="i-heart-fill" viewBox="0 0 24 24">
+      <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7z" fill="currentColor"/>
+    </symbol>
+
+    <symbol id="i-history" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="8.4"/>
+      <path d="M12 7.2V12l3.4 2"/>
+    </symbol>
+
+    <symbol id="i-note" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 18V5.6l11.4-1.9v12.4"/>
+      <circle cx="6" cy="18" r="3"/>
+      <circle cx="17.4" cy="16.1" r="3"/>
+    </symbol>
+
+    <symbol id="i-plus" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <path d="M12 5.6v12.8M5.6 12h12.8"/>
+    </symbol>
+
+    <!-- ---- 播放条控制 ---- -->
+    <!-- 随机：两根交叉的箭头 -->
+    <symbol id="i-shuffle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.8-1.1 2-1.7 3.3-1.7H22"/>
+      <path d="m18 2 4 4-4 4"/>
+      <path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/>
+      <path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/>
+      <path d="m18 14 4 4-4 4"/>
+    </symbol>
+
+    <!-- 上一首 / 下一首：实心三角 + 一条竖线，圆角接头让三角形不扎眼 -->
+    <symbol id="i-prev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19 19.2 9.6 12 19 4.8z" fill="currentColor"/>
+      <path d="M5.2 19V5"/>
+    </symbol>
+    <symbol id="i-next" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 4.8 14.4 12 5 19.2z" fill="currentColor"/>
+      <path d="M18.8 5v14"/>
+    </symbol>
+
+    <!-- 播放 / 暂停 -->
+    <symbol id="i-play" viewBox="0 0 24 24">
+      <path d="M7 4.6v14.8L19.4 12z" fill="currentColor" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24">
+      <rect x="6.8" y="4.6" width="4" height="14.8" rx="1.7" fill="currentColor"/>
+      <rect x="13.2" y="4.6" width="4" height="14.8" rx="1.7" fill="currentColor"/>
+    </symbol>
+    <!-- 加载中：一段圆弧，靠 CSS 让它转起来 -->
+    <symbol id="i-loading" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+      <path d="M12 3.4a8.6 8.6 0 1 0 8.6 8.6"/>
+    </symbol>
+
+    <!-- 循环：列表循环 / 单曲循环（右边多一个 "1"） -->
+    <symbol id="i-repeat" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m17 2.6 3.4 3.4L17 9.4"/>
+      <path d="M3.6 11.4V10a4 4 0 0 1 4-4h12.8"/>
+      <path d="M7 21.4 3.6 18 7 14.6"/>
+      <path d="M20.4 12.6V14a4 4 0 0 1-4 4H3.6"/>
+    </symbol>
+    <symbol id="i-repeat1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m17 2.6 3.4 3.4L17 9.4"/>
+      <path d="M3.6 11.4V10a4 4 0 0 1 4-4h12.8"/>
+      <path d="M7 21.4 3.6 18 7 14.6"/>
+      <path d="M20.4 12.6V14a4 4 0 0 1-4 4H3.6"/>
+      <path d="M11.5 10.9 12.9 10v5"/>
+    </symbol>
+
+    <!-- ---- 音量：喇叭固定，右边的弧线/叉按音量大小换 ---- -->
+    <symbol id="i-vol-2" viewBox="0 0 24 24">
+      <path d="M11.6 4.4 7 8.2H2.8v7.6H7l4.6 3.8z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M15.7 8.6a5.2 5.2 0 0 1 0 6.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+      <path d="M18.9 5.3a9.8 9.8 0 0 1 0 13.4" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-vol-1" viewBox="0 0 24 24">
+      <path d="M11.6 4.4 7 8.2H2.8v7.6H7l4.6 3.8z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M15.7 8.6a5.2 5.2 0 0 1 0 6.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+    </symbol>
+    <symbol id="i-vol-x" viewBox="0 0 24 24">
+      <path d="M11.6 4.4 7 8.2H2.8v7.6H7l4.6 3.8z" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="m16.2 9.6 5 4.8M21.2 9.6l-5 4.8" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/>
+    </symbol>
+  </defs>
+</svg>
+
+<!--
   整个界面分成三块：
   左边 = 侧边栏（导航 + 我的歌单）
   右边 = 主区域（顶部搜索栏 + 中间内容列表）
@@ -25,35 +140,44 @@
 
 <div class="app">
 
+  <!--
+    ============ 顶部标题栏（自己画的） ============
+    系统那圈白色的标题栏已经被藏掉了（见 main.js 的 titleBarStyle），
+    这一条由我们自己画，颜色就跟界面走，再也不会出现白边。
+
+    · -webkit-app-region: drag 让它能"按住拖动窗口"，双击还能最大化/还原；
+    · 右上角那一小块是系统画的 最小化/最大化/关闭 三个按钮的地盘，
+      所以这条栏里只放左边的品牌，右边别摆东西（否则会被按钮压住、还点不动）。
+  -->
+  <header class="titlebar">
+    <span class="brand-dot"></span>
+    <span class="brand-text">Neko Music</span>
+  </header>
+
   <!-- ============ 左侧边栏 ============ -->
   <aside class="sidebar">
-    <div class="brand">
-      <span class="brand-dot"></span>
-      <span class="brand-text">Neko Music</span>
-    </div>
-
     <nav class="nav" id="nav">
       <div class="nav-item active" data-view="search">
-        <span class="ico">🔍</span><span>搜索</span>
+        <span class="ico"><svg class="ic"><use href="#i-search"/></svg></span><span>搜索</span>
       </div>
       <div class="nav-item" data-view="favorites">
-        <span class="ico">💗</span><span>我喜欢</span>
+        <span class="ico"><svg class="ic"><use href="#i-heart"/></svg></span><span>我喜欢</span>
       </div>
       <div class="nav-item" data-view="history">
-        <span class="ico">🕘</span><span>最近播放</span>
+        <span class="ico"><svg class="ic"><use href="#i-history"/></svg></span><span>最近播放</span>
       </div>
     </nav>
 
     <div class="playlist-section">
       <div class="section-head">
         <span>我的歌单</span>
-        <button class="mini-btn" id="btnNewPlaylist" title="新建歌单">＋</button>
+        <button class="mini-btn" id="btnNewPlaylist" title="新建歌单"><svg class="ic"><use href="#i-plus"/></svg></button>
       </div>
       <ul class="playlist-list" id="playlistList"></ul>
     </div>
 
     <div class="sidebar-foot">
-      <button class="ghost-btn" id="btnSettings" style="width:100%">⚙ 设置</button>
+      <button class="ghost-btn" id="btnSettings" style="width:100%"><svg class="ic"><use href="#i-settings"/></svg><span>设置</span></button>
       <div class="tip">按 F12 可打开调试工具</div>
     </div>
   </aside>
@@ -64,7 +188,7 @@
     <!-- 顶部工具条 -->
     <header class="topbar">
       <div class="search-box">
-        <span class="ico">🔍</span>
+        <span class="ico"><svg class="ic"><use href="#i-search"/></svg></span>
         <input id="searchInput" type="text" placeholder="搜歌名、UP 主、关键词……" autocomplete="off" />
       </div>
       <div class="link-box">
@@ -88,17 +212,17 @@
         <div class="np-title" id="npTitle">还没有播放</div>
         <div class="np-sub" id="npSub">去搜索一首歌吧</div>
       </div>
-      <button class="heart-btn" id="btnFav" title="收藏">♡</button>
+      <button class="heart-btn" id="btnFav" title="收藏"><svg class="ic"><use href="#i-heart"/></svg></button>
     </div>
 
     <!-- 中：播放控制 -->
     <div class="controls">
       <div class="ctrl-row">
-        <button class="ctrl-btn" id="btnShuffle" title="随机播放">🔀</button>
-        <button class="ctrl-btn" id="btnPrev" title="上一首">⏮</button>
-        <button class="ctrl-btn big" id="btnPlay" title="播放/暂停">▶</button>
-        <button class="ctrl-btn" id="btnNext" title="下一首">⏭</button>
-        <button class="ctrl-btn" id="btnLoop" title="循环模式">🔁</button>
+        <button class="ctrl-btn" id="btnShuffle" title="随机播放"><svg class="ic"><use href="#i-shuffle"/></svg></button>
+        <button class="ctrl-btn" id="btnPrev" title="上一首"><svg class="ic"><use href="#i-prev"/></svg></button>
+        <button class="ctrl-btn big" id="btnPlay" title="播放/暂停"><svg class="ic"><use href="#i-play"/></svg></button>
+        <button class="ctrl-btn" id="btnNext" title="下一首"><svg class="ic"><use href="#i-next"/></svg></button>
+        <button class="ctrl-btn" id="btnLoop" title="循环模式"><svg class="ic"><use href="#i-repeat"/></svg></button>
       </div>
       <div class="progress-row">
         <span class="time" id="timeNow">0:00</span>
@@ -112,7 +236,7 @@
 
     <!-- 右：音量 -->
     <div class="volume">
-      <span class="ico">🔊</span>
+      <span class="ico" id="volIcon"><svg class="ic"><use href="#i-vol-2"/></svg></span>
       <input type="range" id="volume" min="0" max="100" value="80" />
     </div>
   </footer>
@@ -199,7 +323,7 @@
             怎么拿：浏览器打开 bilibili.com 并登录 → 按 F12 → 「Application / 应用程序」
             → 左侧 Cookies → www.bilibili.com → 找到 <b>SESSDATA</b> 那一行复制它的值。<br>
             填了之后搜索会稳定很多。不填也能用，只是偶尔要重试。<br>
-            🔒 只存在你自己电脑里，不会上传到任何地方。
+            <b>只存在你自己电脑里</b>，不会上传到任何地方。
           </div>
         </div>
         <button class="primary-btn" id="btnSaveCookie">保存 Cookie</button>
