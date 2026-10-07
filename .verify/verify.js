@@ -745,5 +745,54 @@ if (!/^\s*syncTopbarHeight\(\);$/m.test(appjs)) {
   err('启动时没有调用 syncTopbarHeight()（--topbar-h 还是 CSS 里的兜底值）');
 } else ok('启动时量过顶部工具栏高度并写进 --topbar-h');
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 26 大类检查）');
+/* ---- 27) 合集 / 分P 展开面板 ---- */
+console.log('\n[27] 合集 / 分P 展开：徽章入口 + 右侧抽屉 + 点空白/Esc 收起：');
+{
+  const need = ['collectMask', 'collectTitle', 'collectSub', 'collectSearch', 'collectList',
+                'btnCloseCollect', 'btnPlayCollect', 'btnQueueCollect'];
+  const miss = need.filter((id) => !htmlIds.has(id));
+  if (miss.length) err(`index.html 缺少合集面板元素：${miss.join(', ')}`);
+  else ok('合集面板的遮罩 / 标题 / 搜索框 / 列表 / 三个按钮都在 index.html');
+
+  if (!/\.collect-mask\s*\{[^}]*position:\s*fixed/.test(css) || !/\.collect-panel\s*\{/.test(css))
+    err('style.css 缺少 .collect-mask / .collect-panel 右侧抽屉样式');
+  else ok('合集面板用 .collect-mask + .collect-panel 从右侧滑出');
+
+  if (!/\.track\s+\.badge\s*\{/.test(css)) err('缺少行上「选集 N」徽章样式 .track .badge');
+  else ok('歌曲行有「选集 N」徽章样式');
+
+  const trackBlock = (css.match(/\.track\s*\{([^}]*)\}/) || [])[1] || '';
+  const colsRaw = (trackBlock.match(/grid-template-columns:\s*([^;]+);/) || [])[1] || '';
+  const nCols = colsRaw.trim() ? colsRaw.trim().split(/\s+/).length : 0;
+  if (nCols < 6) err(`.track 仍是 ${nCols} 列 —— 徽章会挤坏整行布局（应为 6 列：序号/封面/信息/徽章/时长/操作）`);
+  else ok('.track 增到 6 列（给徽章留了一列，不挤坏布局）');
+
+  if (!/function maybeCollection\(/.test(appjs) || !/COLLECT_HINT_RE/.test(appjs))
+    err('没有 maybeCollection —— 无法判断哪一行该显示「选集」徽章');
+  else ok('有 maybeCollection（已查过的分P/合集数 + 时长 + 标题关键词）');
+
+  if (!/function expandCollection\(/.test(appjs) || !/api\(\s*'videoInfo'/.test(appjs))
+    err("expandCollection 没有经 api('videoInfo') 拉取分P/合集");
+  else ok("点徽章时才经 api('videoInfo') 拉取分P/合集（搜索结果拿不到，不在列表阶段乱发请求）");
+
+  if (!/function buildCollectionEntries\(/.test(appjs) || !/info\.season[\s\S]*?info\.pages/.test(appjs))
+    err('buildCollectionEntries 没有"优先合集、其次分P"的兜底');
+  else ok('优先展开 UP 合集；没有合集时退回分P列表');
+
+  if (!/data-act="expand"/.test(appjs) || !/closest\(\s*'\.badge'\s*\)/.test(appjs))
+    err("行上的徽章没有接上点击（data-act=\"expand\" / closest('.badge')）");
+  else ok('徽章点击被单独拦下，不会误触发"整行播放"');
+
+  if (!/function queueCollection\(/.test(appjs)) err('缺少"整段加入队列"的 queueCollection');
+  else ok('支持把整段合集加入播放队列');
+
+  if (!/e\.key === 'Escape' && collectState/.test(appjs) || !/e\.target\.id === 'collectMask'/.test(appjs))
+    err('合集面板没有"点空白 / Esc 收起"');
+  else ok('合集面板可点空白或按 Esc 收起（与歌词浮层一致）');
+
+  if (!/^\s*bindCollect\(\);$/m.test(appjs)) err('启动时没有调用 bindCollect()');
+  else ok('启动时绑定合集面板');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 27 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

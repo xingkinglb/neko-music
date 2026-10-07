@@ -347,6 +347,10 @@ const content = () => $('content');
 function trackRow(track, i, opts = {}) {
   const playing = sameTrack(track, queue.tracks[queue.index]);
   const liked = isFav(track);
+  // 长视频 / 疑似合集，在行上放一个「选集 N」小徽章当入口（详情见 expandCollection）
+  const showBadge = opts.expand !== false && maybeCollection(track);
+  const badgeLabel = track.parts > 1 ? `选集 ${track.parts}`
+    : track.seasonCount > 1 ? `合集 ${track.seasonCount}` : '选集';
   return `
     <div class="track ${playing ? 'playing' : ''}" data-i="${i}">
       <div class="idx">${playing ? BARS_ICON : i + 1}</div>
@@ -355,6 +359,7 @@ function trackRow(track, i, opts = {}) {
         <div class="t">${esc(track.title)}</div>
         <div class="a">${esc(track.author || '')}</div>
       </div>
+      ${showBadge ? `<button class="badge" data-act="expand" data-i="${i}" title="展开选集 / 合集">${badgeLabel}</button>` : ''}
       <div class="dur">${fmtTime(track.duration)}</div>
       <div class="ops">
         <button class="op-btn ${liked ? 'liked' : ''}" data-act="fav" data-i="${i}">${liked ? '已收藏' : '收藏'}</button>
@@ -374,6 +379,167 @@ function trackListHTML(tracks, opts = {}) {
     </div>`;
   }
   return `<div class="track-list">${tracks.map((t, i) => trackRow(t, i, opts)).join('')}</div>`;
+}
+
+/* ============================================================
+   第 3.6 部分：合集 / 分P 展开面板
+   ------------------------------------------------------------
+   背景：B 站上很多"一首歌"其实把一个视频塞进了几十上百首歌（分P），
+   或者一个 UP 主把系列打包成"合集"。列表里它只占一行、时长却好几个小时，
+   点整行只会播第 1P。这里给这类行加一个「选集 N」小徽章，点开右侧面板列出全部条目。
+   注意：B 站搜索接口不返回分P数量，所以只能用"时长 / 标题"先猜；
+   真正展开要在点击时再查一次 videoInfo（backend 早就在做、且有缓存）。
+   ============================================================ */
+
+/** 猜这行是不是"多合一"长视频（搜索结果拿不到分P数，先用标题 + 时长猜） */
+const COLLECT_HINT_RE = /合集|合辑|歌单|串烧|连播|选集|\d+\s*首/;
+function maybeCollection(track) {
+  if (track.parts > 1) return true;          // 已经查过，确实是分P
+  if (track.seasonCount > 1) return true;    // 已经查过，确实是合集
+  if ((track.duration || 0) >= 30 * 60) return true;   // 半小时以上，多半是长合集
+  return COLLECT_HINT_RE.test(track.title || '');
+}
+
+let collectState = null;   // 面板开着时才有值：{ title, sub, entries }
+
+function closeCollectPanel() {
+  const mask = $('collectMask');
+  if (mask) mask.classList.remove('show');
+  collectState = null;
+}
+
+/** 点「选集」徽章：查一次 videoInfo 把分P/合集摊开；若其实不是合集就直接播 */
+async function expandCollection(track, fallback) {
+  if (!track || !track.bvid) return;
+
+  collectState = { title: track.title, sub: '', entries: [] };
+  $('collectTitle').textContent = track.title;
+  $('collectSub').textContent = '正在读取选集…';
+  $('collectSearch').value = '';
+  $('collectList').innerHTML = `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
+  $('collectMask').classList.add('show');
+
+  let info;
+  try {
+    info = await api('videoInfo', track.bvid);
+  } catch (err) {
+    $('collectSub').textContent = '';
+    $('collectList').innerHTML = `<div class="err">读取失败：${esc(err.message)}</div>`;
+    return;
+  }
+
+  const entries = buildCollectionEntries(info);
+  if (entries.length <= 1) {
+    // 其实只有 1 个分P —— 不是合集，收起来直接播这一首
+    closeCollectPanel();
+    if (fallback && fallback.tracks) playTracks(fallback.tracks, fallback.index, fallback.name);
+    return;
+  }
+
+  // 记下数量，让行上的徽章从「选集」变成「选集 N」
+  track.parts = info.pages ? info.pages.length : 1;
+  track.seasonCount = info.season ? info.season.episodes.length : 0;
+
+  const total = entries.reduce((s, e) => s + (e.duration || 0), 0);
+  collectState = {
+    title: info.title || track.title,
+    sub: (info.season
+      ? `合集「${info.season.title}」 · ${entries.length} 集`
+      : `${entries.length} 个分P`) + ` · 共 ${fmtTime(total)}`,
+    entries,
+  };
+  $('collectSub').textContent = collectState.sub;
+  renderCollectList('');
+  renderAll();   // 让行上的徽章同步成「选集 N」
+}
+
+/** 把一个视频详情整理成面板条目（优先 UP 合集，其次分P） */
+function buildCollectionEntries(info) {
+  if (info.season && info.season.episodes && info.season.episodes.length) {
+    return info.season.episodes.map((ep) => ({
+      bvid: ep.bvid, cid: ep.cid, page: ep.page || 1, title: ep.title,
+      author: info.owner.name, cover: ep.cover || info.cover, duration: ep.duration,
+    }));
+  }
+  return (info.pages || []).map((p) => ({
+    bvid: info.bvid, cid: p.cid, page: p.page, title: p.title,
+    author: info.owner.name, cover: info.cover, duration: p.duration,
+  }));
+}
+
+function renderCollectList(filter) {
+  if (!collectState) return;
+  const q = (filter || '').trim().toLowerCase();
+  const entries = collectState.entries;
+  const cur = queue.tracks[queue.index];
+  const rows = entries
+    .map((e, i) => ({ e, i }))
+    .filter(({ e, i }) => !q || (e.title || '').toLowerCase().includes(q) || String(i + 1) === q);
+
+  $('collectList').innerHTML = rows.length
+    ? rows.map(({ e, i }) => `
+        <div class="collect-row ${sameTrack(e, cur) ? 'on' : ''}" data-ci="${i}">
+          <span class="cn">${i + 1}</span>
+          <span class="ct" title="${esc(e.title)}">${esc(e.title)}</span>
+          <span class="cd">${fmtTime(e.duration)}</span>
+        </div>`).join('')
+    : `<div class="err">没有匹配的条目</div>`;
+}
+
+/** 点面板里的某一集：直接播这一集（用它的 cid 单独取音频） */
+function playCollectEntry(i) {
+  if (!collectState) return;
+  const entries = collectState.entries;
+  if (!entries[i]) return;
+  playTracks(entries, i, collectState.title);
+  renderCollectList($('collectSearch').value);   // 刷新"正在播放"高亮
+}
+
+/** 把整段合集塞进播放队列（队列空就直接播） */
+function queueCollection() {
+  if (!collectState) return;
+  const entries = collectState.entries;
+  const title = collectState.title;
+  if (!entries.length) return;
+
+  if (!queue.tracks.length) {
+    closeCollectPanel();
+    playTracks(entries.slice(), 0, title);
+    toast(`已开始播放 ${entries.length} 首`);
+    return;
+  }
+  let added = 0;
+  entries.forEach((e) => {
+    if (!queue.tracks.some((t) => sameTrack(t, e))) { queue.tracks.push(e); added += 1; }
+  });
+  toast(added ? `已加入队列 ${added} 首` : '这些都已经在队列里了');
+  closeCollectPanel();
+}
+
+/** 绑定合集面板的开关与交互（点空白 / Esc 收起，跟歌词浮层一致） */
+function bindCollect() {
+  const mask = $('collectMask');
+  if (!mask) return;
+  $('btnCloseCollect').addEventListener('click', closeCollectPanel);
+  $('collectMask').addEventListener('click', (e) => {
+    if (e.target.id === 'collectMask') closeCollectPanel();
+  });
+  $('collectSearch').addEventListener('input', (e) => renderCollectList(e.target.value));
+  $('collectList').addEventListener('click', (e) => {
+    const row = e.target.closest('.collect-row');
+    if (row) playCollectEntry(Number(row.dataset.ci));
+  });
+  $('btnPlayCollect').addEventListener('click', () => {
+    if (!collectState) return;
+    const n = collectState.entries.length;
+    playTracks(collectState.entries, 0, collectState.title);
+    renderCollectList($('collectSearch').value);
+    toast(`开始播放 ${n} 首`);
+  });
+  $('btnQueueCollect').addEventListener('click', queueCollection);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && collectState) closeCollectPanel();
+  });
 }
 
 /* ---------- 页面 1：搜索结果 ---------- */
@@ -981,6 +1147,9 @@ function bindEvents() {
   /* ---- 设置面板（外观 + Cookie） ---- */
   bindSettings();
 
+  /* ---- 合集 / 分P 展开面板 ---- */
+  bindCollect();
+
   /* ---- 右上角自绘窗口按钮：最小化 / 最大化(切换) / 关闭 ---- */
   $('winMin').addEventListener('click', () => window.neko.winMin());
   $('winMax').addEventListener('click', () => window.neko.winMax());
@@ -1011,6 +1180,15 @@ function bindEvents() {
 
   /* ---- 内容区：列表点击（事件委托，一次绑定管所有动态行） ---- */
   $('content').addEventListener('click', async (e) => {
+    // 「选集 N」徽章：展开合集 / 分P 面板（单独拦下，不触发整行"播放"）
+    const badge = e.target.closest('.badge');
+    if (badge) {
+      const i = Number(badge.dataset.i);
+      const tracks = currentTracks();
+      if (tracks[i]) expandCollection(tracks[i], { tracks, index: i, name: queue.name || '' });
+      return;
+    }
+
     // 行内的小按钮
     const btn = e.target.closest('.op-btn');
     if (btn) {

@@ -336,6 +336,30 @@
 <div class="toast" id="toast"></div>
 
 <!--
+  合集 / 分P 展开面板：从右侧滑出，列出这个视频里的所有分P（或 UP 合集的所有集）。
+  点某一集 = 直接播这一集；「播放全部」/「加入队列」把整段变成队列；
+  点左侧空白处或按 Esc 收起（跟歌词浮层一样的收起习惯）。
+  行上的「选集 N」徽章是入口，由 app.js 动态决定要不要显示。
+-->
+<div class="collect-mask" id="collectMask">
+  <div class="collect-panel">
+    <div class="collect-head">
+      <div class="collect-head-meta">
+        <div class="collect-title" id="collectTitle">选集</div>
+        <div class="collect-sub" id="collectSub"></div>
+      </div>
+      <button class="modal-close" id="btnCloseCollect" title="收起（Esc）">✕</button>
+    </div>
+    <div class="collect-bar">
+      <button class="ghost-btn" id="btnPlayCollect">播放全部</button>
+      <button class="ghost-btn" id="btnQueueCollect">加入队列</button>
+      <input class="collect-search" id="collectSearch" placeholder="搜索选集…" autocomplete="off" />
+    </div>
+    <div class="collect-body" id="collectList"></div>
+  </div>
+</div>
+
+<!--
   设置面板：Cookie 和外观合并在这里。
   默认隐藏（CSS 里 opacity:0 + 不可点），点左下角「⚙ 设置」才淡出来。
 -->
