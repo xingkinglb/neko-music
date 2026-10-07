@@ -1,0 +1,13 @@
+# 统一换行符，避免"只改一行、整份文件却显示被改"的假 diff。
+# 源码、文档一律以 LF 存入仓库；
+# Windows 批处理 / VBScript 保留 CRLF（LF 的 .bat 在个别环境下会出问题）。
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.vbs text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
