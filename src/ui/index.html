@@ -148,6 +148,26 @@
       <path d="M20 4l-8.5 8.5"/>
       <path d="M18 14.5V19a1.6 1.6 0 0 1-1.6 1.6H5.6A1.6 1.6 0 0 1 4 19V8.2a1.6 1.6 0 0 1 1.6-1.6H10"/>
     </symbol>
+
+    <!-- ---- 播放队列：三条横线 + 播放三角（一眼能认出是"接下来播什么"） ---- -->
+    <symbol id="i-list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.4 6.4h11M3.4 12h11M3.4 17.6h7"/>
+      <path d="M17.6 13.4 21 16.2l-3.4 2.8z" fill="currentColor"/>
+    </symbol>
+
+    <!-- ---- 详情：圆圈里的 i ---- -->
+    <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="8.6"/>
+      <path d="M12 11v5.2M12 8.1v.1"/>
+    </symbol>
+
+    <!-- ---- 移除：垃圾桶 ---- -->
+    <symbol id="i-trash" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4.4 6.6h15.2"/>
+      <path d="M9.2 6.6V4.8a1.2 1.2 0 0 1 1.2-1.2h3.2a1.2 1.2 0 0 1 1.2 1.2v1.8"/>
+      <path d="M6.4 6.6 7.3 19a1.6 1.6 0 0 0 1.6 1.5h6.2A1.6 1.6 0 0 0 16.7 19l.9-12.4"/>
+      <path d="M10.4 10.4v6.2M13.6 10.4v6.2"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -289,6 +309,10 @@
       <button class="ico-btn" id="btnOpenBili" title="在浏览器里打开这个视频">
         <svg class="ic"><use href="#i-open-bili"/></svg>
       </button>
+      <!-- 播放队列：点开右侧抽屉，看"接下来播什么"，也能直接跳播 / 移除 -->
+      <button class="ico-btn" id="btnQueue" title="播放队列">
+        <svg class="ic"><use href="#i-list"/></svg>
+      </button>
       <!--
         音量：平时只留一个喇叭图标，不占宽度。
         鼠标移到这一块（图标或滑杆都算）才向上浮出竖向滑杆，移开 400ms 自动收起。
@@ -356,6 +380,30 @@
       <input class="collect-search" id="collectSearch" placeholder="搜索选集…" autocomplete="off" />
     </div>
     <div class="collect-body" id="collectList"></div>
+  </div>
+</div>
+
+<!--
+  ============ 播放队列 ============
+  队列本来就一直存在（上一首 / 下一首就是按它走的），只是以前没有界面，
+  所以播放条上的「加入队列」看起来像个黑盒。这里给它一个能从右侧拉开的抽屉，
+  结构直接复用上面「选集」面板的样式（.collect-*），保证两处观感一致。
+-->
+<div class="collect-mask" id="queueMask">
+  <div class="collect-panel">
+    <div class="collect-head">
+      <div class="collect-head-meta">
+        <div class="collect-title" id="queueTitle">播放队列</div>
+        <div class="collect-sub" id="queueSub"></div>
+      </div>
+      <button class="modal-close" id="btnCloseQueue" title="收起（Esc）">✕</button>
+    </div>
+    <div class="collect-bar">
+      <button class="ghost-btn" id="btnQueueShuffle">随机打乱</button>
+      <button class="ghost-btn" id="btnQueueClear">清空队列</button>
+      <input class="collect-search" id="queueSearch" placeholder="在队列里找…" autocomplete="off" />
+    </div>
+    <div class="collect-body" id="queueList"></div>
   </div>
 </div>
 
@@ -551,6 +599,25 @@
     <div class="modal-foot">
       <button class="ghost-btn" id="btnDoneModal">完成</button>
     </div>
+  </div>
+</div>
+
+<!--
+  ============ 通用小弹窗 ============
+  以前"新建歌单 / 重命名 / 选一个歌单"用的是浏览器 prompt()，
+  但 Electron 里 prompt() 根本不会弹窗（直接返回空），所以点了没反应。
+  这里用一个自己的小弹窗替掉它，标题 / 内容 / 按钮都是运行时填进去的：
+    · 起名字（新建歌单、重命名）
+    · 选歌单（加进哪个歌单，并且能在里面顺手新建）
+-->
+<div class="modal-mask" id="promptMask">
+  <div class="modal prompt-modal">
+    <div class="modal-head">
+      <span class="modal-title" id="promptTitle"></span>
+      <button class="modal-close" id="promptClose" title="关闭">✕</button>
+    </div>
+    <div class="prompt-body" id="promptBody"></div>
+    <div class="prompt-foot" id="promptFoot"></div>
   </div>
 </div>
 

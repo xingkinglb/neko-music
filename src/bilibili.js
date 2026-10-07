@@ -394,6 +394,8 @@ async function searchVideos(keyword, page = 1) {
     // 搜索结果的标题里 B 站会插入 <em> 高亮标签，清理掉
     title: String(v.title || '').replace(/<\/?em[^>]*>/g, ''),
     author: v.author,
+    // ★ 必须带上 mid：界面要拿它点开"这个 UP 的全部视频"。丢掉的话作者名就点不了。
+    mid: v.mid,
     cover: toHttps(v.pic),
     duration: v.duration,
     play: v.play,
@@ -464,6 +466,42 @@ async function getFavMedias(mediaId, pn = 1) {
       page: 1,
     })),
     hasMore: !!json.data.has_more,
+  };
+}
+
+/**
+ * 某个 UP 主公开的投稿视频（「点作者名 → 看他的全部视频」用这个）
+ *
+ * ★ 两个容易踩的点：
+ *   1) 这个接口（space/wbi/arc/search）**必须带 wbi 签名**，和搜索接口一样；
+ *   2) 它对"未登录"特别敏感：没 Cookie 时经常直接回风控，表现为
+ *      code = -352 / -799，或者干脆返回一整个 HTML 风控页（JSON.parse 会炸）。
+ *      所以这里把 B 站的原始 code 一起抛出去，让界面能提示"去设置里填 Cookie"，
+ *      而不是显示一个让人摸不着头脑的报错。
+ */
+async function getUpVideos(mid, pn = 1) {
+  const query = await signParams({
+    mid, ps: 30, pn, order: 'pubdate', platform: 'web',
+    web_location: 1550101, tid: 0, keyword: '',
+  });
+  const json = await requestJSON(
+    `https://api.bilibili.com/x/space/wbi/arc/search?${query}`
+  );
+  const vlist = (json.data && json.data.list && json.data.list.vlist) || [];
+  const page = (json.data && json.data.page) || {};
+  return {
+    list: vlist.map((v) => ({
+      bvid: v.bvid,
+      cid: null,           // 空间接口不给 cid，播放时再补
+      page: 1,
+      title: String(v.title || '').replace(/<\/?em[^>]*>/g, ''),
+      author: v.author,
+      mid,
+      cover: toHttps(v.pic),
+      duration: v.length,  // 形如 "3:45" 的字符串，交给界面里的 parseDuration
+      play: v.play,
+    })),
+    hasMore: pn * 30 < (page.count || 0),
   };
 }
 
@@ -751,6 +789,7 @@ module.exports = {
   getAudioUrl,
   getFavFolders,
   getFavMedias,
+  getUpVideos,
   getSubtitle,
   hasLoginCookie,
   USER_AGENT,

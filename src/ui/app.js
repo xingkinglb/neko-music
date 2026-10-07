@@ -254,6 +254,8 @@ async function ensureCid(track) {
     if (!pg) throw new Error('这个视频没有可播放的内容');
     if (!track.duration) track.duration = pg.duration;
     if (!track.author) track.author = info.owner.name;
+    // 记下 UP 主的 uid：有了它，列表里的作者名才能点开"这个 UP 的全部视频"
+    if (!track.mid && info.owner && info.owner.mid) track.mid = info.owner.mid;
     if (!track.cover) track.cover = info.cover;
     return pg.cid;
   })();
@@ -351,21 +353,30 @@ function trackRow(track, i, opts = {}) {
   const showBadge = opts.expand !== false && maybeCollection(track);
   const badgeLabel = track.parts > 1 ? `选集 ${track.parts}`
     : track.seasonCount > 1 ? `合集 ${track.seasonCount}` : '选集';
+
+  // 作者名：知道 UP 的 mid 就做成可点的（点开看这个 UP 的全部视频），
+  // 老数据 / 收藏夹导入来的没有 mid，就还是普通文字，不会点出个空页面。
+  const authorHTML = track.author
+    ? (track.mid
+      ? `<span class="a-link" data-act="up" data-i="${i}" title="看 ${esc(track.author)} 的全部视频">${esc(track.author)}</span>`
+      : esc(track.author))
+    : '';
+
   return `
     <div class="track ${playing ? 'playing' : ''}" data-i="${i}">
       <div class="idx">${playing ? BARS_ICON : i + 1}</div>
       <div class="cover" style="background-image:url('${esc(track.cover || '')}')"></div>
       <div class="info">
         <div class="t">${esc(track.title)}</div>
-        <div class="a">${esc(track.author || '')}</div>
+        <div class="a">${authorHTML}</div>
       </div>
       ${showBadge ? `<button class="badge" data-act="expand" data-i="${i}" title="展开选集 / 合集">${badgeLabel}</button>` : ''}
       <div class="dur">${fmtTime(track.duration)}</div>
       <div class="ops">
-        <button class="op-btn ${liked ? 'liked' : ''}" data-act="fav" data-i="${i}">${liked ? '已收藏' : '收藏'}</button>
-        <button class="op-btn" data-act="add" data-i="${i}">＋歌单</button>
-        ${opts.detail ? `<button class="op-btn" data-act="detail" data-i="${i}">详情</button>` : ''}
-        ${opts.remove ? `<button class="op-btn" data-act="remove" data-i="${i}">移除</button>` : ''}
+        <button class="op-ic ${liked ? 'on' : ''}" data-act="fav" data-i="${i}" data-tip="${liked ? '取消收藏' : '收藏'}">${ic(liked ? 'i-heart-fill' : 'i-heart')}</button>
+        <button class="op-ic" data-act="add" data-i="${i}" data-tip="加入歌单">${ic('i-plus')}</button>
+        ${opts.detail ? `<button class="op-ic" data-act="detail" data-i="${i}" data-tip="详情">${ic('i-info')}</button>` : ''}
+        ${opts.remove ? `<button class="op-ic" data-act="remove" data-i="${i}" data-tip="移除">${ic('i-trash')}</button>` : ''}
       </div>
     </div>`;
 }
@@ -477,12 +488,19 @@ function renderCollectList(filter) {
     .filter(({ e, i }) => !q || (e.title || '').toLowerCase().includes(q) || String(i + 1) === q);
 
   $('collectList').innerHTML = rows.length
-    ? rows.map(({ e, i }) => `
+    ? rows.map(({ e, i }) => {
+      const liked = isFav(e);
+      return `
         <div class="collect-row ${sameTrack(e, cur) ? 'on' : ''}" data-ci="${i}">
           <span class="cn">${i + 1}</span>
           <span class="ct" title="${esc(e.title)}">${esc(e.title)}</span>
           <span class="cd">${fmtTime(e.duration)}</span>
-        </div>`).join('')
+          <span class="cops">
+            <button class="op-ic ${liked ? 'on' : ''}" data-cact="fav" data-ci="${i}" data-tip="${liked ? '取消收藏' : '收藏'}">${ic(liked ? 'i-heart-fill' : 'i-heart')}</button>
+            <button class="op-ic" data-cact="add" data-ci="${i}" data-tip="加入歌单">${ic('i-plus')}</button>
+          </span>
+        </div>`;
+    }).join('')
     : `<div class="err">没有匹配的条目</div>`;
 }
 
@@ -512,8 +530,9 @@ function queueCollection() {
   entries.forEach((e) => {
     if (!queue.tracks.some((t) => sameTrack(t, e))) { queue.tracks.push(e); added += 1; }
   });
-  toast(added ? `已加入队列 ${added} 首` : '这些都已经在队列里了');
+  toast(added ? `已加入队列 ${added} 首（播放条上的队列按钮可以查看）` : '这些都已经在队列里了');
   closeCollectPanel();
+  refreshQueueIfOpen();
 }
 
 /** 绑定合集面板的开关与交互（点空白 / Esc 收起，跟歌词浮层一致） */
@@ -526,6 +545,16 @@ function bindCollect() {
   });
   $('collectSearch').addEventListener('input', (e) => renderCollectList(e.target.value));
   $('collectList').addEventListener('click', (e) => {
+    // 每一集右侧的图标按钮（收藏 / 加歌单）优先，不能顺手把整行"播放"也触发了
+    const act = e.target.closest('[data-cact]');
+    if (act && collectState) {
+      const entry = collectState.entries[Number(act.dataset.ci)];
+      if (entry) {
+        if (act.dataset.cact === 'fav') { toggleFav(entry); renderCollectList($('collectSearch').value); }
+        else if (act.dataset.cact === 'add') addToPlaylist(entry);
+      }
+      return;
+    }
     const row = e.target.closest('.collect-row');
     if (row) playCollectEntry(Number(row.dataset.ci));
   });
@@ -540,6 +569,191 @@ function bindCollect() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && collectState) closeCollectPanel();
   });
+}
+
+/* ============================================================
+   第 3.8 部分：播放队列
+   ------------------------------------------------------------
+   队列本来就一直存在（queue.tracks —— 上一首 / 下一首就是按它走的），
+   只是以前没有界面，所以播放条/合集面板上的「加入队列」看起来像没生效。
+   这里给它一个能从右侧拉开的抽屉：看得见"接下来播什么"，能跳播、移除、打乱、清空。
+   ============================================================ */
+
+function renderQueueList(filter) {
+  const box = $('queueList');
+  if (!box) return;
+  const cur = queue.tracks[queue.index];
+  const q = (filter || '').trim().toLowerCase();
+  const rows = queue.tracks
+    .map((t, i) => ({ t, i }))
+    .filter(({ t, i }) => !q || (t.title || '').toLowerCase().includes(q) || String(i + 1) === q);
+
+  $('queueSub').textContent = queue.tracks.length
+    ? `共 ${queue.tracks.length} 首${queue.name ? ' · 来自「' + queue.name + '」' : ''}`
+    : '队列是空的';
+
+  box.innerHTML = rows.length
+    ? rows.map(({ t, i }) => `
+        <div class="collect-row ${sameTrack(t, cur) ? 'on' : ''}" data-qi="${i}">
+          <span class="cn">${i + 1}</span>
+          <span class="ct" title="${esc(t.title)}">${esc(t.title)}</span>
+          <span class="cd">${fmtTime(t.duration)}</span>
+          <span class="cops">
+            <button class="op-ic" data-qact="remove" data-qi="${i}" data-tip="从队列移除">${ic('i-trash')}</button>
+          </span>
+        </div>`).join('')
+    : `<div class="empty" style="padding:34px 16px">
+         <div class="msg">队列是空的</div>
+         <div class="hint">在列表里点整行开始播放，或用合集面板的「加入队列」一次塞进一整段</div>
+       </div>`;
+}
+
+function openQueue() {
+  $('queueMask').classList.add('show');
+  $('queueSearch').value = '';
+  renderQueueList('');
+}
+
+function closeQueue() {
+  $('queueMask').classList.remove('show');
+}
+
+/** 从队列里拿掉一首。拿掉的正是"正在播"那首时，接着播原来位置的下一首 */
+function removeFromQueue(i) {
+  if (i < 0 || i >= queue.tracks.length) return;
+  queue.tracks.splice(i, 1);
+  if (queue.index > i) {
+    queue.index -= 1;
+  } else if (queue.index === i) {
+    if (!queue.tracks.length) queue.index = -1;
+    else { queue.index = Math.min(i, queue.tracks.length - 1); playAt(queue.index); }
+  }
+  renderQueueList($('queueSearch').value);
+  renderAll();
+}
+
+function bindQueue() {
+  const mask = $('queueMask');
+  if (!mask) return;
+  $('btnQueue').addEventListener('click', openQueue);
+  $('btnCloseQueue').addEventListener('click', closeQueue);
+  mask.addEventListener('click', (e) => { if (e.target.id === 'queueMask') closeQueue(); });
+  $('queueSearch').addEventListener('input', (e) => renderQueueList(e.target.value));
+
+  $('queueList').addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-qact="remove"]');
+    if (rm) { removeFromQueue(Number(rm.dataset.qi)); return; }
+    const row = e.target.closest('.collect-row');
+    if (row) playAt(Number(row.dataset.qi));
+  });
+
+  $('btnQueueShuffle').addEventListener('click', () => {
+    if (queue.tracks.length < 2) { toast('队列里的歌太少，不用打乱'); return; }
+    for (let i = queue.tracks.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [queue.tracks[i], queue.tracks[j]] = [queue.tracks[j], queue.tracks[i]];
+    }
+    renderQueueList($('queueSearch').value);
+    toast('已打乱队列顺序');
+  });
+
+  $('btnQueueClear').addEventListener('click', () => {
+    if (!queue.tracks.length) { toast('队列本来就是空的'); return; }
+    queue.tracks = [];
+    queue.index = -1;
+    queue.name = '';
+    renderQueueList('');
+    renderAll();
+    toast('已清空队列');
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mask.classList.contains('show')) closeQueue();
+  });
+}
+
+/** 队列变了（比如刚"加入队列"）就把抽屉里看到的内容同步一下 */
+function refreshQueueIfOpen() {
+  const mask = $('queueMask');
+  if (mask && mask.classList.contains('show')) renderQueueList($('queueSearch').value);
+}
+
+/* ============================================================
+   第 3.9 部分：UP 主主页（点作者名 → 看他的全部视频）
+   ------------------------------------------------------------
+   B 站的空间接口对"未登录"很敏感：没填 Cookie 时经常直接回风控，
+   所以这里的失败提示会明确引导去「设置 → B 站」填 Cookie，而不是丢个看不懂的报错。
+   ============================================================ */
+
+let upState = null;   // { mid, name, list, page, hasMore, loading, error }
+
+/** 点作者名：打开这个 UP 主的主页 */
+async function openUpPage(track) {
+  if (!track || !track.mid) { toast('这条没有 UP 主信息，看不了他的主页'); return; }
+  upState = {
+    mid: track.mid,
+    name: track.author || '这个 UP 主',
+    list: [], page: 0, hasMore: true, loading: true, error: '',
+  };
+  currentView = 'up';
+  renderUp();
+  await loadUp(1);
+}
+
+async function loadUp(pn) {
+  if (!upState) return;
+  upState.loading = true;
+  upState.error = '';
+  renderUp();
+  try {
+    const res = await api('upVideos', upState.mid, pn);
+    const mapped = res.list.map((v) => ({
+      bvid: v.bvid, cid: null, page: 1,
+      title: v.title, author: v.author, mid: upState.mid,
+      cover: v.cover, duration: parseDuration(v.duration),
+    }));
+    upState.list = pn === 1 ? mapped : upState.list.concat(mapped);
+    upState.page = pn;
+    upState.hasMore = !!res.hasMore;
+  } catch (err) {
+    upState.hasMore = false;
+    upState.error = err.message || '读取失败';
+  } finally {
+    upState.loading = false;
+    if (currentView === 'up') renderUp();
+  }
+}
+
+function renderUp() {
+  if (!upState) { currentView = 'search'; renderSearch(); return; }
+  const loaded = upState.list.length;
+
+  const head = `
+    <div class="block-head">
+      <div>
+        <button class="ghost-btn" id="btnUpBack">← 返回</button>
+        <div class="block-title" style="margin-top:12px">${esc(upState.name)}</div>
+        <div class="block-sub">${loaded ? `已加载 ${loaded} 个视频${upState.hasMore ? '（还能继续往下加载）' : ''}` : '正在读取这个 UP 主的视频…'}</div>
+      </div>
+      <div class="block-actions">
+        ${loaded ? `<button class="ghost-btn" id="btnPlayUp">${ic('i-play')}<span>播放全部</span></button>` : ''}
+        ${loaded && upState.hasMore ? '<button class="ghost-btn" id="btnMoreUp">加载更多</button>' : ''}
+      </div>
+    </div>`;
+
+  if (upState.loading && !loaded) {
+    content().innerHTML = head + `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
+    return;
+  }
+  if (upState.error && !loaded) {
+    content().innerHTML = head + `<div class="err">读取失败：${esc(upState.error)}<br><br>
+      这个接口对"未登录"比较敏感。去左下角「设置 → B 站」填一下 Cookie，再回来点作者名就好了。</div>`;
+    return;
+  }
+  content().innerHTML = head + trackListHTML(upState.list, {
+    emptyIcon: 'i-note',
+    emptyText: '这个 UP 主没有公开的视频',
+  }) + (upState.loading ? `<div class="loading"><div class="spinner"></div>正在读取更多…</div>` : '');
 }
 
 /* ---------- 页面 1：搜索结果 ---------- */
@@ -590,6 +804,7 @@ async function doSearch(keyword, page = 1) {
       page: 1,
       title: v.title,
       author: v.author,
+      mid: v.mid,       // UP 主 uid，用来点开他的主页
       cover: v.cover,
       duration: parseDuration(v.duration),
     }));
@@ -640,7 +855,7 @@ async function loadDiscovery(refresh = false) {
         if (!discoverySearchCache.has(keyword)) {
           const request = api('search', keyword, 1).then((res) => res.list.map((v) => ({
             bvid: v.bvid, cid: null, page: 1, title: v.title, author: v.author,
-            cover: v.cover, duration: parseDuration(v.duration),
+            mid: v.mid, cover: v.cover, duration: parseDuration(v.duration),
           }))).catch((err) => {
             discoverySearchCache.delete(keyword);
             throw err;
@@ -898,43 +1113,179 @@ function renderAll() {
   }
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'history') renderHistory();
+  else if (currentView === 'up') renderUp();
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
   else if (currentView === 'parsed') renderParsed();
 }
 
 /* ============================================================
-   第 4.5 部分：把曲目加进歌单
+   第 4.4 部分：小弹窗（替掉 Electron 里根本不工作的 prompt）
+   ------------------------------------------------------------
+   ⚠️ 为什么不能用 prompt()：
+   Electron 的渲染进程**没有实现** window.prompt —— 调它不会弹出任何窗口，
+   而是直接返回 null。以前"新建歌单 / 重命名 / 选一个歌单选进去"全靠 prompt，
+   所以点了全无反应（歌单建不出来就是这个原因）。
+   这里改用页面自己的弹窗（#promptMask），行为可控、样式也统一。
    ============================================================ */
-async function addToPlaylist(track) {
-  if (!DB.playlists.length) {
-    DB.playlists.push({ id: uid(), name: '我的歌单', tracks: [] });
-  }
-  let pl;
-  if (DB.playlists.length === 1) {
-    pl = DB.playlists[0];
-  } else {
-    // 多个歌单时，弹出列表让用户选一个（输入序号）
-    const names = DB.playlists.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
-    const pick = prompt(`要加到哪个歌单？\n\n${names}\n\n请输入序号：`, '1');
-    if (!pick) return;
-    pl = DB.playlists[Number(pick) - 1];
-  }
-  if (!pl) { toast('序号不对哦'); return; }
-  if (pl.tracks.some((t) => sameTrack(t, track))) { toast('这首歌已经在歌单里了'); return; }
-  pl.tracks.push(track);
-  await persist();
-  renderAll();
-  toast(`已加入「${pl.name}」`);
+
+let promptResolve = null;
+
+/** 往弹窗里填内容。标题 / 主体 / 按钮都是现填的，所以一个小弹窗能当多种用 */
+function renderPrompt(title, bodyHTML, footHTML) {
+  $('promptTitle').textContent = title;
+  $('promptBody').innerHTML = bodyHTML;
+  $('promptFoot').innerHTML = footHTML;
 }
 
-function deletePlaylist(id) {
+/** 关闭弹窗并把结果交给等待者（点取消 / 关窗 = null） */
+function closePrompt(value = null) {
+  const mask = $('promptMask');
+  if (mask) mask.classList.remove('show');
+  const done = promptResolve;
+  promptResolve = null;
+  if (done) done(value);
+}
+
+/** 打开弹窗，返回 Promise：closePrompt(v) 时 resolve(v) */
+function openPrompt(title, bodyHTML, footHTML) {
+  renderPrompt(title, bodyHTML, footHTML);
+  $('promptMask').classList.add('show');
+  return new Promise((resolve) => { promptResolve = resolve; });
+}
+
+/** 打开弹窗但不需要返回值（"选歌单"这种自己就把活干完了） */
+function showPrompt(title, bodyHTML, footHTML) {
+  promptResolve = null;
+  renderPrompt(title, bodyHTML, footHTML);
+  $('promptMask').classList.add('show');
+}
+
+/** 输入一个名字（新建歌单 / 重命名都用它） */
+async function askName(title, defaultValue = '', okText = '确定') {
+  const p = openPrompt(title,
+    `<input class="prompt-input" id="promptInput" type="text" value="${esc(defaultValue)}" />`,
+    `<button class="ghost-btn" id="promptCancel">取消</button>` +
+    `<button class="primary-btn" id="promptOk">${esc(okText)}</button>`);
+  const input = $('promptInput');
+  input.focus();
+  input.select();
+  const submit = () => {
+    const v = (input.value || '').trim();
+    if (!v) { toast('名字不能为空'); return; }
+    closePrompt(v);
+  };
+  $('promptOk').addEventListener('click', submit);
+  $('promptCancel').addEventListener('click', () => closePrompt(null));
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+  return p;
+}
+
+/** 一个"你确定吗"的小弹窗，返回 true / false */
+async function askConfirm(title, text, okText = '确定') {
+  const p = openPrompt(title,
+    `<div class="pl-empty" style="padding:0">${esc(text)}</div>`,
+    `<button class="ghost-btn" id="promptCancel">取消</button>` +
+    `<button class="primary-btn" id="promptOk">${esc(okText)}</button>`);
+  $('promptOk').addEventListener('click', () => closePrompt(true));
+  $('promptCancel').addEventListener('click', () => closePrompt(false));
+  return p;
+}
+
+/** 绑定弹窗自己的开关（点右上角 ✕ / 点暗色区域 / 按 Esc 都算取消） */
+function bindPrompt() {
+  const mask = $('promptMask');
+  if (!mask) return;
+  $('promptClose').addEventListener('click', () => closePrompt(null));
+  mask.addEventListener('click', (e) => { if (e.target.id === 'promptMask') closePrompt(null); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mask.classList.contains('show')) closePrompt(null);
+  });
+}
+
+/* ============================================================
+   第 4.5 部分：把曲目加进歌单
+   ============================================================ */
+
+/**
+ * 弹出一个歌单列表让用户选（也能就地新建），选好后把曲目加进去。
+ * 这就是"点 ＋ 时弹出歌单列表供选择，并且可以在里面创建歌单"的实现。
+ */
+function pickPlaylistFor(tracks) {
+  const list = tracks.filter(Boolean);
+  if (!list.length) return;
+  const count = list.length;
+
+  const addInto = async (pl) => {
+    let added = 0;
+    list.forEach((t) => {
+      if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added += 1; }
+    });
+    await persist();
+    renderAll();
+    closePrompt(pl.id);
+    toast(added ? `已把 ${added} 首加入「${pl.name}」` : `这些都已经在「${pl.name}」里了`);
+  };
+
+  // 视图 1：列出现有歌单
+  const showPick = () => {
+    const rows = DB.playlists.map((p) => `
+      <button class="pl-row" data-pl="${p.id}">
+        <span>${esc(p.name)}</span><span class="n">${p.tracks.length}</span>
+      </button>`).join('');
+    showPrompt(
+      count > 1 ? `把 ${count} 首加入歌单` : '加入歌单',
+      `<button class="pl-new" id="plNew">${ic('i-plus')}<span>新建歌单…</span></button>` +
+      `<div class="pl-list">${rows || '<div class="pl-empty">还没有歌单，点上面新建一个</div>'}</div>`,
+      `<button class="ghost-btn" id="plCancel">取消</button>`);
+    $('plNew').addEventListener('click', showNew);
+    $('plCancel').addEventListener('click', () => closePrompt(null));
+    $('promptBody').querySelectorAll('.pl-row').forEach((el) => {
+      el.addEventListener('click', () => {
+        const pl = DB.playlists.find((p) => p.id === el.dataset.pl);
+        if (pl) addInto(pl);
+      });
+    });
+  };
+
+  // 视图 2：就地新建一个歌单，建完直接加入
+  const showNew = () => {
+    renderPrompt('新建歌单',
+      `<input class="prompt-input" id="plName" type="text" value="我的歌单" />`,
+      `<button class="ghost-btn" id="plBack">返回</button>` +
+      `<button class="primary-btn" id="plCreate">创建并加入</button>`);
+    const input = $('plName');
+    input.focus();
+    input.select();
+    const create = async () => {
+      const name = (input.value || '').trim();
+      if (!name) { toast('名字不能为空'); return; }
+      const pl = { id: uid(), name, tracks: [] };
+      DB.playlists.push(pl);
+      await addInto(pl);
+    };
+    $('plCreate').addEventListener('click', create);
+    $('plBack').addEventListener('click', showPick);
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') create(); });
+  };
+
+  showPick();
+}
+
+/** 加一首到歌单（行内的 ＋ 按钮、播放条上的操作都走它） */
+function addToPlaylist(track) {
+  pickPlaylistFor([track]);
+}
+
+async function deletePlaylist(id) {
   const pl = DB.playlists.find((p) => p.id === id);
   if (!pl) return;
-  if (!confirm(`确定删除歌单「${pl.name}」吗？`)) return;
+  const sure = await askConfirm('删除歌单', `确定删除「${pl.name}」吗？删了就找不回来了。`, '删除');
+  if (!sure) return;
   DB.playlists = DB.playlists.filter((p) => p.id !== id);
-  persist();
+  await persist();
   currentView = 'search';
   renderAll();
+  toast(`已删除歌单「${pl.name}」`);
 }
 
 /* ============================================================
@@ -1150,6 +1501,12 @@ function bindEvents() {
   /* ---- 合集 / 分P 展开面板 ---- */
   bindCollect();
 
+  /* ---- 播放队列抽屉 ---- */
+  bindQueue();
+
+  /* ---- 通用小弹窗（新建歌单 / 重命名 / 选歌单，替掉不工作的 prompt） ---- */
+  bindPrompt();
+
   /* ---- 右上角自绘窗口按钮：最小化 / 最大化(切换) / 关闭 ---- */
   $('winMin').addEventListener('click', () => window.neko.winMin());
   $('winMax').addEventListener('click', () => window.neko.winMax());
@@ -1167,19 +1524,30 @@ function bindEvents() {
     $('winMax').setAttribute('aria-label', max ? '还原' : '最大化');
   });
 
-  /* ---- 新建歌单 ---- */
+  /* ---- 新建歌单（用自家弹窗，不能用 prompt —— 见第 4.4 部分的说明） ---- */
   $('btnNewPlaylist').addEventListener('click', async () => {
-    const name = prompt('新歌单叫什么名字？', '我的歌单');
+    const name = await askName('新建歌单', '我的歌单', '创建');
     if (!name) return;
     const pl = { id: uid(), name, tracks: [] };
     DB.playlists.push(pl);
     await persist();
     currentView = 'playlist:' + pl.id;
     renderAll();
+    toast(`已创建歌单「${name}」`);
   });
 
   /* ---- 内容区：列表点击（事件委托，一次绑定管所有动态行） ---- */
   $('content').addEventListener('click', async (e) => {
+    // 作者名：点开这个 UP 主的主页（看他的全部视频）。
+    // 必须放在"点整行=播放"前面，否则点作者名会顺手把这首也播了。
+    const upLink = e.target.closest('.a-link');
+    if (upLink) {
+      const i = Number(upLink.dataset.i);
+      const tracks = currentTracks();
+      if (tracks[i]) openUpPage(tracks[i]);
+      return;
+    }
+
     // 「选集 N」徽章：展开合集 / 分P 面板（单独拦下，不触发整行"播放"）
     const badge = e.target.closest('.badge');
     if (badge) {
@@ -1189,8 +1557,8 @@ function bindEvents() {
       return;
     }
 
-    // 行内的小按钮
-    const btn = e.target.closest('.op-btn');
+    // 行内的小按钮（现在都画成图标了，类名是 .op-ic；.op-btn 是旧写法，一起兼容）
+    const btn = e.target.closest('.op-ic, .op-btn');
     if (btn) {
       const i = Number(btn.dataset.i);
       const tracks = currentTracks();
@@ -1214,6 +1582,9 @@ function bindEvents() {
     if (id === 'btnPlayDiscovery') { playTracks(discoveryResults, 0, '发现'); return; }
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
+    if (id === 'btnUpBack') { currentView = 'search'; renderAll(); return; }
+    if (id === 'btnPlayUp') { if (upState) playTracks(upState.list, 0, upState.name); return; }
+    if (id === 'btnMoreUp') { if (upState) loadUp(upState.page + 1); return; }
     if (id === 'btnPlayParsed') { playTracks(parsedView.tracks, 0, parsedView.info.title); return; }
     if (id === 'btnAddParsed') { addManyToPlaylist(parsedView.tracks); return; }
     if (id === 'btnPlayFav') { playTracks(DB.favorites, 0, '我喜欢'); return; }
@@ -1225,11 +1596,12 @@ function bindEvents() {
     if (id === 'btnRenamePl') {
       const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
       if (!pl) return;
-      const name = prompt('改个新名字：', pl.name);
-      if (!name) return;
+      const name = await askName('重命名歌单', pl.name, '保存');
+      if (!name || name === pl.name) return;
       pl.name = name;
       await persist();
       renderAll();
+      toast(`已改名为「${name}」`);
       return;
     }
     if (id === 'btnDelPl') {
@@ -2200,6 +2572,7 @@ function currentTracks() {
   if (currentView === 'discovery') return discoveryResults;
   if (currentView === 'favorites') return DB.favorites;
   if (currentView === 'history') return DB.history;
+  if (currentView === 'up' && upState) return upState.list;
   if (currentView === 'parsed' && parsedView) return parsedView.tracks;
   if (currentView.startsWith('playlist:')) {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
@@ -2237,25 +2610,10 @@ async function removeFromCurrent(track) {
   renderAll();
 }
 
-/** 把一整批曲目加入歌单（比如整个合集） */
-async function addManyToPlaylist(tracks) {
+/** 把一整批曲目加入歌单（比如整个合集）—— 走同一个"选歌单"弹窗 */
+function addManyToPlaylist(tracks) {
   if (!tracks || !tracks.length) return;
-  if (!DB.playlists.length) DB.playlists.push({ id: uid(), name: '我的歌单', tracks: [] });
-  let pl = DB.playlists[0];
-  if (DB.playlists.length > 1) {
-    const names = DB.playlists.map((p, i) => `${i + 1}. ${p.name}`).join('\n');
-    const pick = prompt(`把 ${tracks.length} 首加到哪个歌单？\n\n${names}\n\n请输入序号：`, '1');
-    if (!pick) return;
-    pl = DB.playlists[Number(pick) - 1];
-  }
-  if (!pl) { toast('序号不对哦'); return; }
-  let added = 0;
-  tracks.forEach((t) => {
-    if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added++; }
-  });
-  await persist();
-  renderAll();
-  toast(`已把 ${added} 首加入「${pl.name}」`);
+  pickPlaylistFor(tracks);
 }
 
 /* ============================================================

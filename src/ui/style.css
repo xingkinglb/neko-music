@@ -429,6 +429,39 @@ ul { list-style: none; }
 .op-btn:hover { background: var(--accent); color: #fff; }
 .op-btn.liked { background: rgba(var(--accent-rgb), 0.2); color: var(--accent); }
 
+/* 行内操作改用图标（♡ 收藏 / ＋ 加歌单 / ⓘ 详情 / 🗑 移除）：
+   比"收藏 / ＋歌单"这种文字短、又不占宽度，一排看着更整齐。
+   名字改由悬停提示显示（见下面的 [data-tip]）。 */
+.op-ic {
+  width: 28px; height: 28px; border-radius: 8px; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--panel-2); color: var(--text-2);
+  transition: background 0.15s, color 0.15s;
+}
+.op-ic .ic { width: 15px; height: 15px; }
+.op-ic:hover { background: var(--accent); color: #fff; }
+.op-ic.on { background: rgba(var(--accent-rgb), 0.22); color: var(--accent); }
+.op-ic.on .ic { fill: currentColor; }
+
+/* 通用悬停提示：给元素加 data-tip="文字"，鼠标移上去就浮出来。
+   气泡放在元素【左边】而不是上面 —— 因为这些按钮都在滚动容器（列表 / 抽屉）里，
+   往上浮会被容器顶边裁掉，往左浮则永远有位置。 */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute; right: calc(100% + 8px); top: 50%; transform: translateY(-50%);
+  background: rgba(18, 18, 24, 0.96);
+  border: 1px solid var(--line);
+  color: #fff; font-size: 11.5px; line-height: 1; padding: 5px 8px; border-radius: 6px;
+  white-space: nowrap; opacity: 0; pointer-events: none;
+  transition: opacity 0.14s; z-index: 6;
+}
+[data-tip]:hover::after { opacity: 1; }
+
+/* 作者名做成可点（点开看这个 UP 的全部视频） */
+.a-link { cursor: pointer; }
+.a-link:hover { color: var(--accent); text-decoration: underline; }
+
 /* ---------- 卡片网格（合集 / 收藏夹） ---------- */
 .card-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
@@ -1033,6 +1066,42 @@ ul { list-style: none; }
   border-top: 1px solid var(--line);
 }
 
+/* ---------- 通用小弹窗（替掉 Electron 里不工作的 prompt） ---------- */
+.prompt-modal { width: 380px; }
+.prompt-body { padding: 2px 18px 4px; display: flex; flex-direction: column; gap: 8px; }
+.prompt-foot {
+  display: flex; justify-content: flex-end; gap: 9px;
+  padding: 14px 18px 15px;
+}
+.prompt-input {
+  width: 100%; box-sizing: border-box;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 9px; padding: 10px 12px;
+  font-size: 13.5px; color: var(--text);
+  transition: border-color 0.16s;
+}
+.prompt-input:focus { border-color: rgba(var(--accent-rgb), 0.55); outline: none; }
+
+/* 选歌单：每个歌单一行，右边显示已存首数 */
+.pl-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
+.pl-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; padding: 10px 12px; border-radius: 9px;
+  background: var(--panel); color: var(--text); font-size: 13.5px;
+  text-align: left; transition: background 0.15s, color 0.15s;
+}
+.pl-row:hover { background: var(--panel-2); color: #fff; }
+.pl-row .n { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pl-new {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 10px 12px; border-radius: 9px;
+  border: 1px dashed var(--line); color: var(--accent); font-size: 13.5px;
+  transition: background 0.15s;
+}
+.pl-new .ic { width: 14px; height: 14px; }
+.pl-new:hover { background: rgba(var(--accent-rgb), 0.12); }
+.pl-empty { font-size: 12.5px; color: var(--muted); padding: 6px 4px; }
+
 /* ============================================================
    合集 / 分P 展开面板（从右侧滑出）
    ------------------------------------------------------------
@@ -1086,12 +1155,15 @@ ul { list-style: none; }
 
 .collect-body { flex: 1; overflow-y: auto; padding: 8px; }
 .collect-row {
-  display: grid; grid-template-columns: 34px 1fr auto;
+  display: grid; grid-template-columns: 34px 1fr auto auto;
   align-items: center; gap: 10px;
   padding: 8px 10px; border-radius: 9px;
   cursor: pointer; transition: background 0.14s;
 }
 .collect-row:hover { background: var(--panel); }
+/* 每一集也有"收藏 / 加歌单"：平时藏起来，鼠标移到这一行才淡出来 */
+.collect-row .cops { display: flex; gap: 6px; opacity: 0; transition: opacity 0.14s; }
+.collect-row:hover .cops { opacity: 1; }
 .collect-row.on {
   background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.16), rgba(var(--accent-2-rgb), 0.13));
 }

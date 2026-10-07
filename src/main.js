@@ -383,6 +383,8 @@ function registerHandlers() {
 
   handle('bili:favFolders', (mid) => bili.getFavFolders(mid));
   handle('bili:favMedias', (mediaId, pn) => bili.getFavMedias(mediaId, pn || 1));
+  // 点作者名 → 看这个 UP 的全部视频
+  handle('bili:upVideos', (mid, pn) => bili.getUpVideos(mid, pn || 1));
 
   // ---------- 字幕（做滚动歌词用） ----------
   // 界面靠返回的 reason 区分失败原因，从而给出不同提示（没登录 / 没字幕 / 被限流）

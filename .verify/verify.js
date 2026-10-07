@@ -32,10 +32,15 @@ const refIds = new Set([
   ...appjs.matchAll(/\$\(\s*'([^']+)'\s*\)/g).map((m) => m[1]),
   ...appjs.matchAll(/getElementById\(\s*'([^']+)'\s*\)/g).map((m) => m[1]),
 ]);
+/* app.js 自己用 innerHTML 生成的元素（比如小弹窗里的输入框、按钮）也算"存在"——
+   它们不在静态 HTML 里，是运行时拼出来的，但同样是可以 $() 到手的。
+   不把这类算上，就会误报"引用了不存在的 id"（假阳性）。 */
+const runtimeIds = new Set([...appjs.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+
 console.log('\n[1] 渲染层引用的元素 id 是否都存在：');
-let missing = [...refIds].filter((id) => !htmlIds.has(id));
+let missing = [...refIds].filter((id) => !htmlIds.has(id) && !runtimeIds.has(id));
 if (missing.length) missing.forEach((id) => err(`app.js 用了 #${id}，但 index.html 里没有这个 id`));
-else ok(`全部 ${refIds.size} 处引用的 id 都在 index.html 中`);
+else ok(`全部 ${refIds.size} 处引用的 id 都在 index.html 或 app.js 动态生成的元素里`);
 
 /* app.js 里还用了 e.target.closest('#xxx') 的硬 id（如 modalMask），也查一下 */
 const closestIds = [...appjs.matchAll(/closest\(\s*'#([^']+)'/g)].map((m) => m[1]);
@@ -794,5 +799,115 @@ console.log('\n[27] 合集 / 分P 展开：徽章入口 + 右侧抽屉 + 点空�
   else ok('启动时绑定合集面板');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 27 大类检查）');
+console.log('\n[28] 小弹窗 / 播放队列 / 图标操作 / UP 主页：');
+{
+  /* --- A. 不能用 prompt()/confirm()：Electron 没实现，会静默失效 --- */
+  const codeOnly = appjs.split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+  if (/[^.\w]prompt\s*\(/.test(codeOnly)) {
+    err('app.js 仍在调用 prompt() —— Electron 里它不弹窗、直接返回空，点了会"没反应"');
+  } else if (/[^.\w]confirm\s*\(/.test(codeOnly)) {
+    err('app.js 仍在调用 confirm() —— 换成本项目自己的弹窗，样式才统一');
+  } else ok('已不再使用 prompt() / confirm()（Electron 不支持 prompt，会静默失效）');
+
+  /* --- B. 小弹窗的元素与样式都在 --- */
+  const needIds = ['promptMask', 'promptTitle', 'promptBody', 'promptFoot', 'promptClose'];
+  const missIds = needIds.filter((id) => !htmlIds.has(id));
+  if (missIds.length) err(`index.html 缺少小弹窗元素：${missIds.join(', ')}`);
+  else ok('通用小弹窗（#promptMask / 标题 / 主体 / 按钮区 / 关闭）都在 index.html');
+
+  if (!/function openPrompt\(/.test(appjs) || !/function closePrompt\(/.test(appjs) || !/function bindPrompt\(/.test(appjs))
+    err('缺少小弹窗的 openPrompt / closePrompt / bindPrompt');
+  else ok('小弹窗有打开的、关闭的和事件绑定三件套');
+
+  if (!/function askName\(/.test(appjs)) err('缺少"输入名字"的 askName（新建歌单 / 重命名要用）');
+  else ok('新建歌单与重命名都走 askName（输入框弹窗）');
+
+  if (!/function pickPlaylistFor\(/.test(appjs) || !/data-pl=/.test(appjs))
+    err('缺少"选一个歌单"的弹窗（pickPlaylistFor / 歌单行）');
+  else if (!/function addToPlaylist[\s\S]*?pickPlaylistFor\(\[track\]\)/.test(appjs))
+    err('行内的 ＋ 没有接到 pickPlaylistFor —— 点＋不会弹出歌单列表');
+  else if (!/function addManyToPlaylist[\s\S]*?pickPlaylistFor\(tracks\)/.test(appjs))
+    err('"全部加入歌单"没有走同一个选歌单弹窗');
+  else ok('点 ＋ / 全部加入歌单都会弹出歌单列表（可在其中新建）');
+
+  if (!/id="plNew"/.test(appjs) || !/plCreate/.test(appjs))
+    err('歌单弹窗里没有"新建歌单…"入口 —— 用户没法在选歌单时就地创建');
+  else ok('歌单弹窗内有「新建歌单…」入口，且建完直接加入');
+
+  if (!/\$\(\s*'btnNewPlaylist'\s*\)[\s\S]{0,120}?askName/.test(appjs))
+    err('侧栏「＋ 新建歌单」没接到 askName —— 这就是"点了没反应"的直接原因');
+  else ok('侧栏「＋ 新建歌单」已改为自家弹窗（不再是那个不弹的 prompt）');
+
+  /* --- C. 行内按钮改图标 + 悬停提示 --- */
+  for (const icon of ['i-list', 'i-info', 'i-trash']) {
+    if (!new RegExp(`id="${icon}"`).test(html)) err(`图标库里缺少 ${icon}`);
+  }
+  if (!/\.op-ic\s*\{/.test(css)) err('缺少 .op-ic 图标按钮样式');
+  else ok('行内操作已改为图标按钮（.op-ic）');
+
+  if (!/\[data-tip\]::after\s*\{[\s\S]*?content:\s*attr\(data-tip\)/.test(css))
+    err('缺少 [data-tip] 悬停提示样式 —— 图标按钮就没有名字了');
+  else ok('图标按钮鼠标移上去会浮出名字（[data-tip]::after）');
+
+  if (!/data-act="fav"[\s\S]{0,200}?i-heart/.test(appjs) || !/data-act="add"[\s\S]{0,200}?i-plus/.test(appjs))
+    err('收藏 / 加歌单没有用 ♡ 与 ＋ 图标');
+  else ok('收藏＝♡（已收藏实心）、加歌单＝＋');
+
+  if (!/\.a-link\s*\{/.test(css) || !/data-act="up"/.test(appjs) || !/function openUpPage\(/.test(appjs))
+    err('作者名没有做成可点（.a-link / data-act="up" / openUpPage）');
+  else ok('列表里的作者名可点，点开该 UP 主的主页');
+
+  if (!/closest\(\s*'\.a-link'\s*\)/.test(appjs))
+    err("作者名的点击没有在内容区被拦下 —— 点作者会顺手把这首也播了");
+  else ok('点作者名被单独拦下，不会误触发"整行播放"');
+
+  /* --- D. 合集面板每一集也有操作按钮 --- */
+  if (!/data-cact="fav"/.test(appjs) || !/data-cact="add"/.test(appjs))
+    err('合集面板的每一集没有"收藏 / 加歌单"按钮');
+  else if (!/closest\(\s*'\[data-cact\]'\s*\)/.test(appjs))
+    err('合集面板的按钮点击没有拦下 —— 点收藏会变成"播放这一集"');
+  else ok('合集面板每一集都有 hover 出现的收藏 / 加歌单按钮，且不会误触发播放');
+
+  if (!/\.collect-row\s+\.cops\s*\{/.test(css) || !/\.collect-row:hover\s+\.cops\s*\{/.test(css))
+    err('合集行缺少 .cops（悬停才显示的按钮列）');
+  else ok('合集行的按钮平时藏起来，鼠标移到这一行才淡出');
+
+  /* --- E. 播放队列 --- */
+  const qIds = ['queueMask', 'queueTitle', 'queueSub', 'queueList', 'queueSearch',
+                'btnQueue', 'btnCloseQueue', 'btnQueueShuffle', 'btnQueueClear'];
+  const qMiss = qIds.filter((id) => !htmlIds.has(id));
+  if (qMiss.length) err(`index.html 缺少队列面板元素：${qMiss.join(', ')}`);
+  else ok('播放队列抽屉的遮罩 / 标题 / 列表 / 搜索 / 三个按钮都在');
+
+  if (!/function renderQueueList\(/.test(appjs) || !/function bindQueue\(/.test(appjs) || !/function removeFromQueue\(/.test(appjs))
+    err('缺少队列的渲染 / 绑定 / 移除函数');
+  else if (!/^\s*bindQueue\(\);$/m.test(appjs)) err('启动时没有调用 bindQueue()');
+  else ok('队列面板有渲染、绑定与"移除某一首"');
+
+  if (!/queue\.tracks\.length/.test(appjs) || !/function currentTracks\(/.test(appjs))
+    err('队列状态与列表取数的链路断了');
+  else ok('队列复用既有的 queue.tracks（上一首/下一首用的就是它，不是新造一套）');
+
+  if (!/function refreshQueueIfOpen\(/.test(appjs) || !/refreshQueueIfOpen\(\)/.test(appjs))
+    err('"加入队列"后没有同步队列面板');
+  else ok('"加入队列"后，打开着的队列面板会同步刷新');
+
+  /* --- F. UP 主页的后端链路 --- */
+  if (!/async function getUpVideos\(/.test(read('src/bilibili.js'))) err('bilibili.js 缺少 getUpVideos');
+  else if (!/getUpVideos,/.test(read('src/bilibili.js'))) err('getUpVideos 没有导出');
+  else ok('bilibili.js 新增 getUpVideos（带 wbi 签名的空间接口）');
+
+  if (!/handle\(\s*'bili:upVideos'/.test(mainjs)) err('main.js 没有注册 bili:upVideos');
+  else if (!/upVideos:\s*\(/.test(preload)) err('preload.js 没有暴露 upVideos');
+  else if (!/api\(\s*'upVideos'/.test(appjs)) err("app.js 没有经 api('upVideos') 调用（会拿到 {ok,data} 外壳）");
+  else ok("UP 主页的 IPC 链路闭环：app.js → preload → main.js → bilibili.js");
+
+  if (!/mid:\s*v\.mid/.test(read('src/bilibili.js'))) {
+    err('searchVideos 没有把 mid 带出来 —— 作者名就点不开主页');
+  } else if (!/mid:\s*v\.mid/.test(appjs)) {
+    err('搜索结果映射时把 mid 丢了 —— 列表里的作者名点不开');
+  } else ok('搜索结果已带上 UP 的 mid（作者名才能点）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 28 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

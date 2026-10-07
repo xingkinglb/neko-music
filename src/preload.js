@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld('neko', {
   // 读取收藏夹里的视频
   favMedias: (mediaId, pn) => ipcRenderer.invoke('bili:favMedias', mediaId, pn),
 
+  // 某个 UP 主公开的投稿视频（点作者名 → 看他的全部视频）
+  upVideos: (mid, pn) => ipcRenderer.invoke('bili:upVideos', mid, pn),
+
   // ---------- 设置 ----------
   // 填写自己的 B 站登录 Cookie（填了能大幅减少"被限流"）
   cookieGet: () => ipcRenderer.invoke('cookie:get'),
