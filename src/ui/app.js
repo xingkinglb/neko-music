@@ -73,7 +73,13 @@ function toast(msg) {
  */
 async function api(name, ...args) {
   const res = await window.neko[name](...args);
-  if (!res.ok) throw new Error(res.error || '操作失败');
+  if (!res.ok) {
+    const e = new Error(res.error || '操作失败');
+    // ★ reason 必须一起带出来：主进程用它区分"没填Cookie / 没字幕 / 被限流"，
+    //   界面要据此显示不同的提示文案。漏掉的话所有失败都会退化成同一句。
+    if (res.reason) e.reason = res.reason;
+    throw e;
+  }
   return res.data;
 }
 
@@ -1182,9 +1188,12 @@ async function loadLyrics(byUser) {
   updateLyricBtn();
 
   try {
-    const res = await window.neko.subtitle(track.bvid, track.cid);
+    // ★ 必须走 api()，不能直接调 window.neko 上的 subtitle。
+    //   主进程统一返回 {ok, data} 外壳，直接调的话 res.lines 永远是 undefined，
+    //   于是不管成功失败都会走进"成功"分支，显示"（没有歌词）"却提示"歌词已加载"。
+    const res = await api('subtitle', track.bvid, track.cid);
 
-    lyricState.lines = res.lines || [];
+    lyricState.lines = Array.isArray(res.lines) ? res.lines : [];
     lyricState.trackKey = key;
     lyricState.index = -1;
     renderLyricLines();

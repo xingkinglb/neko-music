@@ -38,11 +38,26 @@ let BASE_COOKIE = `buvid3=${BUVID3}; b_nut=1700000000; buvid4=${BUVID3}`;
 function setUserCookie(cookieText) {
   const t = String(cookieText || '').trim();
   if (!t) return;
-  // 用户可能只填了 SESSDATA=xxx 这一段，也可能把整个 Cookie 都贴进来了
+
+  // 情况 1：标准写法，里面明确带着 SESSDATA=xxx（可能还粘了别的字段）
   const sess = t.match(/SESSDATA=([^;\s]+)/);
-  BASE_COOKIE = sess
-    ? `buvid3=${BUVID3}; b_nut=1700000000; SESSDATA=${sess[1]}`
-    : `${BASE_COOKIE}; ${t}`;
+  if (sess) {
+    BASE_COOKIE = `buvid3=${BUVID3}; b_nut=1700000000; SESSDATA=${sess[1]}`;
+    return;
+  }
+
+  // 情况 2：用户从浏览器开发者工具的「Cookie Value」那一列复制，
+  //         粘过来的只是 SESSDATA 的"值"，前面没有 SESSDATA= 这段。
+  //         这种情况如果原样拼上去，看起来像填了 Cookie，其实等于没填 ——
+  //         请求照样是匿名，字幕永远拿不到。所以这里主动当成 SESSDATA 处理。
+  //         特征：整段里没有分号、也没有等号的百分号编码串。
+  if (!/=/.test(t)) {
+    BASE_COOKIE = `buvid3=${BUVID3}; b_nut=1700000000; SESSDATA=${t}`;
+    return;
+  }
+
+  // 情况 3：其他情况（贴了一堆字段但没有 SESSDATA），原样附加
+  BASE_COOKIE = `${BASE_COOKIE}; ${t}`;
 }
 
 // 音频流必须带着这个 Referer 才能下载（B 站的防盗链机制）

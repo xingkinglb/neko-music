@@ -264,7 +264,28 @@ else if (!/resetLyricsOnTrackChange\(\)/.test(appjs.split('function resetLyricsO
 if (!/autoLyric/.test(appjs) || !/autoLyric/.test(mainjs)) err('autoLyric 没贯穿 界面↔ 主进程存档 —— 开关关掉后再开软件会丢');
 else ok('自动歌词开关会存进存档（重启后还记得）');
 
+/* ---- 14) 字幕必须走 api() 解包（这是个真实踩过的坑） ---- */
+console.log('\n[13] 字幕结果解包：');
+/* 主进程统一返回 {ok, data}。如果绕开 api() 直连 preload，
+   res.lines 恒为 undefined → 不管成功失败都显示"（没有歌词）"却提示"歌词已加载"。 */
+const rawSubtitleCall = (appjs.split('//')[0] + appjs.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n'));
+if (/window\.neko\.subtitle\(/.test(rawSubtitleCall)) {
+  err('loadLyrics 绕开了 api() 直连 preload —— 没解 {ok,data} 外壳，失败会被误报成"歌词已加载"');
+} else if (!/api\(\s*'subtitle'/.test(appjs)) {
+  err("loadLyrics 没有通过 api('subtitle', ...) 取歌词 —— 拿不到数据也不会抛错");
+} else ok('字幕经 api() 解包（失败会真的抛错，不会误报成功）');
+
+/* reason 必须一路传到界面，否则 no-cookie/none/limit 全都退化成同一句提示 */
+if (!/if\s*\(res\.reason\)\s*e\.reason\s*=\s*res\.reason/.test(appjs)) {
+  err("api() 没把 reason 带进抛出的 Error —— '没填Cookie/没字幕/被限流' 会显示成同一句话");
+} else ok('失败原因（reason）能传到界面，三种情况分别提示');
+
+/* 用户很可能从开发者工具的「Cookie Value」列复制，只有一段值、没有 SESSDATA= 前缀 */
+if (!/function setUserCookie[\s\S]*?!\/=\/\.test\(t\)/.test(biliSrc)) {
+  err('setUserCookie 没处理"只有值、没有 SESSDATA= 前缀"的粘贴 —— 用户填了却等于没填，字幕永远拿不到');
+} else ok('粘贴纯 Cookie 值（无 SESSDATA= 前缀）也能识别');
+
 /* ---- 汇总 ---- */
 console.log('\n========================================');
-if (fail === 0) console.log('全部静态自检通过 ✅（共 12 大类检查）');
+if (fail === 0) console.log('全部静态自检通过 ✅（共 13 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
