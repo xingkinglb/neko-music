@@ -287,5 +287,52 @@ if (!/function setUserCookie[\s\S]*?!\/=\/\.test\(t\)/.test(biliSrc)) {
 
 /* ---- 汇总 ---- */
 console.log('\n========================================');
-if (fail === 0) console.log('全部静态自检通过 ✅（共 13 大类检查）');
+
+/* ---- 15) cid 必须校验（实测踩过的坑，最阴的一个） ---- */
+console.log('\n[14] 字幕 cid 的权威性：');
+/* 实测：/x/player/v2 只认 cid、无视 bvid。
+   把 A 的 bvid 和 B 的 cid 拼一起请求，接口照样返回 code 0 并给出 B 的字幕，不报错。*/
+if (!/pages\.find\(\s*\(p\)\s*=>\s*Number\(p\.cid\)\s*===\s*Number\(cid\)\s*\)/.test(biliSrc)) {
+  err("getSubtitle 没校验 cid 是否属于该 bvid —— 一旦 cid 是旧的就会显示别的视频的歌词且不报错");
+} else ok('getSubtitle 会核对 cid 是否属于该 bvid（旧 cid 自动纠正）');
+
+/* 多 P 视频共用 bvid、各 P 的 cid 不同，所以不能无脑用第 1P */
+if (/usedPage\s*=\s*pages\[0\]\s*;?\s*$/m.test(biliSrc) && !/usedPage\s*=\s*pages\.find/.test(biliSrc)) {
+  err('getSubtitle 无条件用第 1P —— 多 P 视频会拿到错误那一P 的字幕');
+} else if (!/if\s*\(usedPage\.page\s*>\s*1\)/.test(biliSrc)) {
+  err('getSubtitle 没处理多 P 情况（标题里应标出 P几）');
+} else ok('多 P 视频按实际 P 取字幕，不会错位到第 1P');
+
+/* 取错了必须"看得见"，不能悄悄显示 —— 字幕来源标题要能警示 */
+if (!htmlIds.has('lyricWarn')) err('index.html 里缺少 #lyricWarn（字幕来源不符时无法警示）');
+else if (!/lyric-warn/.test(css)) err('style.css 里缺少 .lyric-warn 样式');
+else if (!/videoTitle/.test(appjs)) err('app.js 没用 videoTitle 做来源核对');
+else ok('字幕来源与当前歌曲不一致时会明确警示（不再静默取错）');
+
+/* 警告行绝不能混进 .lyric-box —— syncLyric 按 children 下标对应歌词，混进去会整体错位 */
+const warnRule = (css.match(/\.lyric-warn\s*\{[\s\S]*?\n\}/) || [''])[0];
+if (/position:\s*absolute/.test(warnRule) === false) err('.lyric-warn 未独立定位，可能挤进歌词列表导致高亮错位');
+else if (!/id="lyricWarn"[\s\S]{0,120}?class="lyric-box"|class="lyric-warn" id="lyricWarn"[\s\S]{0,80}?lyric-box/.test(html)) {
+  err('#lyricWarn 与 #lyricBox 的相对位置不对 —— 警告必须在歌词容器之外');
+} else ok('#lyricWarn 在 .lyric-box 之外（不会打乱歌词高亮下标）');
+
+/* ---- 16) 限流会返回"别的视频的字幕"，必须缓存 + 检乱码 ---- */
+console.log('\n[15] 限流防护：');
+/* 实测：同一个 cid 连着快速请求，B 站会随机返回 0/1/6 条轨道，
+   内容是别的视频的文本（"今天我们要飞1500km"）。不防护就会显示别人的歌词。 */
+if (!/subtitleCache\s*=\s*new Map\(\)/.test(biliSrc)) {
+  err('getSubtitle 没有字幕结果缓存 —— 连点「词」会反复打 B 站，触发限流后拿到别的视频的字幕');
+} else if (!/SUBTITLE_TTL/.test(biliSrc)) {
+  err('字幕缓存没有过期时间 —— 会永远返回旧歌词');
+} else ok('字幕结果带 TTL 缓存（连点不再反复打 B 站，避免限流）');
+
+if (!/uniq\.size\s*<\s*10/.test(biliSrc) || !/zhRatio\s*<\s*0\.2/.test(biliSrc)) {
+  err("getSubtitle 没有乱码检测 —— 被限流时会照单全收显示成别人的歌词");
+} else ok('检测乱码字幕（限流返回的他人内容会被判为 limit 而不是当成功）');
+
+if (!/body\.length\s*===\s*0[\s\S]*?reason\s*=\s*'limit'/.test(biliSrc)) {
+  err("getSubtitle 没有识别'轨道非空但内容为空'的限流假象");
+} else ok('识别"轨道存在但内容为空"的限流假象（不会误报成没字幕）');
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 15 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

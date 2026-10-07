@@ -1196,7 +1196,7 @@ async function loadLyrics(byUser) {
     lyricState.lines = Array.isArray(res.lines) ? res.lines : [];
     lyricState.trackKey = key;
     lyricState.index = -1;
-    renderLyricLines();
+    renderLyricLines(res.videoTitle);
     if (byUser) {
       toggleLyrics(true);
       toast('歌词已加载' + (res.lang ? '（' + res.lang + '）' : ''));
@@ -1209,6 +1209,8 @@ async function loadLyrics(byUser) {
     lyricState.index = -1;
     const box = $('lyricBox');
     if (box) box.innerHTML = '';
+    const warnEl = $('lyricWarn');
+    if (warnEl) { warnEl.innerHTML = ''; warnEl.classList.remove('show'); }
     if (byUser) showLyricTip(lyricFailText(err.reason, err.message));
   } finally {
     lyricState.loading = false;
@@ -1216,17 +1218,43 @@ async function loadLyrics(byUser) {
   }
 }
 
-/** 把歌词行画到页面上（一行一句<p>） */
-function renderLyricLines() {
+/**
+ * 把歌词行画到页面上（一行一句<p>）
+ * @param {string} [videoTitle] 这份字幕实际来自哪个视频。
+ *   万一取错了，标题会和我们正在播的那首不一致，用户一眼就能看出来
+ *   —— B站的字幕接口只认cid、不认 bvid，取错时不会报错，
+ *   所以必须把"来源"摆出来，不能让它悄悄过去。
+ */
+function renderLyricLines(videoTitle) {
   const box = $('lyricBox');
   if (!box) return;
   if (!lyricState.lines.length) {
     box.innerHTML = '<p class="l">（没有歌词）</p>';
     return;
   }
-  box.innerHTML = lyricState.lines
+  const rows = lyricState.lines
     .map((l) => '<p class="l">' + esc(l.text) + '</p>')
     .join('');
+
+  // 来源标题和当前播放标题不一致 = 极可能取错了歌，必须明确警告。
+  //   注意：这里刻意不用class="l" —— syncLyric 是按 box.children 的下标对应歌词的，
+  //   混进去会让每一句的高亮都错位一位。
+  const cur = queue.tracks[queue.index];
+  const warn =
+    videoTitle && cur && cur.title && videoTitle.trim() !== cur.title.trim()
+      ? '<p class="lyric-warn">这份字幕看起来不属于当前这首歌（来源：' +
+        esc(videoTitle) +
+        '）。已按视频重新核对过，如果仍不一致，可能是 B 站把字幕标错了</p>'
+      : '';
+
+  // 警告行放在歌词列表外面（box 的兄弟节点），完全不参与下标计算
+  const warnBox = $('lyricWarn');
+  if (warnBox) {
+    warnBox.innerHTML = warn;
+    warnBox.classList.toggle('show', !!warn);
+  }
+
+  box.innerHTML = rows;
   syncLyric(true);
 }
 
@@ -1345,6 +1373,8 @@ function resetLyricsOnTrackChange() {
   lyricState.failed = false;
   const box = $('lyricBox');
   if (box) box.innerHTML = '';
+  const warn = $('lyricWarn');
+  if (warn) { warn.innerHTML = ''; warn.classList.remove('show'); }
   if (DB.settings.autoLyric) loadLyrics(false);
   else updateLyricBtn();
 }

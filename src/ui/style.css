@@ -678,6 +678,23 @@ ul { list-style: none; }
 .lyric-overlay::before { top: 0;    background: linear-gradient(to bottom, rgba(14,14,22,0.95), transparent); }
 .lyric-overlay::after  { bottom: 0; background: linear-gradient(to top,    rgba(14,14,22,0.95), transparent); }
 
+/* 歌词来源对不上时的警告条。
+   刻意放在 .lyric-box 外面：syncLyric 按 box.children 的下标对应每一句歌词，
+   警告行混进去会让所有高亮错位一位。 */
+.lyric-warn {
+  display: none;
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 3; max-width: 82%;
+  margin: 0; padding: 7px 14px;
+  font-size: 12px; line-height: 1.5; text-align: center;
+  color: #ffd9a0;
+  background: rgba(120, 78, 20, 0.55);
+  border: 1px solid rgba(255, 190, 120, 0.35);
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+}
+.lyric-warn.show { display: block; }
+
 .lyric-close {
   position: absolute; top: 16px; right: 20px;
   width: 30px; height: 30px; border-radius: 8px;

@@ -303,8 +303,17 @@ function toHttps(url) {
 
 /**
  * 获取视频详情：标题、UP 主、封面、分 P 列表、所属合集
+ *
+ * 带一个 60 秒的短缓存：同一首歌反复点「词」时不必每次都打B 站，
+ * 既快又不会被当成刷接口而限流（限流后会返回乱码字幕，很难察觉）。
  */
+const videoInfoCache = new Map();
+const VIDEO_INFO_TTL = 60 * 1000;
+
 async function getVideoInfo(bvid) {
+  const hit = videoInfoCache.get(bvid);
+  if (hit && Date.now() - hit.at < VIDEO_INFO_TTL) return hit.info;
+
   const json = await requestJSON(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`);
   const d = json.data;
 
@@ -341,7 +350,7 @@ async function getVideoInfo(bvid) {
     };
   }
 
-  return {
+  const info = {
     bvid: d.bvid,
     aid: d.aid,
     title: d.title,
@@ -351,6 +360,8 @@ async function getVideoInfo(bvid) {
     pages,
     season,
   };
+  videoInfoCache.set(bvid, { at: Date.now(), info });
+  return info;
 }
 
 /**
@@ -449,11 +460,15 @@ async function getFavMedias(mediaId, pn = 1) {
 //    ② 挑一条中文轨道（优先真人字幕，其次 B 站自动生成的 AI 字幕）
 //    ③ 下载那条字幕的 JSON，里面是一句一句的 {from, to, content}
 //
-//  ⚠️ 两个必须知道的坑：
+//  ⚠️ 三个必须知道的坑（都是实测踩出来的，别删）：
 //    1) **不登录基本拿不到**。匿名请求 /x/player/v2 返回的字幕列表是空的。
 //       所以没填 Cookie 时我们会提前返回"没登录"，不去白跑一趟请求。
-//    2) **限流会给你"假残缺"**：轨道列表非空，但下载下来 body 是空的。
-//       这种绝不能当成成功，否则界面上会出现一片空白还以为正在加载。
+//    2) **cid 才是唯一依据，bvid 形同虚设**。把 A 的 bvid 和 B 的 cid 拼一起请求，
+//       接口照样返回 code 0，还给出 B 的字幕，不报任何错。所以必须自己核对 cid。
+//    3) **被限流时它会给你一份"别的视频"的字幕**，而不是报错。
+//       实测连着快速请求几次，同一个 cid 会随机返回 1 条 / 6 条 / 0 条轨道，
+//       内容是"今天我们要飞1500km""可以保护别人啊"这类完全无关的文本。
+//       → 所以：a) 结果要缓存，别反复打 B 站；b) 内容要做乱码检测。
 
 /** 用户有没有填 Cookie —— 决定能不能取字幕 */
 function hasLoginCookie() {
@@ -461,10 +476,30 @@ function hasLoginCookie() {
 }
 
 /**
+ * 已取到的字幕缓存（只存在内存里，不进存档）。
+ * 存在的原因很实际：B 站被连续快速请求时会给回**别的视频**的字幕（见坑 3），
+ * 而用户往往会手快地连点几下「词」。缓存住第一次的正确结果，
+ * 一来二次点击秒回，二来不再给 B 站刷接口的机会。
+ */
+const subtitleCache = new Map();
+const SUBTITLE_TTL = 10 * 60 * 1000;   // 10 分钟，够用且不会占多少内存
+
+/**
  * 取某个视频（某一 P）的字幕，返回逐句歌词
+ *
+ * ⚠️ 这里必须自己核对 cid，因为 /x/player/v2 这个接口**只认 cid，
+ *    完全无视传进去的 bvid**。
+ *    实测：把 A 视频的 bvid 和 B 视频的 cid 拼在一起请求，
+ *    接口照样返回 code 0，还老老实实返回了 **B 视频**的字幕，不报任何错。
+ *    所以只要 cid 是旧的/串了，界面就会显示另一首歌的词，
+ *    而且看起来"加载成功"，非常难发现。
+ *    → 因此这里不信调用方传来的 cid，一律以bvid 现场查出来的为准。
+ *
+ * @param {string} bvid 视频号
+ * @param {number} [cid] 期望的 cid；不给或对不上会自动纠正
  * @returns {Promise<{lines: Array<{t:number, text:string}>}>}
  * @throws  {Error} 带 reason 字段，用来区分失败原因（界面据此给不同提示）
- *   reason: 'no-cookie' | 'limit' | 'none' | 'network'
+ *   reason: 'no-cookie' | 'limit' | 'none' | 'network' | 'mismatch'
  */
 async function getSubtitle(bvid, cid) {
   // 没登录就别试了 —— 直接告诉界面"先去填 Cookie"，省一次被限流的机会
@@ -474,7 +509,49 @@ async function getSubtitle(bvid, cid) {
     throw e;
   }
 
-  // ①拿字幕轨道列表
+  // 命中缓存直接返回，别再打 B 站（理由见subtitleCache 的注释）
+  const ck = bvid + ':' + (cid || '');
+  const cached = subtitleCache.get(ck);
+  if (cached && Date.now() - cached.at < SUBTITLE_TTL) return cached.data;
+
+  // ① 权威地查这个 bvid 真正的分 P 列表
+  //    注意：多 P 视频的所有分 P 共用同一个 bvid，各 P 的 cid 不同。
+  //    所以不能简单粗暴地强制用第 1P —— 那样用户听第 3P 就会拿到第 1P 的字幕。
+  let pages = [];
+  let videoTitle = '';
+  try {
+    const info = await getVideoInfo(bvid);
+    pages = info.pages || [];
+    videoTitle = info.title || '';
+    if (!pages.length) {
+      const e = new Error('这个视频没有可播放的内容');
+      e.reason = 'none';
+      throw e;
+    }
+  } catch (err) {
+    if (err.reason) throw err;                // 上面自己抛的，保留原因
+    const e = new Error(err.message || '视频信息获取失败');
+    e.reason = 'network';
+    throw e;
+  }
+
+  // 调用方给的 cid 只能当"参考"，而且必须验证它确实属于这个 bvid。
+  //   · 在 pages 里找得到 → 是这个视频的某一 P，正常使用（多 P 视频靠它区分）
+  //   · 找不到 → 多半是存档里的旧 cid 串到了别的视频上，
+  //     绝不能继续用它 —— 那正是"显示另一首歌的歌词"的元凶。改用第 1P。
+  let usedPage = pages.find((p) => Number(p.cid) === Number(cid));
+  if (!usedPage) {
+    if (cid) {
+      console.warn(
+        `[getSubtitle] cid不属于 ${bvid}（传入 ${cid}），已改用第 1P 的 ${pages[0].cid}`
+      );
+    }
+    usedPage = pages[0];
+  }
+  cid = usedPage.cid;
+  if (usedPage.page > 1) videoTitle = `${videoTitle} - P${usedPage.page} ${usedPage.title || ''}`.trim();
+
+  // ②拿字幕轨道列表
   let list;
   try {
     const json = await requestJSON(
@@ -533,7 +610,7 @@ async function getSubtitle(bvid, cid) {
   }
 
   // 整理成统一格式：t = 开始时间（秒），text = 这一句
-  const lines = body
+  let lines = body
     .map((it) => ({
       t: Number(it.from) || 0,
       text: String(it.content || '').trim(),
@@ -541,7 +618,44 @@ async function getSubtitle(bvid, cid) {
     .filter((l) => l.text)          // 丢掉空行（有的是换行占位）
     .sort((a, b) => a.t - b.t);   // 保证按时间递增
 
-  return { lines, lang: pick.lan_doc || pick.lan };
+  // ★ 坑 3：被限流时 B 站有时不报错，而是**返回一份胡乱拼的假字幕**。
+  //   实测连着快速请求几次，会拿到 200 多行"小瓶粉皮莱卡"这种完全无关的乱码。
+  //   它同样是"轨道非空 + body 非空"，所以上面两道检查都拦不住。
+  //   判据：真正的歌词里不会有大段连续重复的乱词。
+  if (lines.length >= 20) {
+    const head = lines.slice(0, 20).map((l) => l.text).join('');
+    const uniq = new Set(lines.slice(0, 20).map((l) => l.text));
+    const zhRatio = (head.match(/[\u4e00-\u9fa5]/g) || []).length / Math.max(head.length, 1);
+    // 前 20 句里重复度极高（<一半是不同句子）→ 乱码
+    if (uniq.size < 10 || zhRatio < 0.2) {
+      const e = new Error('被 B 站限流了，返回的内容是乱码');
+      e.reason = 'limit';
+      throw e;
+    }
+  }
+
+  if (!lines.length) {
+    // body 有内容但每行 content 都是空的 —— 同样是限流，不是"没字幕"
+    const e = new Error('被 B 站限流了，字幕没下下来');
+    e.reason = 'limit';
+    throw e;
+  }
+
+  const result = {
+    lines,
+    lang: pick.lan_doc || pick.lan,
+    bvid,                // 原样带回，方便界面核对
+    cid,                 // 实际使用的 cid（已纠正）
+    videoTitle,          // 这个字幕属于哪个视频 —— 万一还对不上，用户能一眼看出来
+  };
+
+  // 缓存住这次的成功结果，10 分钟内再点「词」直接秒回，不再惊动 B 站。
+  // 两个键都写：调用方下次可能仍带着那个"脏 cid"，
+  // 那样查询键会变，必须也能命中，否则缓存等于白加。
+  const now = Date.now();
+  subtitleCache.set(ck, { at: now, data: result });
+  subtitleCache.set(bvid + ':' + usedPage.cid, { at: now, data: result });
+  return result;
 }
 
 // 把上面这些函数导出，让主进程可以使用
