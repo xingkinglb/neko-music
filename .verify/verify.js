@@ -397,5 +397,36 @@ if (!/httpRequest\(subUrl,\s*\{\s*noCookie:\s*true\s*\}\)/.test(biliSrc)) {
   err('下载字幕时把登录 Cookie 发给了字幕 CDN —— 既没必要也不安全');
 } else ok('下载字幕不带登录 Cookie（SESSDATA 不外发给 CDN）');
 
-if (fail === 0) console.log('全部静态自检通过 ✅（共 17 大类检查）');
+/* ---- 19) 歌词必须跟着播放滚动 ---- */
+console.log('\n[18] 歌词跟随播放滚动：');
+/* 真机现象：歌词取对了，但播到副歌了高亮还停在第一句。
+   根因：syncLyric() 只在"渲染完"和"展开面板"时被调用过，
+   播放过程中完全没有驱动 —— 少接了一根线。 */
+const tuBlock = (appjs.match(/addEventListener\('timeupdate',[\s\S]*?\n  \}\)/) || [])[0] || '';
+if (!tuBlock) {
+  err("找不到 audio 的 timeupdate 监听 —— 歌词没有滚动的驱动源");
+} else if (!/syncLyric\(\)/.test(tuBlock)) {
+  err('timeupdate 里没有调用 syncLyric() —— 播放时歌词不会跟着滚动（高亮会一直停在第一句）');
+} else ok('timeupdate 里驱动 syncLyric()（播放时歌词实时跟随）');
+
+/* 暂停状态下 timeupdate 不触发：拖进度条 / 快捷键跳转后必须自己补一次 */
+if (!/addEventListener\('seeked'[\s\S]{0,80}?syncLyric/.test(appjs)) {
+  err("没有监听 'seeked' —— 暂停时拖进度条，歌词不会跟着跳");
+} else ok("监听 'seeked'（暂停时跳转歌词也跟得上）");
+
+/* scrollIntoView 会把所有可滚动的祖先一起滚（整页跟着抖），必须自己算 scrollTop */
+if (/scrollIntoView/.test(appjs)) {
+  err('歌词滚动用了 scrollIntoView —— 会连带滚动祖先容器，浮层里会整页抖动');
+} else if (!/function scrollLyricTo/.test(appjs)) {
+  err('缺少 scrollLyricTo() —— 歌词无法居中滚动');
+} else ok('歌词滚动自己算 scrollTop（只动歌词容器，不牵动整页）');
+
+/* 'auto' 会听 CSS 的 scroll-behavior: smooth，导致首次渲染/跳转时长距离惯性滑动 */
+if (/scrollTo\(\{[^}]*behavior:\s*instant\s*\|\|\s*far\s*\?\s*'auto'/.test(appjs)) {
+  err("scrollTo 的 behavior 用了 'auto' —— 它的含义是'听 CSS 的'，配上 scroll-behavior:smooth 就永远平滑，跳转时会长距离滑行");
+} else if (!/'instant'/.test(appjs)) {
+  err("scrollTo 没有用 behavior:'instant' —— 刚渲染/刚跳转时会看到长距离惯性滑动");
+} else ok("跳转/重渲染用 behavior:'instant'，逐句跟进用 smooth");
+
+if (fail === 0) console.log('全部静态自检通过 ✅（共 18 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

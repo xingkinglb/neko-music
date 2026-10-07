@@ -993,6 +993,7 @@ function bindEvents() {
     try { progress.releasePointerCapture(e.pointerId); } catch (_) { /* 指针已经没了，忽略 */ }
     const d = (audio.duration && isFinite(audio.duration)) ? audio.duration : totalDuration();
     if (d) audio.currentTime = seekRatio * d;   // 松手才真的跳
+    syncLyric(true);   // 跳完立刻把歌词对到新位置，不等下一次 timeupdate
   }
   progress.addEventListener('pointerup', endSeek);
   progress.addEventListener('pointercancel', endSeek);
@@ -1019,7 +1020,16 @@ function bindEvents() {
     $('progressKnob').style.left = (ratio * 100) + '%';
     $('timeNow').textContent = fmtTime(audio.currentTime);
     $('timeTotal').textContent = fmtTime(d);
+
+    // ★ 歌词滚动的"发动机"就在这里：播放位置一变，就重新算当前该高亮哪一句。
+    //   少了这一行，歌词只会停在刚加载时那一句，之后再也不动。
+    syncLyric();
   });
+
+  // 跳转结束后立刻重新定位歌词。
+  // ★ 这一条不能省：暂停状态下 timeupdate 是不触发的，
+  //   没有它的话，暂停时拖进度条歌词不会跟着走。
+  audio.addEventListener('seeked', () => syncLyric(true));
 
   audio.addEventListener('ended', () => {
     if (loopMode === 'one') { audio.currentTime = 0; audio.play(); return; }
@@ -1119,6 +1129,12 @@ function bindEvents() {
      lyricState   —— 记住当前这首歌的歌词、加载状态
      loadLyrics() —— 真正去要歌词（自动 / 手动都走它）
      syncLyric()  —— 跟着播放进度，把当前句高亮 + 滚动到中间
+     scrollLyricTo() —— 只负责"把第 N 句滚到正中间"
+
+   ★ syncLyric 由三处驱动，缺一个就会出现"歌词不动"：
+       ① timeupdate —— 播放中，进度每变一次就对一次词（主力）
+       ② seeked     —— 跳转后（暂停时 timeupdate 不触发，必须靠它）
+       ③ 渲染完 / 展开面板 —— 刚拿到歌词、刚打开大屏时立刻定位
    ============================================================ */
 
 const lyricState = {
@@ -1288,11 +1304,36 @@ function syncLyric(force) {
     rows[i].classList.toggle('near', i === idx - 1 || i === idx + 1);
   }
 
-  // 把当前句滚到容器正中间
-  const cur = rows[idx];
-  if (cur && cur.scrollIntoView) {
-    cur.scrollIntoView({ block: 'center', behavior: force ? 'auto' : 'smooth' });
-  }
+  scrollLyricTo(idx, force);
+}
+
+/**
+ * 把第 idx 句滚到歌词容器的正中间。
+ * @param {number} idx 要居中的那句（下标）
+ * @param {boolean} instant true=瞬间到位（刚渲染 / 刚跳转），false=平滑滑过去
+ *
+ * ★ 这里刻意**不用** cur.scrollIntoView({block:'center'})：
+ *   它会把**所有能滚动的祖先**一起滚（包括整个窗口），在浮层里容易出现"整页抖一下"。
+ *   直接算容器的 scrollTop 就只动这一个盒子，稳，而且能自己夹住上下边界。
+ */
+function scrollLyricTo(idx, instant) {
+  const box = $('lyricBox');
+  if (!box) return;
+  const cur = box.children[idx];
+  if (!cur) return;
+
+  // 想让这一句居中：目标 = 它顶部到容器顶部的距离 - 一半容器高 + 半行高
+  const target = cur.offsetTop - box.clientHeight / 2 + cur.offsetHeight / 2;
+  const max = Math.max(0, box.scrollHeight - box.clientHeight);
+  const top = Math.min(Math.max(0, target), max);   // 夹在 [0, 最底] 之间，别滚出界
+
+  // 差得远（比如刚跳到副歌）就瞬间到位，差得近就平滑滑过去，看着不突兀。
+  // ★ 必须写 'instant' 而不是 'auto'：'auto' 在规范里的意思是"听 CSS 的"，
+  //   而 .lyric-box 上写了 scroll-behavior: smooth，写 auto 就永远都是平滑的，
+  //   刚渲染 / 刚跳转时会看到一段长长的"惯性滑动"。
+  const far = Math.abs(box.scrollTop - top) > box.clientHeight * 1.2;
+  if (box.scrollTo) box.scrollTo({ top, behavior: instant || far ? 'instant' : 'smooth' });
+  else box.scrollTop = top;
 }
 
 /** 刷新「词」按钮的样子（加载中 / 已加载 / 没字幕） */
