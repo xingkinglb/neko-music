@@ -140,6 +140,19 @@ ul { list-style: none; }
     pointer-events: none;
   }
 
+/* 视频背景：铺满整层、等比裁切（object-fit:cover），默认藏起来。
+   只有 settings.bg.kind === 'video' 时才由 applyAppearance() 加上 .on 显示。
+   z-index:-1 让它垫在"主题光晕 / 黑纱"这两个伪元素下面 ——
+   于是压暗（--bg-dim）和模糊（--bg-blur）对它同样生效，跟图片背景表现一致。 */
+.bg-layer #bgVideo {
+  position: absolute;
+  inset: 0;
+  object-fit: cover;
+  z-index: -1;
+  display: none;
+}
+.bg-layer #bgVideo.on { display: block; }
+
 /* ---------- 整体布局 ---------- */
 .app {
   display: grid;

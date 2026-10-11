@@ -22,6 +22,7 @@ const rawAppjs = read('src/ui/app.js');
 const appjs = stripLine(stripBlock(rawAppjs));
 const preload = stripBlock(read('src/preload.js'));
 const mainjs = stripBlock(read('src/main.js'));
+const bgproto = stripBlock(read('src/bg-protocol.js'));
 const gitignore = read('.gitignore');
 
 let fail = 0;
@@ -298,9 +299,14 @@ if (!/function setUserCookie[\s\S]*?!\/=\/\.test\(t\)/.test(biliSrc)) {
 /* ---- 26) 发现页 ---- */
 console.log('\n[25] 发现页：');
 const navBlock = (html.match(/<nav class="nav" id="nav">([\s\S]*?)<\/nav>/) || [])[1] || '';
-if (!/data-view="discovery"[\s\S]*?<span>发现<\/span>[\s\S]*?data-view="search"/.test(navBlock)) {
-  err('侧边栏「发现」没有排在「搜索」之前');
-} else ok('侧边栏「发现」位于「搜索」之前');
+// 侧栏已去掉「搜索」入口（它点进去只是一句占位提示，而顶部搜索栏随时能搜）；
+// 现在要求：侧栏没有 search 项，且第一项是「发现」。
+const firstView = (navBlock.match(/data-view="([^"]+)"/) || [])[1];
+if (/data-view="search"/.test(navBlock)) {
+  err('侧边栏又出现了「搜索」入口（本轮已按用户要求去掉）');
+} else if (firstView !== 'discovery') {
+  err(`侧边栏第一项不是「发现」（现在是 ${firstView}）`);
+} else ok('侧边栏无「搜索」入口，且「发现」排在第一');
 if (!/const DISCOVERY_KEYWORDS = \['歌曲', '音乐'\]/.test(appjs) || !/api\('search', keyword, 1\)/.test(appjs)) {
   err('发现页没有通过现有搜索 API 查询「歌曲」和「音乐」');
 } else ok('发现页通过现有搜索 API 查询歌曲与音乐');
@@ -934,7 +940,9 @@ console.log('\n[29] 详情页返回：');
 
   if (!/parsedOrigin\s*=\s*null;\s*\n\s*currentView\s*=\s*'parsed'/.test(appjs))
     err('从链接框直接解析时没有清掉 parsedOrigin（返回按钮会指向错误的来路）');
-  else ok('粘贴链接解析时清掉来路 → 返回按钮回到搜索页');
+  else if (!/parsedOrigin\s*\?\s*`← 返回\$\{parsedOrigin\.label/.test(appjs) || !/:\s*'← 返回发现'/.test(appjs))
+    err('详情页"没有来路"时的返回按钮文案没改成「← 返回发现」');
+  else ok('粘贴链接解析时清掉来路 → 返回按钮回到「发现」首页');
 }
 
 /* ---- 30) 播放队列 = 来源界面的快照 ---- */
@@ -1140,5 +1148,117 @@ console.log('\n[33] 合集摊平进播放序列（顺序/随机/循环都算上�
   }
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 35 大类检查）');
+/* ---- 36) 启动默认进「发现」+ 侧栏高亮跟着界面走 ---- */
+console.log('\n[36] 启动默认「发现」+ 侧栏高亮同步：');
+{
+  if (!/let currentView = 'discovery';/.test(appjs))
+    err('currentView 初值不是 discovery（启动会停在空搜索页）');
+  else ok("启动默认落在「发现」（currentView 初值 = 'discovery'）");
+
+  if (!/function syncNavHighlight\(/.test(appjs)) err('缺少 syncNavHighlight()：侧栏高亮不会跟着界面走');
+  else if (!/syncNavHighlight\(\);/.test(appjs)) err('renderAll() 没有调用 syncNavHighlight()');
+  else if (!/n\.dataset\.view === currentView/.test(appjs)) err('syncNavHighlight() 没有按 currentView 点亮对应项');
+  else ok('侧栏高亮由 renderAll → syncNavHighlight() 统一刷（不再只在点侧栏时更新）');
+
+  // nav 点击处理里不该再手动改 class（否则和 syncNavHighlight 两套逻辑打架）
+  if (/querySelectorAll\('\.nav-item'\)\.forEach\(\(n\)\s*=>\s*n\.classList\.remove\('active'\)\)/.test(appjs))
+    err('nav 点击处理里还留着手动改 class 的旧写法（和 syncNavHighlight 重复）');
+  else ok('nav 点击处理已改为只设 currentView，高亮交给 syncNavHighlight');
+
+  // "回退到搜索页"的地方都要改指「发现」，只剩顶部搜索框那 1 处切到 search
+  const searchSet = (appjs.match(/currentView = 'search'/g) || []).length;
+  if (searchSet !== 1) {
+    err(`还有 ${searchSet} 处把 currentView 设成 'search'（只应剩顶部搜索框那 1 处）`);
+  } else if (!/currentView = 'search';\s*\n\s*doSearch\(kw, 1\);/.test(appjs)) {
+    err("剩下的那处 search 不是顶部搜索框的入口");
+  } else if (!/if \(!upState\) \{ currentView = 'discovery'; renderAll\(\); return; \}/.test(appjs)) {
+    err('UP 页无数据时的回退没改指「发现」');
+  } else if (!/if \(id === 'btnUpBack'\) \{ currentView = 'discovery'; renderAll\(\); return; \}/.test(appjs)) {
+    err('UP 页「← 返回」没改指「发现」');
+  } else ok('只剩顶部搜索框 1 处切到搜索结果页，其它回退都改指「发现」');
+}
+
+/* ---- 37) 视频背景（主进程）：bg:// 流式 + Range + 视频类型 + CSP ---- */
+console.log('\n[37] 视频背景 · 主进程通道：');
+{
+  // 协议实现抽在 bg-protocol.js 里（main.js 负责传目录并注册）
+  if (!/registerBgProtocol\(BG_DIR\)/.test(mainjs) || !/require\('\.\/bg-protocol'\)/.test(mainjs))
+    err('main.js 没有把 bg:// 协议交给 bg-protocol.js 注册');
+  else ok('main.js 把 bg:// 协议交给 bg-protocol.js（传 BG_DIR 注册）');
+
+  if (!/fs\.createReadStream\(file, \{ start, end \}\)/.test(bgproto))
+    err('bg:// 还在一次性读整份文件（视频会吃满内存）—— 要改成 createReadStream 分段读');
+  else ok('bg:// 改用 createReadStream 分段读（视频不再一次性进内存）');
+
+  if (!/Content-Range/.test(bgproto) || !/status = 206/.test(bgproto) || !/Accept-Ranges/.test(bgproto))
+    err('bg:// 没实现 Range（视频拖动 / 循环回绕会失败）');
+  else ok('bg:// 支持 Range：返回 206 + Content-Range + Accept-Ranges');
+
+  if (!/Readable\.toWeb\(/.test(bgproto)) err('Node 流没有转成网页的 ReadableStream（Response 拿不到 body）');
+  else ok('Node 文件流转成 ReadableStream 交给 Response');
+
+  if (!/require\('stream'\)/.test(bgproto)) err("没引入 require('stream')");
+  else ok("引入了 require('stream') 的 Readable");
+
+  const missV = ['.mp4', '.webm', '.mov'].filter((e) => !bgproto.includes("'" + e + "'"));
+  if (missV.length) err(`BG_MIME 缺视频类型：${missV.join(' / ')}`);
+  else ok('BG_MIME 含 mp4 / webm / mov');
+
+  if (!/BG_VIDEO_MAX_MB/.test(bgproto)) err('没有视频大小上限（几十上百 MB 的视频会让界面卡住）');
+  else if (!/isVideo && sizeMB > BG_VIDEO_MAX_MB/.test(mainjs)) err('没有对超限视频给出提示并拒绝');
+  else ok('视频有大小上限，超限会被拒绝并提示换小的');
+
+  if (!/isVideo\s*\?\s*'video'\s*:\s*'image'/.test(mainjs)) err("bg:pick 没有按 kind 区分图片 / 视频");
+  else ok("bg:pick 支持 kind='image' / 'video' 两种选择");
+
+  if (!/media-src 'self' bili: bg:/.test(html)) err('CSP 的 media-src 没放行 bg: —— 视频会被安全策略拦下');
+  else ok('CSP media-src 放行了 bg:（视频能加载）');
+}
+
+/* ---- 38) 视频背景（渲染层）：video 元素 + 显示分支 + 存档兜底 + 设置交互 ---- */
+console.log('\n[38] 视频背景 · 渲染层：');
+{
+  if (!/id="bgVideo"/.test(html)) err('index.html 背景层里没有 <video id="bgVideo">');
+  else ok('背景层里有 <video id="bgVideo">');
+
+  if (!/\.bg-layer #bgVideo\b/.test(css) || !/object-fit:\s*cover/.test(css))
+    err('#bgVideo 没有铺满 + object-fit:cover 的样式');
+  else ok('#bgVideo 铺满整层并等比裁切');
+
+  if (!/s\.bg\.kind === 'video'/.test(appjs)) err("applyAppearance() 没有按 settings.bg.kind 区分图片 / 视频");
+  else ok('applyAppearance() 按 bg.kind 显示图片或视频');
+
+  if (!/v\.play\(\)/.test(appjs) || !/v\.pause\(\)/.test(appjs))
+    err('视频背景没有 play/pause（切走时不会停，白耗电）');
+  else ok('视频背景有 play / pause（切回图片或最小化时会停）');
+
+  if (!/v\.muted = vv\.muted !== false/.test(appjs) || !/v\.loop\s*=\s*vv\.loop\s*!== false/.test(appjs))
+    err('视频的静音 / 循环没有从设置读出来');
+  else ok('视频的静音 / 循环 / 速度都从设置读出来');
+
+  if (!/DB\.settings\.bg\.kind = DB\.settings\.bg\.kind === 'video' \? 'video' : 'image'/.test(appjs))
+    err('migrateSettings() 没有给 bg.kind 兜底（老存档会读出 undefined）');
+  else if (!/DB\.settings\.bg\.video = \{/.test(appjs))
+    err('migrateSettings() 没有给 bg.video 补默认值');
+  else ok('老存档零迁移：缺 kind → image，缺 video → 补默认');
+
+  if (!/id="btnPickBgVideo"/.test(html) || !/api\('pickVideoBackground'\)/.test(appjs))
+    err('设置面板没有「选择视频」按钮，或没绑定到 IPC');
+  else ok('设置面板有「选择视频」按钮且绑定了 IPC');
+
+  if (!/pickVideoBackground:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('bg:pick',\s*'video'\)/.test(preload))
+    err('preload 没有暴露 pickVideoBackground');
+  else ok("preload 暴露了 pickVideoBackground（走 bg:pick + 'video'）");
+
+  if (!/id="chkVideoMuted"/.test(html) || !/id="chkVideoLoop"/.test(html) || !/id="rngVideoSpeed"/.test(html))
+    err('视频专属开关（静音 / 循环 / 速度）不齐');
+  else ok('视频专属开关齐全：静音 / 循环 / 播放速度');
+
+  // 换背景时要把 kind 同步切过去，否则会"选了图片却还在播视频"
+  if (!/DB\.settings\.bg\.kind = 'image';/.test(appjs) || !/DB\.settings\.bg\.kind = 'video';/.test(appjs))
+    err('换背景时没有同步切换 kind（选了图却还在播视频）');
+  else ok('换图片 / 换视频时 kind 同步切换');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 38 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

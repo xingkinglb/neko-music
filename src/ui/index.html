@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' bili:; img-src 'self' bg: https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+        content="default-src 'self' bili:; img-src 'self' bg: https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili: bg:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
   <title>Neko Music</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -199,8 +199,12 @@
   它是 body 的第一个孩子，压在 .app 下面（z-index 0 vs 1）。
   inset 故意写成 -24px（比窗口大一圈），是为了藏住模糊时边缘露出的白边。
   注意：它只有 pointer-events:none，永远不会挡住鼠标点击。
+  里面有两种壁纸：--bg-image（图片，走 CSS 背景）和 <video id="bgVideo">（视频，走元素）。
+  同一时刻只用其中一种，由 applyAppearance() 按 settings.bg.kind 决定显示哪个。
 -->
-<div class="bg-layer" id="bgLayer"></div>
+<div class="bg-layer" id="bgLayer">
+  <video id="bgVideo" muted loop playsinline></video>
+</div>
 
 <div class="app">
 
@@ -226,11 +230,11 @@
   <!-- ============ 左侧边栏 ============ -->
   <aside class="sidebar">
     <nav class="nav" id="nav">
-      <div class="nav-item" data-view="discovery">
+      <!-- 启动默认停在「发现」（active 由界面启动时按 currentView 统一刷，见 syncNavHighlight）。
+           原来的「搜索」入口已去掉：它点进去只是一句占位提示，而顶部搜索栏随时能搜。
+           搜索功能本身没删 —— 顶部搜索栏回车后仍会渲染「搜索结果页」。 -->
+      <div class="nav-item active" data-view="discovery">
         <span class="ico"><svg class="ic"><use href="#i-note"/></svg></span><span>发现</span>
-      </div>
-      <div class="nav-item active" data-view="search">
-        <span class="ico"><svg class="ic"><use href="#i-search"/></svg></span><span>搜索</span>
       </div>
       <div class="nav-item" data-view="favorites">
         <span class="ico"><svg class="ic"><use href="#i-heart"/></svg></span><span>我喜欢</span>
@@ -465,12 +469,32 @@
         </div>
 
         <div class="field">
-          <div class="field-label">背景图片</div>
+          <div class="field-label">背景（图片 / 视频）</div>
           <div class="btn-row">
             <button class="ghost-btn" id="btnPickBg">选择图片</button>
+            <button class="ghost-btn" id="btnPickBgVideo">选择视频</button>
             <button class="ghost-btn" id="btnClearBg">清除背景</button>
           </div>
           <div class="field-hint" id="bgHint">当前：默认深色背景</div>
+        </div>
+
+        <!-- 视频背景专属开关：只在背景是视频时显示（见 syncSettingsUI） -->
+        <div class="field" id="bgVideoOpts" style="display:none">
+          <label class="switch-row">
+            <span class="switch-label">视频静音</span>
+            <input type="checkbox" id="chkVideoMuted" checked />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">建议开着，否则背景视频的声音会和歌打架。</div>
+
+          <label class="switch-row" style="margin-top:12px">
+            <span class="switch-label">循环播放</span>
+            <input type="checkbox" id="chkVideoLoop" checked />
+            <span class="switch"></span>
+          </label>
+
+          <div class="field-label" style="margin-top:14px">播放速度 <b id="valVideoSpeed">1×</b></div>
+          <input type="range" id="rngVideoSpeed" min="0.5" max="2" step="0.25" value="1" />
         </div>
 
         <div class="field">

@@ -96,7 +96,7 @@ let DB = {
   settings: {
     theme: 'pink',
     volume: 80,
-    bg:    { file: null, dim: 0.55, blur: 0 },
+    bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 } },
     glass: { blur: 18, alpha: 0.55 },
     autoLyric: false,
   },
@@ -105,8 +105,9 @@ let DB = {
 // 当前播放队列
 let queue = { tracks: [], index: -1, name: '' };
 
-// 界面当前所处的页面，比如 'search' / 'favorites' / 'history' / 'playlist:xxx'
-let currentView = 'search';
+// 界面当前所处的页面，比如 'discovery' / 'search' / 'favorites' / 'history' / 'playlist:xxx'
+// ★ 启动默认落在「发现」（一打开就有推荐，不用先看空搜索页）。
+let currentView = 'discovery';
 
 /** 把内存中的数据写到硬盘（每次改动后调用）。
  * ★ 必须走 api()：主进程统一把结果包成 {ok,data}，直接调 window.neko.saveData
@@ -148,7 +149,7 @@ function persistLater() {
 const DEFAULT_SETTINGS = {
   theme: 'pink',
   volume: 80,
-  bg:    { file: null, dim: 0.55, blur: 0 },
+  bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 } },
   glass: { blur: 18, alpha: 0.55 },
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
@@ -175,6 +176,17 @@ function migrateSettings() {
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
+
+  // 背景：老存档只有 {file, dim, blur}，没有 kind / video —— 补默认值。
+  //   kind 缺省 = 'image' → 行为跟以前完全一样（旧存档零迁移）；
+  //   video 子项逐项夹住，防止存档被手改成 speed=999 这种离谱值。
+  const bgv = (DB.settings.bg.video && typeof DB.settings.bg.video === 'object') ? DB.settings.bg.video : {};
+  DB.settings.bg.kind = DB.settings.bg.kind === 'video' ? 'video' : 'image';
+  DB.settings.bg.video = {
+    muted: bgv.muted !== false,   // 默认静音（避免背景视频的声音跟歌打架）
+    loop:  bgv.loop  !== false,   // 默认循环
+    speed: (typeof bgv.speed === 'number' && bgv.speed >= 0.5 && bgv.speed <= 2) ? bgv.speed : 1,
+  };
 
   // 桌面歌词的设置：老存档没有，就给一套默认值；有就逐项夹到合法范围，
   // 防止存档被手改过之后字号变成 999、不透明度变成 -3 这种离谱值。
@@ -210,16 +222,40 @@ function applyAppearance() {
   root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 18) + 'px');
   root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));
 
-  // 3) 背景图
+  // 3) 背景：图片走 CSS 背景（--bg-image），视频走 <video id="bgVideo">；同一时刻只用一种
   const layer = $('bgLayer');
   if (layer) {
     const has = !!s.bg.file;
-    layer.style.setProperty('--bg-image', has ? `url("bg://local/${s.bg.file}")` : 'none');
+    const isVideo = has && s.bg.kind === 'video';
+    const isImage = has && !isVideo;
+
+    layer.style.setProperty('--bg-image', isImage ? `url("bg://local/${s.bg.file}")` : 'none');
     layer.style.setProperty('--bg-dim',  String(s.bg.dim  ?? 0.55));
     // blur(0px) 会让多余的图层一直占着显卡，直接用 none 更省
     const b = Number(s.bg.blur) || 0;
     layer.style.setProperty('--bg-blur', b > 0 ? b + 'px' : '0px');
     layer.style.filter = b > 0 ? `blur(${b}px)` : 'none';
+
+    // 视频背景：显示/隐藏 + 把静音/循环/速度刷上去
+    const v = $('bgVideo');
+    if (v) {
+      if (isVideo) {
+        const vv = s.bg.video || {};
+        const url = `bg://local/${s.bg.file}`;
+        if (v.getAttribute('src') !== url) v.setAttribute('src', url);
+        v.muted = vv.muted !== false;
+        v.loop  = vv.loop  !== false;
+        v.playbackRate = (typeof vv.speed === 'number' && vv.speed > 0) ? vv.speed : 1;
+        v.classList.add('on');
+        // 静音视频一般能自动播；万一被拦，忽略即可（用户点一下界面就会开始）
+        const p = v.play();
+        if (p && p.catch) p.catch(() => {});
+      } else {
+        v.classList.remove('on');
+        try { v.pause(); } catch (e) { /* 还没设过 src 时忽略 */ }
+      }
+    }
+
     document.body.classList.toggle('has-bg', has);
   }
 
@@ -1043,7 +1079,7 @@ async function loadUp(pn) {
 }
 
 function renderUp() {
-  if (!upState) { currentView = 'search'; renderSearch(); return; }
+  if (!upState) { currentView = 'discovery'; renderAll(); return; }
   const loaded = upState.list.length;
 
   const head = `
@@ -1113,6 +1149,7 @@ async function renderSearch() {
 async function doSearch(keyword, page = 1) {
   searchKeyword = keyword;
   searchPage = page;
+  syncNavHighlight();   // 搜索结果是"临时页"，进来就把侧栏高亮清掉（不然会停在上一项）
   content().innerHTML = `<div class="loading"><div class="spinner"></div>正在 B 站搜索…</div>`;
   try {
     const res = await api('search', keyword, page);
@@ -1258,10 +1295,10 @@ function renderParsed() {
   const hasSeason = seasonTracks.length > 0;
   const isMultiP = pages.length > 1;
 
-  // 从列表点进来 → 回原来那一页；直接粘链接解析的 → 回搜索页
+  // 从列表点进来 → 回原来那一页；直接粘链接解析的 → 回「发现」首页
   const backLabel = parsedOrigin
     ? `← 返回${parsedOrigin.label ? '：' + parsedOrigin.label : ''}`
-    : '← 返回搜索';
+    : '← 返回发现';
 
   content().innerHTML = `
     <div class="block-head">
@@ -1332,7 +1369,7 @@ function renderHistory() {
 /* ---------- 页面 5：某个歌单 ---------- */
 function renderPlaylist(playlistId) {
   const pl = DB.playlists.find((p) => p.id === playlistId);
-  if (!pl) return renderSearch();
+  if (!pl) { currentView = 'discovery'; return renderAll(); }   // 歌单没了（被删）→ 回「发现」首页
   currentView = 'playlist:' + playlistId;
   content().innerHTML = `
     <div class="block-head">
@@ -1435,6 +1472,7 @@ function renderPlaylistSidebar() {
 /** 根据 currentView 重新画整个界面 */
 function renderAll() {
   renderPlaylistSidebar();
+  syncNavHighlight();   // 侧栏高亮永远跟着"当前在哪一页"走（不再只在点侧栏时才更新）
   if (currentView === 'search') renderSearch();
   else if (currentView === 'discovery') {
     renderDiscovery();
@@ -1445,6 +1483,21 @@ function renderAll() {
   else if (currentView === 'up') renderUp();
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
   else if (currentView === 'parsed') renderParsed();
+}
+
+/**
+ * 按 currentView 刷新侧栏高亮。
+ * 为什么要有它：以前高亮只在"点侧栏"那一刻改（见 bindEvents 的 nav 点击），
+ * 于是从顶部搜索栏搜歌时，界面已经换成搜索结果页，侧栏却还亮着上一项，对不上。
+ * 注意：搜索结果页（search）、UP 主页（up）、详情页（parsed）都是"临时页"，
+ * 不属于侧栏任何一个分类 —— 这时四项都不点亮，反而更准。
+ */
+function syncNavHighlight() {
+  const nav = $('nav');
+  if (!nav) return;
+  nav.querySelectorAll('.nav-item').forEach((n) => {
+    n.classList.toggle('active', n.dataset.view === currentView);
+  });
 }
 
 /* ============================================================
@@ -1612,7 +1665,7 @@ async function deletePlaylist(id) {
   if (!sure) return;
   DB.playlists = DB.playlists.filter((p) => p.id !== id);
   await persist();
-  currentView = 'search';
+  currentView = 'discovery';   // 删完当前歌单，回「发现」首页（侧栏已经没有搜索入口了）
   renderAll();
   toast(`已删除歌单「${pl.name}」`);
 }
@@ -1638,7 +1691,20 @@ function syncSettingsUI() {
     b.classList.toggle('on', b.dataset.theme === s.theme);
   });
 
-  $('bgHint').textContent = s.bg.file ? '当前：自定义背景 ✓' : '当前：默认深色背景';
+  // 背景提示 + 视频专属开关（只在背景是视频时显示）
+  const bgKind = s.bg.kind === 'video' ? 'video' : 'image';
+  $('bgHint').textContent = s.bg.file
+    ? (bgKind === 'video' ? '当前：自定义视频背景 ✓' : '当前：自定义图片背景 ✓')
+    : '当前：默认深色背景';
+  const vOpts = $('bgVideoOpts');
+  if (vOpts) {
+    vOpts.style.display = (s.bg.file && bgKind === 'video') ? '' : 'none';
+    const vv = s.bg.video || {};
+    $('chkVideoMuted').checked = vv.muted !== false;
+    $('chkVideoLoop').checked  = vv.loop  !== false;
+    $('rngVideoSpeed').value = vv.speed ?? 1;
+    $('valVideoSpeed').textContent = (vv.speed ?? 1) + '×';
+  }
 
   $('rngDim').value = Math.round((s.bg.dim ?? 0.55) * 100);
   $('valDim').textContent = $('rngDim').value + '%';
@@ -1702,6 +1768,7 @@ function bindSettings() {
       if (!res) return;                       // 用户点了取消
       if (res.error) { toast(res.error); return; }
       DB.settings.bg.file = res.file;
+      DB.settings.bg.kind = 'image';          // 换回图片背景
       applyAppearance(); syncSettingsUI(); persist();
       toast(res.sizeMB > 20
         ? `背景已换（${res.sizeMB}MB，图有点大，可能会略卡）`
@@ -1711,9 +1778,42 @@ function bindSettings() {
     }
   });
 
+  /* ---- 背景视频 ---- */
+  $('btnPickBgVideo').addEventListener('click', async () => {
+    try {
+      const res = await api('pickVideoBackground');
+      if (!res) return;                       // 用户点了取消
+      if (res.error) { toast(res.error); return; }
+      DB.settings.bg.file = res.file;
+      DB.settings.bg.kind = 'video';
+      applyAppearance(); syncSettingsUI(); persist();
+      toast('视频背景已换 ✓');
+    } catch (err) {
+      toast('选视频失败：' + err.message);
+    }
+  });
+
+  // 视频专属：静音 / 循环 / 播放速度
+  $('chkVideoMuted').addEventListener('change', (e) => {
+    DB.settings.bg.video.muted = e.target.checked;
+    applyAppearance(); persist();
+  });
+  $('chkVideoLoop').addEventListener('change', (e) => {
+    DB.settings.bg.video.loop = e.target.checked;
+    applyAppearance(); persist();
+  });
+  $('rngVideoSpeed').addEventListener('input', (e) => {
+    const v = Number(e.target.value);
+    $('valVideoSpeed').textContent = v + '×';
+    DB.settings.bg.video.speed = v;
+    applyAppearance();
+    persistLater();
+  });
+
   $('btnClearBg').addEventListener('click', async () => {
     try { await api('clearBackground'); } catch (e) { /* 目录本来就是空的 */ }
     DB.settings.bg.file = null;
+    DB.settings.bg.kind = 'image';
     applyAppearance(); syncSettingsUI(); persist();
     toast('已恢复默认背景');
   });
@@ -1736,11 +1836,22 @@ function bindSettings() {
   /* ---- 恢复默认外观 ---- */
   $('btnResetAppearance').addEventListener('click', () => {
     DB.settings.theme = 'pink';
-    DB.settings.bg    = { file: null, dim: 0.55, blur: 0 };
+    DB.settings.bg    = { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 } };
     DB.settings.glass = { blur: 18, alpha: 0.55 };
     api('clearBackground').catch(() => {});
     applyAppearance(); syncSettingsUI(); persist();
     toast('外观已恢复默认');
+  });
+
+  /* ---- 背景视频省电：窗口被最小化 / 切到后台时暂停，回前台再接着播 ---- */
+  document.addEventListener('visibilitychange', () => {
+    const v = $('bgVideo');
+    if (!v) return;
+    if (document.hidden) { v.pause(); return; }
+    if (DB.settings.bg.kind === 'video' && DB.settings.bg.file) {
+      const p = v.play();
+      if (p && p.catch) p.catch(() => {});
+    }
   });
 
   /* ---- 保存 Cookie ---- */
@@ -1807,7 +1918,7 @@ function bindEvents() {
     const text = $('linkInput').value.trim();
     if (!text) { toast('先粘贴一个 B 站链接或 BV 号'); return; }
     if (/space\.bilibili\.com/.test(text)) { doImportFav(text); return; }
-    parsedOrigin = null;   // 这是从链接框直接解析的，没有"来路"，返回按钮就回搜索页
+    parsedOrigin = null;   // 这是从链接框直接解析的，没有"来路"，返回按钮就回「发现」首页
     currentView = 'parsed';
     doParseLink(text);
   });
@@ -1819,10 +1930,8 @@ function bindEvents() {
   $('nav').addEventListener('click', (e) => {
     const item = e.target.closest('.nav-item');
     if (!item) return;
-    document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
-    item.classList.add('active');
     currentView = item.dataset.view;
-    renderAll();
+    renderAll();   // 高亮由 renderAll → syncNavHighlight() 统一刷，这里不再手动改 class
   });
 
   /* ---- 设置面板（外观 + Cookie） ---- */
@@ -1919,7 +2028,7 @@ function bindEvents() {
     // 这样按钮里万一包了子元素，点子元素也能正确命中按钮本身）
     const idEl = e.target.closest('[id]');
     const id = idEl ? idEl.id : '';
-    // 详情页返回：回原来那一页（直接粘链接解析进来的那种就回搜索页）
+    // 详情页返回：回原来那一页（直接粘链接解析进来的那种没有"来路"，就回「发现」首页）
     if (id === 'btnParsedBack') {
       if (parsedOrigin) {
         const o = parsedOrigin;
@@ -1928,7 +2037,7 @@ function bindEvents() {
         renderAll();
         content().scrollTop = o.scroll || 0;
       } else {
-        currentView = 'search';
+        currentView = 'discovery';
         renderAll();
       }
       return;
@@ -1939,7 +2048,7 @@ function bindEvents() {
     if (id === 'btnPlayDiscovery') { startFromView(discoveryResults, 0); return; }
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
-    if (id === 'btnUpBack') { currentView = 'search'; renderAll(); return; }
+    if (id === 'btnUpBack') { currentView = 'discovery'; renderAll(); return; }
     if (id === 'btnPlayUp') { if (upState) startFromView(upState.list, 0); return; }
     if (id === 'btnMoreUp') { if (upState) loadUp(upState.page + 1); return; }
     if (id === 'btnPlayParsed') { startFromView(parsedView.tracks, 0); return; }

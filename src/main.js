@@ -47,13 +47,11 @@ const DATA_FILE = path.join(app.getPath('userData'), 'neko-data.json');
 const COOKIE_FILE = path.join(app.getPath('userData'), 'cookie.txt');
 
 // ---- 自定义背景 ----
-// 用户选的图片会被"复制"到这个专属目录里，而不是直接引用原图。
-// 这样你把原图删了、移动了，背景也不会变成裂图。
+// 用户选的图片/视频会被"复制"到这个专属目录里，而不是直接引用原文件。
+// 这样你把原文件删了、移动了，背景也不会变成裂图。
+// bg:// 协议的实现（含流式 + Range）抽在 bg-protocol.js 里，方便离线实测直接加载。
 const BG_DIR = path.join(app.getPath('userData'), 'backgrounds');
-const BG_MIME = {
-  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
-};
+const { BG_MIME, BG_VIDEO_MAX_MB, registerBgProtocol, clearBgDir } = require('./bg-protocol');
 
 let mainWindow = null;
 let closeInProgress = false;
@@ -129,54 +127,10 @@ function registerBiliProtocol() {
 }
 
 // ============================================================
-//  第 1.5 部分：bg:// 协议 —— 背景图片的"专用取件窗口"
+//  第 1.5 部分：bg:// 协议 —— 见 bg-protocol.js
 // ============================================================
-//  只允许读取 backgrounds/ 目录里的文件。两道安全闸缺一不可：
-//   ① 文件名必须是纯字母数字（挡掉 ".."、"\"、斜杠这类路径穿越写法）
-//   ② 拼出来的绝对路径必须还在 BG_DIR 里面（挡掉符号链接之类的逃逸）
-function registerBgProtocol() {
-  protocol.handle('bg', async (request) => {
-    try {
-      const u = new URL(request.url);
-      const name = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
-
-      if (!/^[\w.\-]+$/.test(name)) {
-        return new Response('文件名不合法', { status: 400 });
-      }
-
-      const file = path.resolve(BG_DIR, name);
-      if (!file.startsWith(BG_DIR + path.sep)) {
-        return new Response('越界访问被拒绝', { status: 403 });
-      }
-      if (!fs.existsSync(file)) {
-        return new Response('背景图不存在', { status: 404 });
-      }
-
-      const buf = fs.readFileSync(file);
-      const type = BG_MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
-      return new Response(buf, {
-        status: 200,
-        headers: { 'Content-Type': type, 'Content-Length': String(buf.length) },
-      });
-    } catch (err) {
-      console.error('[bg协议] 读取背景图失败：', err);
-      return new Response(String(err), { status: 500 });
-    }
-  });
-}
-
-/** 清空 backgrounds 目录（换背景时调用，避免旧图越堆越多） */
-function clearBgDir() {
-  try {
-    if (!fs.existsSync(BG_DIR)) return;
-    for (const f of fs.readdirSync(BG_DIR)) {
-      const p = path.join(BG_DIR, f);
-      if (fs.statSync(p).isFile()) fs.unlinkSync(p);
-    }
-  } catch (err) {
-    console.error('清理背景目录失败：', err);
-  }
-}
+//  （实现已抽到 bg-protocol.js：只读 backgrounds/ 目录 + 流式 + 支持 Range。
+//    抽出去是为了让离线实测能直接加载它、真发一个 Range 请求验证"视频边读边传"。）
 
 // ============================================================
 //  第 2.5 部分：右上角窗口按钮（自绘）
@@ -463,29 +417,41 @@ function registerHandlers() {
 
   // ---- 自定义背景 ----
   // 弹系统文件选择框 → 把选中的图复制到 backgrounds/ → 返回文件名
-  handle('bg:pick', async () => {
+  // ---- 自定义背景 ----
+  // 弹系统文件选择框 → 把选中的图片/视频复制到 backgrounds/ → 返回文件名
+  // kind: 'image'（默认，选图）| 'video'（选视频当背景）
+  handle('bg:pick', async (kind) => {
+    const isVideo = kind === 'video';
     const win = BrowserWindow.getFocusedWindow() || mainWindow;
     const res = await dialog.showOpenDialog(win, {
-      title: '选一张图片当背景',
+      title: isVideo ? '选一段视频当背景' : '选一张图片当背景',
       properties: ['openFile'],
-      filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
+      filters: isVideo
+        ? [{ name: '视频', extensions: ['mp4', 'webm', 'mov'] }]
+        : [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }],
     });
     if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
 
     const src = res.filePaths[0];
     const ext = path.extname(src).toLowerCase();
-    if (!BG_MIME[ext]) return { error: '这个格式不支持，换 png / jpg / webp 吧' };
+    if (!BG_MIME[ext]) {
+      return { error: isVideo ? '这个视频格式不支持，换 mp4 / webm 吧' : '这个格式不支持，换 png / jpg / webp 吧' };
+    }
 
     const sizeMB = fs.statSync(src).size / 1024 / 1024;
+    if (isVideo && sizeMB > BG_VIDEO_MAX_MB) {
+      return { error: `视频太大了（${sizeMB.toFixed(0)}MB），换一个小于 ${BG_VIDEO_MAX_MB}MB 的` };
+    }
+
     fs.mkdirSync(BG_DIR, { recursive: true });
-    clearBgDir();   // 一次只留一张，避免堆积
+    clearBgDir(BG_DIR);   // 一次只留一份（图片和视频共用这个目录，避免堆积）
 
     const name = 'bg-' + Date.now().toString(36) + ext;
     fs.copyFileSync(src, path.join(BG_DIR, name));
-    return { file: name, sizeMB: Number(sizeMB.toFixed(1)) };
+    return { file: name, kind: isVideo ? 'video' : 'image', sizeMB: Number(sizeMB.toFixed(1)) };
   });
 
-  handle('bg:clear', () => { clearBgDir(); return true; });
+  handle('bg:clear', () => { clearBgDir(BG_DIR); return true; });
 
   // ---- 桌面歌词（第二个窗口） ----
   // 主窗口负责"给内容"，这里负责"转发和操作窗口本身"。
@@ -710,7 +676,7 @@ app.whenReady().then(() => {
   }
 
   registerBiliProtocol();
-  registerBgProtocol();
+  registerBgProtocol(BG_DIR);
   registerHandlers();
   createWindow();
 

@@ -40,9 +40,12 @@ contextBridge.exposeInMainWorld('neko', {
 
   // ---------- 外观 ----------
   // 弹出系统文件选择框，让用户挑一张背景图（内部会复制到应用目录）
-  pickBackground: () => ipcRenderer.invoke('bg:pick'),
+  pickBackground: () => ipcRenderer.invoke('bg:pick', 'image'),
 
-  // 清掉已选的背景图
+  // 弹框挑一段视频当背景（视频背景）
+  pickVideoBackground: () => ipcRenderer.invoke('bg:pick', 'video'),
+
+  // 清掉已选的背景（图片或视频）
   clearBackground: () => ipcRenderer.invoke('bg:clear'),
 
   // ---------- 窗口控制（右上角自绘按钮） ----------
