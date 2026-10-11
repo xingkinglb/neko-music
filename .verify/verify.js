@@ -1113,7 +1113,32 @@ console.log('\n[33] 合集摊平进播放序列（顺序/随机/循环都算上�
   else if (!/if \(isCollectPart\(track\)\) return false;/.test(appjs))
     err('分P 行仍会挂上父合集的徽章（每一集都写"选集 132/134"，看不懂）');
   else ok('分P 行被认出是"合集中的一集"，不再挂父合集的徽章数量');
+
+  /* 隐私保险丝：使用数据（设置 / 歌单 / 收藏 / 历史 / B站Cookie / 背景图）
+     只准待在 %APPDATA%\neko-music\，一个字都不许进仓库。
+     这里查三件事：.gitignore 有没有保险条目、当前有没有被跟踪、历史里有没有出现过。 */
+  const gitignore = read('.gitignore');
+  const PRIVATE = ['neko-data.json', 'cookie.txt', 'backgrounds/'];
+  const noGuard = PRIVATE.filter((f) => !gitignore.includes(f));
+  if (noGuard.length) err(`.gitignore 缺隐私保险条目：${noGuard.join(' / ')}（将来误生成到项目目录就会被提交）`);
+  else ok('.gitignore 有隐私保险：存档 / Cookie / 背景图 都不会被提交');
+
+  try {
+    const { execSync } = require('child_process');
+    const run = (cmd) => execSync(cmd, { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    const tracked = run('git ls-files');
+    const leakedNow = PRIVATE.filter((f) => tracked.includes(f));
+    if (leakedNow.length) err(`仓库正在跟踪使用数据：${leakedNow.join(' / ')}（立刻 git rm --cached 掉）`);
+    else ok('仓库当前没有跟踪任何使用数据文件');
+
+    const history = run('git log --all --pretty=format: --name-only');
+    const leakedEver = PRIVATE.filter((f) => history.includes(f));
+    if (leakedEver.length) err(`历史提交里出现过使用数据：${leakedEver.join(' / ')}（推送前必须清理历史，否则永远擦不掉）`);
+    else ok('历史提交里从未出现过使用数据（推送不会翻出旧数据）');
+  } catch (_) {
+    // 没有 git 环境就跳过，不算失败（避免在别人机器上误报）
+  }
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 34 大类检查）');
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 35 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

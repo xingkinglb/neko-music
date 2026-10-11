@@ -9,3 +9,12 @@ dist/
 
 # 本机专用同步工具（作者自己的工作流，不适合放进公开仓库）
 同步到GitHub.bat
+
+# ===== 使用数据的保险丝（重点）=====
+# 你的使用数据（设置 / 歌单 / 收藏 / 播放历史 / B站Cookie / 自选背景图）
+# 实际存放在 %APPDATA%\neko-music\ 下，本来就不在项目目录里。
+# 下面几行是保险：万一哪天这些文件被误生成到项目目录，也绝不会被提交上传。
+neko-data.json
+neko-data.json.tmp
+cookie.txt
+backgrounds/
