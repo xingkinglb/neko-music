@@ -207,7 +207,15 @@ const DEFAULT_SETTINGS = {
   // v2.1.0：窗口状态 —— 上次是不是 mini、mini 展开没展开、完整模式下的窗口位置尺寸。
   // 缺省全为"不是 mini"，所以老存档零迁移，行为和以前一模一样。
   window: { mini: false, fullBounds: null, miniExpanded: false },
+  // v2.2.0：点 ✕ 想怎么关 —— 'ask' 每次询问 / 'quit' 彻底关闭 / 'tray' 缩小到任务栏。
+  // ★ 缺省 'ask'：托盘图标是这一轮新加的，第一次关窗问一下最不容易出误会
+  //   （用户以为关掉了、其实还在后台跑，或者反过来，两种都会挨骂）。
+  close: { action: 'ask' },
 };
+
+// 关窗行为的三种取值。★ 必须和主进程 src/app-menus.js 的 CLOSE_ACTIONS 一致
+// （verify.js 会拿两边对一下，防止以后改一边忘了另一边）。
+const CLOSE_ACTIONS = ['ask', 'quit', 'tray'];
 
 /** 这是一个合法的播放模式吗（以 PLAY_MODES 为唯一准绳，避免两处清单对不上） */
 function isPlayModeId(v) {
@@ -233,6 +241,11 @@ function migrateSettings() {
       miniExpanded: !!(old.window && old.window.mini && old.window.miniExpanded),
       fullBounds: (old.window && typeof old.window.fullBounds === 'object' && old.window.fullBounds)
         ? old.window.fullBounds : null,
+    },
+    // v2.2.0：关窗行为。老存档没有这一项 → 缺省"每次询问"（新加了托盘，第一次问一下最稳妥）。
+    // 值不在三种里（存档被手改坏了）也回落到"每次询问"。
+    close: {
+      action: CLOSE_ACTIONS.includes(old.close && old.close.action) ? old.close.action : DEFAULT_SETTINGS.close.action,
     },
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
@@ -581,6 +594,9 @@ function updatePlayBtn() {
   const b = $('btnPlay');
   if (!b) return;
   b.innerHTML = audio.paused ? ic('i-play') : ic('i-pause');
+  // ★ v2.2.0：播放状态一变就告诉主进程 —— 托盘菜单里那项要"播放 ⇄ 暂停"，
+  //   任务栏缩略图按钮也要换 ▶ / ‖ 图标。这里正是"播放状态刚变"的那个时机。
+  reportUiState();
 }
 
 /**
@@ -617,6 +633,7 @@ function setPlayMode(id, save) {
     btn.classList.toggle('on', m.id !== 'order');
   }
   if (save) { DB.settings.playMode = m.id; persistLater(); }
+  reportUiState();   // ★ v2.2.0：托盘菜单里「播放模式 ▸」那个打勾要跟着变
 }
 
 /** 判断两首歌是不是同一首（用 bvid + cid 当身份证） */
@@ -1536,13 +1553,20 @@ function bindMini() {
   window.neko.onWinMiniState((st) => {
     const on = !!st.on;
     const expanded = !!st.expanded;
-    if (mini.on === on && mini.expanded === expanded) return;
-    if (on && lyricState.showing) toggleLyrics(false);
-    applyMiniUI(on, expanded);
-    DB.settings.window = DB.settings.window || {};
-    DB.settings.window.mini = on;
-    DB.settings.window.miniExpanded = expanded;
-    persistLater();
+    const changed = !(mini.on === on && mini.expanded === expanded);
+    if (changed) {
+      if (on && lyricState.showing) toggleLyrics(false);
+      applyMiniUI(on, expanded);
+      DB.settings.window = DB.settings.window || {};
+      DB.settings.window.mini = on;
+      DB.settings.window.miniExpanded = expanded;
+      persistLater();
+    }
+    // ★ v2.2.0：这一句必须放在"状态没变就跳过"的**外面**。
+    //   踩过的坑：第一版写在里面，结果**第一次进 mini 时封面那块的位置根本传不出去**
+    //   （进 mini 时 setMini 已经先把 mini.on 置成 true 了，主进程回推的状态"没变"就被跳过）——
+    //   主进程拿不到 coverRect，任务栏缩略图就裁不了封面。
+    reportUiState();
   });
 
   // 完整模式下窗口被拖动 / 缩放后，主进程把新位置尺寸送回来 —— 存下来，下次打开还原
@@ -1555,6 +1579,180 @@ function bindMini() {
     };
     persistLater();
   });
+}
+
+/* ============================================================
+   第 3.8.6 部分：把界面状态告诉主进程（v2.2.0）
+   ------------------------------------------------------------
+   主进程要拿这些去画两样**系统画的东西**：
+     · 托盘菜单 —— 当前歌名 / 播放还是暂停 / 播放模式打勾 / 窗口模式打勾 / 歌词开关
+     · 任务栏缩略图上的三个按钮 —— "播放 / 暂停"是同一个按钮换图标
+   界面是这些状态的**唯一来源**，主进程只当镜子（它自己拿不到"在放哪首歌"）。
+
+   ★ 必须做"状态没变就不发"的过滤：这个函数会被频繁调到
+     （换歌、播放 / 暂停、甚至每 250 毫秒的进度推送都可能带一脚），
+     不拦一下，主进程就会把**原生菜单**反复重建。
+   ============================================================ */
+
+let lastUiStateKey = '';
+
+/** 关窗行为（存档里的 settings.close.action），永远返回三种之一 */
+function closeActionSetting() {
+  const v = DB.settings && DB.settings.close && DB.settings.close.action;
+  return CLOSE_ACTIONS.includes(v) ? v : 'ask';
+}
+
+function reportUiState() {
+  if (!window.neko || typeof window.neko.reportUiState !== 'function') return;
+  const cur = queue.tracks[queue.index];
+  const cover = $('npCover');
+  const cr = cover ? cover.getBoundingClientRect() : null;
+  const st = {
+    playing: !audio.paused && !!audio.src,
+    hasTrack: !!cur,
+    title: cur ? (cur.title || '') : '',
+    playMode,
+    lyricOn: !!lw().on,
+    lyricLocked: !!lw().locked,
+    closeAction: closeActionSetting(),
+    // mini 下主进程要用它把任务栏缩略图裁到封面那一块。
+    // ★ 由界面来量：封面在哪一块是**布局**的事，写死在主进程里，改一次 CSS 就错一次。
+    coverRect: (mini.on && cr && cr.width > 0)
+      ? { x: Math.round(cr.x), y: Math.round(cr.y), width: Math.round(cr.width), height: Math.round(cr.height) }
+      : null,
+  };
+  const key = JSON.stringify(st);
+  if (key === lastUiStateKey) return;   // 没变就别打扰主进程
+  lastUiStateKey = key;
+  window.neko.reportUiState(st);
+}
+
+/**
+ * 强制下一次上报一定发出去。
+ * ★ 什么时候需要：**改了设置、而主进程那边可能自己动过这个状态**的时候。
+ *   踩过的坑：用户在关窗弹窗里勾了「设为默认值」→ 主进程把 uiState.closeAction 自己改成 'tray'，
+ *   但界面这边的"上次发出去的快照"还停在 'ask'。之后用户去设置里改回「每次询问」，
+ *   算出来的 key 又变回 'ask' —— **正好和缓存撞上，这一次上报就被去重吞掉了**，
+ *   主进程还以为设置是 'tray'，下次点 ✕ 直接隐藏，不再弹窗。
+ */
+function forceReportUiState() {
+  lastUiStateKey = '';
+  reportUiState();
+}
+
+/* ============================================================
+   第 3.8.7 部分：关闭方式弹窗（v2.2.0）
+   ------------------------------------------------------------
+   什么时候会弹：主进程收到 close 事件、而存档里的 settings.close.action 是 'ask' 时，
+   它会发一条 win:ask-close 过来。用户在这里选完，回 win:close-choice。
+   选"缩小到任务栏"之后窗口会消失但**歌继续放**，点托盘图标能找回来。
+   ============================================================ */
+
+let closeChoiceBusy = false;
+
+function showCloseDialog() {
+  const mask = $('closeMask');
+  if (!mask) return;
+  closeChoiceBusy = false;
+  const chk = $('closeRemember');
+  if (chk) chk.checked = false;   // 每次弹都是"没勾"的状态，别把上次的勾记着
+  mask.classList.add('show');
+}
+
+function hideCloseDialog() {
+  const mask = $('closeMask');
+  if (mask) mask.classList.remove('show');
+}
+
+/** 用户选了：action 是 'quit'（彻底关闭）或 'tray'（缩小到任务栏） */
+async function finishCloseChoice(action, remember) {
+  if (closeChoiceBusy) return;   // 防连点：点两下别回两次
+  closeChoiceBusy = true;
+  hideCloseDialog();
+
+  try {
+    if (remember) {
+      DB.settings.close = { action };
+      syncCloseActionUI();
+      // ★ 必须**先存好**再告诉主进程：主进程收到 'quit' 之后马上就会真的退出，
+      //   那时候再来不及写盘，用户"设为默认"的勾就白打了。
+      await flushPersistence();
+      forceReportUiState();   // 主进程那边可能自己动过 closeAction，这里必须强推一次
+    }
+    window.neko.closeChoice(action, remember);
+  } finally {
+    // ★ 无论成败都要放开这个标记。
+    //   踩过的坑：第一版成功之后不复位，万一哪次主进程没再发 win:ask-close，
+    //   弹窗就**再也点不动了**（按下去什么都不发生）。弹窗这时已经藏起来
+    //   （.modal-mask 没有 .show 时 pointer-events:none），所以放开也不会被连点。
+    closeChoiceBusy = false;
+  }
+}
+
+function bindCloseDialog() {
+  const mask = $('closeMask');
+  if (!mask) return;
+
+  $('closeQuit').addEventListener('click', () => finishCloseChoice('quit', $('closeRemember').checked));
+  $('closeTray').addEventListener('click', () => finishCloseChoice('tray', $('closeRemember').checked));
+
+  const cancel = () => { hideCloseDialog(); closeChoiceBusy = false; };
+  $('closeCancel').addEventListener('click', cancel);
+  // 点弹窗外面的暗色区域 / 按 Esc 都算取消（和别的小弹窗一个习惯）
+  mask.addEventListener('click', (e) => { if (e.target.id === 'closeMask') cancel(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && mask.classList.contains('show')) cancel();
+  });
+
+  // 主进程问"点 ✕ 想怎么关"
+  window.neko.onAskClose(() => showCloseDialog());
+}
+
+/* ============================================================
+   第 3.8.8 部分：托盘 / 任务栏发来的命令（v2.2.0）
+   ------------------------------------------------------------
+   来源有三处：托盘菜单、任务栏缩略图上的三个按钮、任务栏右键的「任务」（JumpList）。
+   这里只负责"收到命令 → 调用界面本来就在用的那个函数"，
+   不重复实现播放逻辑 —— 播放 / 切歌 / 换模式本来就有现成的入口。
+   ============================================================ */
+
+function handleWinCmd(cmd) {
+  switch (cmd) {
+    case 'toggle':
+      if (!audio.src) { toast('先选一首歌吧'); return; }
+      audio.paused ? safePlay() : audio.pause();
+      return;
+
+    case 'prev': prevTrack(); return;
+    case 'next': next(1); return;
+
+    case 'lyric-open': toggleDesktopLyric(); return;
+
+    case 'lyric-lock': {
+      const s = lw();
+      s.locked = !s.locked;
+      pushLyricStyle();
+      syncLyricSettingsUI();
+      persistLater();
+      toast(s.locked ? '桌面歌词已锁定位置' : '桌面歌词已解锁');
+      reportUiState();
+      return;
+    }
+
+    case 'settings': openSettings(); return;
+
+    case 'show':
+      // 主进程自己已经把窗口叫到前台了，界面这边不用做什么
+      return;
+
+    default:
+      // 'mode:shuffle' 这种带参数的
+      if (cmd.indexOf('mode:') === 0) {
+        const m = PLAY_MODES.find((x) => x.id === cmd.slice(5));
+        if (m) { setPlayMode(m.id, true); toast(`播放模式：${m.name}`); }
+      }
+      return;
+  }
 }
 
 /* ============================================================
@@ -2292,6 +2490,23 @@ function syncSettingsUI() {
   if (!$('cookieInput').value) {
     api('cookieGet').then((t) => { $('cookieInput').value = t || ''; }).catch(() => {});
   }
+
+  // v2.2.0：窗口页的「关闭主窗口时」三选一
+  syncCloseActionUI();
+}
+
+/**
+ * 设置面板「窗口」页的单选 ← 读存档。
+ * ★ 关闭弹窗里那个「设为默认值」改的也是同一个字段，所以两边**永远同步**
+ *   （弹窗里勾完，这里会自动跟着变；反过来也一样）。
+ */
+function syncCloseActionUI() {
+  const v = closeActionSetting();
+  const map = { ask: 'radCloseAsk', quit: 'radCloseQuit', tray: 'radCloseTray' };
+  Object.keys(map).forEach((k) => {
+    const el = $(map[k]);
+    if (el) el.checked = (k === v);
+  });
 }
 
 function bindSettings() {
@@ -2469,6 +2684,16 @@ function bindSettings() {
       toast('保存失败：' + err.message);
     }
   });
+
+  /* ---- v2.2.0：「关闭主窗口时」三选一 ---- */
+  document.querySelectorAll('input[name="closeAction"]').forEach((el) => {
+    el.addEventListener('change', () => {
+      if (!el.checked) return;
+      DB.settings.close = { action: el.value };
+      persistLater();
+      forceReportUiState();   // ★ 必须强推：见 forceReportUiState 的说明（去重会把这一次吞掉）
+    });
+  });
 }
 
 /* ============================================================
@@ -2570,6 +2795,10 @@ function bindEvents() {
 
   /* ---- mini 模式（v2.1.0）：标题栏那个按钮 + mini 条里的 ✕ / ▢ ---- */
   bindMini();
+
+  /* ---- 关闭方式弹窗 + 托盘 / 任务栏发来的命令（v2.2.0） ---- */
+  bindCloseDialog();
+  window.neko.onWinCmd(handleWinCmd);
 
   /* ---- 新建歌单（用自家弹窗，不能用 prompt —— 见第 4.4 部分的说明） ---- */
   $('btnNewPlaylist').addEventListener('click', async () => {
@@ -3532,6 +3761,7 @@ function openDesktopLyric() {
   syncLyricSettingsUI();
   updateLyricHeadBtn();
   persistLater();
+  reportUiState();   // ★ v2.2.0：托盘菜单里「打开/关闭桌面歌词」「锁定」两项要跟着变
 }
 
 function closeDesktopLyric() {
@@ -3541,6 +3771,7 @@ function closeDesktopLyric() {
   syncLyricSettingsUI();
   updateLyricHeadBtn();
   persistLater();
+  reportUiState();   // ★ v2.2.0
 }
 
 /** 开 / 关桌面歌词。不传参数就是"切换" */
@@ -3626,6 +3857,7 @@ function bindLyricSettings() {
   if (lock) lock.addEventListener('change', () => {
     lw().locked = lock.checked;
     pushLyricStyle(); persistLater();
+    reportUiState();   // ★ v2.2.0：托盘菜单里「锁定桌面歌词」那个勾要跟着变
   });
 
   // 鼠标穿透：开启后悬浮窗自己点不到自己，所以开关只能放在主窗口这一页
@@ -3865,6 +4097,10 @@ async function boot() {
     openDesktopLyric();
     if (DB.settings.autoLyric && DB.lastTrack) loadLyrics(false);
   }
+
+  // 7) v2.2.0：把界面状态告诉主进程（托盘菜单 / 任务栏按钮要用）。
+  //    放在最后 —— 这时歌名、播放状态、mini 状态、歌词开关都已经定了。
+  reportUiState();
 }
 
 boot();

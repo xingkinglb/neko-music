@@ -6,6 +6,7 @@ dist/
 
 # 自检脚本跑出来的一次性产物：预览图、测试报告、运行日志（看一眼就行，不进仓库）
 .verify/shot-*.png
+.verify/icons-preview.png
 .verify/*-report.txt
 .verify/*-stdout.txt
 .verify/*.log

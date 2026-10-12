@@ -163,6 +163,12 @@
       <rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>
       <path d="M9.5 14.5 14.5 9.5M14.5 9.5h-3.6M14.5 9.5v3.6"/>
     </symbol>
+    <!-- ---- 彻底关闭软件：一个电源键（v2.2.0）。
+             故意不用 ✕ —— 标题栏那个 ✕ 现在含义已经不唯一了，用电源键才不歧义 ---- -->
+    <symbol id="i-power" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.2v8.4"/>
+      <path d="M17.8 5.9a7.8 7.8 0 1 1-11.6 0"/>
+    </symbol>
 
     <!-- ---- 歌词：播放条上的「词」按钮 ---- -->
     <symbol id="i-lyric" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -476,6 +482,7 @@
       <button class="tab active" data-tab="appearance">外观</button>
       <button class="tab" data-tab="lyric">歌词</button>
       <button class="tab" data-tab="bilibili">B 站</button>
+      <button class="tab" data-tab="window">窗口</button>
     </div>
 
     <div class="modal-body">
@@ -715,6 +722,50 @@
         <button class="primary-btn" id="btnSaveCookie">保存 Cookie</button>
       </div>
 
+      <!-- ========== 窗口（v2.2.0） ==========
+           加了托盘图标之后，"点 ✕"就有了两种合理含义（退出 / 缩到托盘），
+           所以这里给它一个明确的去处，和关闭弹窗里那个「设为默认值」共用同一个存档字段。 -->
+      <div class="pane" data-pane="window">
+
+        <div class="field">
+          <div class="field-label">关闭主窗口时</div>
+
+          <label class="radio-row">
+            <input type="radio" name="closeAction" id="radCloseAsk" value="ask" />
+            <span class="radio-label">每次询问<b>（推荐）</b>
+              <small>点 ✕ 时弹一个小窗，让你选"彻底关闭"还是"缩小到任务栏"。</small>
+            </span>
+          </label>
+
+          <label class="radio-row">
+            <input type="radio" name="closeAction" id="radCloseQuit" value="quit" />
+            <span class="radio-label">彻底关闭软件
+              <small>点 ✕ 就直接退出，停止播放、托盘图标也消失。</small>
+            </span>
+          </label>
+
+          <label class="radio-row">
+            <input type="radio" name="closeAction" id="radCloseTray" value="tray" />
+            <span class="radio-label">缩小到任务栏
+              <small>点 ✕ 只把窗口藏起来，歌继续放；点托盘图标就能找回来。</small>
+            </span>
+          </label>
+
+          <div class="field-hint">
+            在关闭弹窗里勾了「将此选项设为默认值」，这里会<b>自动跟着变</b> —— 两边是同一个设置。
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">托盘图标</div>
+          <div class="field-hint" style="margin-top:0">
+            托盘图标（右下角那一排小图标里）是本软件的总出口：<br />
+            右键它 → 菜单里能播放 / 切歌 / 换播放模式 / 切 mini 模式 / 打开设置 / 退出；<br />
+            左键点它 → 把窗口叫回来。
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <div class="modal-foot">
@@ -739,6 +790,53 @@
     </div>
     <div class="prompt-body" id="promptBody"></div>
     <div class="prompt-foot" id="promptFoot"></div>
+  </div>
+</div>
+
+<!--
+  ============ 关闭方式（v2.2.0）============
+  加了托盘图标之后，"点 ✕"就有了两种合理含义 —— 猜错的那个一定会被骂：
+    · 猜成"退出" → 用户想让它后台放歌，结果被关掉了
+    · 猜成"缩小" → 用户以为关掉了，其实还在跑（托盘里悄悄留着）
+  所以缺省问一次，并允许"别再问了"。
+
+  为什么自己画、不用系统那个 dialog.showMessageBox：
+    这软件从标题栏到设置面板全是自绘的，突然弹一个系统灰框会很割裂。
+    （系统那个自带"设为默认"复选框，省事，但样式对不上。）
+-->
+<div class="modal-mask" id="closeMask">
+  <div class="modal close-modal">
+    <div class="modal-head">
+      <span class="modal-title">关闭 Neko Music</span>
+    </div>
+    <div class="close-body">
+      <p class="close-ask">你想怎么关？</p>
+
+      <button class="close-choice" id="closeQuit">
+        <span class="cc-ic"><svg class="ic"><use href="#i-power"/></svg></span>
+        <span class="cc-txt">
+          <b>彻底关闭软件</b>
+          <small>停止播放并退出，托盘图标也会消失</small>
+        </span>
+      </button>
+
+      <button class="close-choice" id="closeTray">
+        <span class="cc-ic"><svg class="ic"><use href="#i-win-min"/></svg></span>
+        <span class="cc-txt">
+          <b>缩小到任务栏</b>
+          <small>继续在后台播放，点托盘图标能找回</small>
+        </span>
+      </button>
+
+      <label class="switch-row close-remember">
+        <span class="switch-label">将此选项设为默认值（以后不再询问）</span>
+        <input type="checkbox" id="closeRemember" />
+        <span class="switch"></span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button class="ghost-btn" id="closeCancel">取消</button>
+    </div>
   </div>
 </div>
 

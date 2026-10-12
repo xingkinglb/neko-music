@@ -9,11 +9,18 @@
  * ============================================================
  */
 
-const { app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme, shell, screen } = require('electron');
+const {
+  app, BrowserWindow, ipcMain, protocol, net, dialog, nativeTheme, shell, screen,
+  Menu, Tray, nativeImage,
+} = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const bili = require('./bilibili');
+
+// 读存档时的"补洞"（★ 只许补、不许删 —— 见这个文件顶部的说明，
+// 它原来会悄悄吃掉新加的设置项，是个真 bug）
+const { migrate, DEFAULT_DATA } = require('./store-migrate');
 
 // 固定开发版与安装版共用的本机存储目录，避免 Electron 按不同应用显示名
 // 分配出两个 userData 目录，导致用户感觉设置和歌单“消失”。
@@ -76,6 +83,58 @@ const {
 
 // 进 mini 之前的窗口位置和大小（退出时原样还回去）+ 当前 mini 的两态
 let miniState = { on: false, expanded: false, fullBounds: null };
+
+// ============================================================
+//  第 0.5 部分：托盘 / 任务栏菜单 / 关窗行为（v2.2.0）
+// ============================================================
+//  "菜单长什么样""点 ✕ 该退出还是缩小"这些都是**纯计算**，抽在 app-menus.js 里，
+//  好处是离线实测能直接 require 它、把菜单模板 dump 成普通对象逐项比对
+//  （离屏 Electron 里根本没有系统托盘，测不了真的托盘）。
+//  这里只留"什么时候调它"和"真的去动系统"。
+const {
+  DEFAULT_UI_STATE, normalizeUiState, normalizeCloseAction, decideCloseAction,
+  buildTrayMenu, buildUserTasks, parseSecondInstanceCmd,
+} = require('./app-menus');
+
+// 界面推过来的"现在在放什么、桌面歌词开没开、关窗想怎么关"。
+// 主进程拿它画托盘菜单和任务栏按钮 —— 界面是这些状态的唯一来源。
+// closeAction 先按存档文件兜个底：万一界面还没跑起来用户就点了 ✕，也不至于弹错窗。
+let uiState = Object.assign({}, DEFAULT_UI_STATE, { closeAction: readCloseActionFromStore() });
+
+let tray = null;
+
+/* ---------- 单实例锁 ----------
+   为什么必须有（两条都是真问题）：
+     ① 任务栏右键的「任务」（JumpList）每一项的实现方式是**用参数启动一个新进程** ——
+        没有这把锁，点一下就会开出第二个软件，两个窗口抢同一个存档文件。
+     ② 就算没有 JumpList，用户连点两次桌面图标，现在也能开出两个软件来。
+   第二个进程：直接退出，并把命令转交给已经在跑的那个窗口。 */
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    // 先把窗口叫出来再执行命令 —— 用户点了图标却什么都没发生，是最气人的
+    showMainWindow();
+    handleExternalCmd(parseSecondInstanceCmd(argv) || 'show');
+  });
+}
+
+/* ---------- "正在退出"标记 ----------
+   ★ 托盘菜单的「退出」、Ctrl+Q、系统关机、任务管理器结束、任何 app.quit()，
+     全都会先经过 before-quit。设了这个标记，close 处理就会**跳过询问、跳过隐藏**，
+     直接走存盘流程真退出 —— 否则会出现"点了退出却被当成缩小到托盘"。
+     （做法参考同类项目 biu，见 docs/参考实现研究-biu.md §2.1） */
+app.on('before-quit', () => { app.quitting = true; });
+
+/* ---------- 主进程崩溃时主动退出 ----------
+   加了托盘之后这一条变得重要：主进程一旦崩了但没退出，托盘图标会一直留着、
+   点它也没反应，用户会以为"软件卡死了"。主动退出比留个僵尸图标好。 */
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+  app.quitting = true;
+  app.quit();
+});
 
 // ============================================================
 //  第 1 部分：bili:// 协议 —— 音频流的"偷渡通道"
@@ -296,16 +355,42 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
+  // ★ v2.2.0 安全加固：禁止开出"原生新窗口"。
+  //   target="_blank" / window.open / 中键点击都可能弹出 Electron 原生新窗口 ——
+  //   那个窗口没有 preload、没有我们的 CSP 管控，等于开了个后门。
+  //   Neko 的外链本来就走 shell.openExternal（见下面的 shell:open），所以 deny 掉不影响任何功能。
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
 
-  // 所有关闭方式（自绘按钮、系统窗口按钮、Alt+F4）都先请求渲染进程 flush 存档。
+  // ============================================================
+  //  点 ✕ 之后干什么（v2.2.0）
+  // ============================================================
+  //  加了托盘之后，"点 ✕"就有了两种合理含义，猜错的那个一定会被骂：
+  //    · 猜成"退出" → 用户想让它后台放歌，结果被关掉了
+  //    · 猜成"缩小" → 用户以为关掉了，其实还在跑（托盘里悄悄留着）
+  //  所以缺省是**问一次**，并允许"别再问了"（存档里的 settings.close.action）。
+  //
+  //  ★ 真退出时**仍然要走存盘握手**（requestMainWindowClose），
+  //    只是跳过弹窗、跳过隐藏 —— 这是 Neko 和参考项目 biu 的关键差别
+  //    （它关窗前不用存盘，所以能直接放行；见 docs/参考实现研究-biu.md §2.1）。
   mainWindow.on('close', (event) => {
+    // 存盘握手完成后的那一次真关，放行
     if (allowCloseOnce) { allowCloseOnce = false; return; }
     event.preventDefault();
-    requestMainWindowClose();
+
+    const action = decideCloseAction({ quitting: !!app.quitting, action: uiState.closeAction });
+    // ① 真退出（"正在退出" / 用户设成"彻底关闭"）→ 走现有的存盘流程
+    if (action === 'quit') { requestMainWindowClose(); return; }
+    // ② 缩小到任务栏 → 只把窗口藏起来：播放继续、托盘图标还在
+    //    ★ 这里是 hide() 而不是 close()，所以 window-all-closed 不会触发、app.quit() 也不会被调用
+    if (action === 'tray') { hideMainWindow(); return; }
+    // ③ 每次询问 → 交给界面弹窗，等它回 win:close-choice
+    try { mainWindow.webContents.send('win:ask-close'); }
+    catch (_) { requestMainWindowClose(); }
   });
 
   // 主窗口关掉时，悬浮歌词也要一起关（不然会剩一个孤零零的窗口挂在桌面上）
@@ -378,6 +463,200 @@ function createWindow() {
 }
 
 // ============================================================
+//  第 2.8 部分：托盘 / 任务栏缩略图按钮 / 任务栏右键任务（v2.2.0）
+// ============================================================
+//  这三样都是**系统（Explorer）画的东西**，离屏 Electron 里根本不存在 ——
+//  所以"长什么样"只能真机看，能测的是"调用路径对不对、菜单模板结构对不对"。
+
+/* ---------- 图标读取（带缓存，别每次重建菜单都重新读盘） ---------- */
+const iconCache = new Map();
+function loadIcon(file) {
+  if (!iconCache.has(file)) {
+    const p = path.join(__dirname, 'assets', file);
+    const img = nativeImage.createFromPath(p);
+    // 图标读不出来要"吭声"：路径写错时托盘会**静默不出现**，非常难查
+    // （这条是从参考项目 biu 学来的，见 docs/参考实现研究-biu.md §2.5）
+    if (img.isEmpty()) console.error('[icon] 图标没读出来：' + p);
+    iconCache.set(file, img.isEmpty() ? undefined : img);
+  }
+  return iconCache.get(file);
+}
+const menuIcon = (name) => loadIcon(`menu-${name}.png`);
+const thumbIcon = (name) => loadIcon(`thumb-${name}.png`);
+
+/** 界面状态 + mini 状态 → 菜单要的那一份 */
+function menuState() {
+  return Object.assign({}, uiState, { mini: !!miniState.on });
+}
+
+/* ---------- 主窗口：叫到前台 / 藏起来 ---------- */
+
+/**
+ * 把主窗口叫到前台。
+ * ★ 光 show() 不够：窗口处于"最小化"状态时 show() 不会把它还原出来，
+ *   用户点了两次图标却什么都没发生。必须先 restore 再 show 再 focus，三步都做才算完整。
+ *   （这一条是从参考项目 biu 学来的，见 docs/参考实现研究-biu.md §2.4）
+ */
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+/** "缩小到任务栏"：只藏起来，不关 —— 播放继续、托盘图标还在、存档一个字节都不动 */
+function hideMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.hide();
+}
+
+/* ---------- 把命令交给界面执行 ---------- */
+function sendCmd(cmd) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('win:cmd', cmd); } catch (_) { /* 窗口正在关，忽略 */ }
+}
+
+/**
+ * 来自"外部"的命令：第二个实例带的参数、任务栏右键里的「任务」。
+ * 有些能主进程自己办（显示窗口 / 切 mini），有些得界面来办（播放控制 / 打开设置）。
+ */
+function handleExternalCmd(cmd) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  switch (cmd) {
+    case 'show':   showMainWindow(); break;
+    case 'mini':   applyMini(!miniState.on, false); break;
+    case 'settings': showMainWindow(); sendCmd('settings'); break;
+    case 'toggle': case 'prev': case 'next': sendCmd(cmd); break;
+    default: break;
+  }
+}
+
+/* ---------- mini：主进程这一半的"进 / 出" ---------- */
+function applyMini(on, expanded) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const st = handleMiniRequest(mainWindow, miniState, { on: !!on, expanded: !!expanded },
+    screen.getPrimaryDisplay().workAreaSize);
+  pushMiniState(st);
+}
+
+/** 把 mini 状态回推给界面，并顺手刷新"跟着 mini 变"的两样系统东西 */
+function pushMiniState(st) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.webContents.send('win:mini-state', { on: st.on, expanded: st.expanded }); } catch (_) {}
+  }
+  applyThumbnailClip();   // 缩略图裁哪一块，跟着 mini 变
+  refreshTrayMenu();      // 托盘里「窗口模式」那个打勾，跟着 mini 变
+}
+
+/* ---------- 任务栏缩略图上的三个按钮（Neo 图4） ---------- */
+
+/** 悬停任务栏图标时，缩略图裁到"封面那一块"（只在 mini 下说得通） */
+function applyThumbnailClip() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (typeof mainWindow.setThumbnailClip !== 'function') return;
+  try {
+    const r = miniState.on ? uiState.coverRect : null;
+    // 全 0 = "不裁，用整个窗口的预览"（这是官方文档给的复位写法）
+    mainWindow.setThumbnailClip(r || { x: 0, y: 0, width: 0, height: 0 });
+  } catch (_) {}
+}
+
+/**
+ * 重设任务栏缩略图上的三个按钮。
+ * ⚠️ 图标必须是 nativeImage（16×16 PNG），**不能用 SVG**。
+ * 播放状态一变就要重设一次 —— 因为"播放 / 暂停"是同一个按钮换图标。
+ */
+function refreshThumbar() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (typeof mainWindow.setThumbarButtons !== 'function') return;   // 只有 Windows 有
+
+  const playing = !!uiState.playing;
+  const btns = [
+    { tooltip: '上一首', icon: thumbIcon('prev'), click: () => sendCmd('prev') },
+    { tooltip: playing ? '暂停' : '播放', icon: thumbIcon(playing ? 'pause' : 'play'), click: () => sendCmd('toggle') },
+    { tooltip: '下一首', icon: thumbIcon('next'), click: () => sendCmd('next') },
+  ];
+  // 图标没读出来时先不设：setThumbarButtons 里只要有一个图标是空的，整组按钮都不显示，
+  // 与其"三个按钮凭空消失"，不如保持上一次的样子。
+  if (btns.some((b) => !b.icon)) return;
+
+  try {
+    mainWindow.setThumbarButtons(btns);
+    // 悬停时那行提示文字，成本几乎为零
+    const tip = uiState.hasTrack && uiState.title ? `Neko Music —— ${uiState.title}` : 'Neko Music';
+    mainWindow.setThumbnailToolTip(tip);
+  } catch (err) {
+    console.error('[thumbar] 设置任务栏按钮失败：', err);
+  }
+}
+
+/* ---------- 任务栏右键的「任务」（JumpList 的阉割版：不能有子菜单） ---------- */
+function refreshUserTasks() {
+  if (process.platform !== 'win32') return;
+  if (typeof app.setUserTasks !== 'function') return;
+  try {
+    app.setUserTasks(buildUserTasks(menuState(), {
+      exePath: process.execPath,
+      // 打包后是 null（exe 就是自己）；开发期要带上工程目录，否则会开出一个空白 Electron
+      appPath: app.isPackaged ? null : app.getAppPath(),
+      iconPath: (name) => path.join(__dirname, 'assets', `menu-${name}.png`),
+    }));
+  } catch (err) {
+    console.error('[userTasks] 设置任务栏任务失败：', err);
+  }
+}
+
+/* ---------- 托盘图标（Neo 图5 那个菜单就挂在这上面） ---------- */
+function createTray() {
+  // ★ 用 .ico 而不是 .png：ico 是"多分辨率容器"，系统按当前 DPI 自己挑一档，
+  //   125% / 150% 缩放下比单张 PNG 清晰（见 docs/参考实现研究-biu.md §2.5）
+  const trayIconPath = path.join(__dirname, 'assets', 'tray.ico');
+  const img = nativeImage.createFromPath(trayIconPath);
+  if (img.isEmpty()) console.error('[tray] 图标没加载出来：' + trayIconPath);
+
+  // 创建前先把旧的销毁，避免"二次调用 / 调试时热重启"在托盘里留下两个图标
+  if (tray) { tray.destroy(); tray = null; }
+
+  tray = new Tray(img);
+  refreshTrayMenu();
+  // 单击 / 双击：把主窗口叫出来 —— 这是"缩小到任务栏"之后的总出口
+  tray.on('click', () => showMainWindow());
+  tray.on('double-click', () => showMainWindow());
+}
+
+function destroyTray() {
+  if (tray) { tray.destroy(); tray = null; }
+}
+
+/**
+ * 重建托盘菜单。
+ * ★ 原生菜单**不能像网页那样局部刷新** —— 歌名 / 播放状态 / 播放模式 / 窗口模式
+ *   这四项里任何一项变了，都得整个重建一遍。所以这个函数会被频繁调用，要便宜。
+ */
+function refreshTrayMenu() {
+  if (!tray) return;
+  const state = menuState();
+  try {
+    tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenu(state, {
+      icon: menuIcon,
+      show: showMainWindow,
+      toggle: () => sendCmd('toggle'),
+      prev: () => sendCmd('prev'),
+      next: () => sendCmd('next'),
+      setMode: (id) => sendCmd('mode:' + id),
+      setMini: (on) => { if (miniState.on !== !!on) applyMini(!!on, false); },
+      lyricOpen: () => sendCmd('lyric-open'),
+      lyricLock: () => sendCmd('lyric-lock'),
+      settings: () => { showMainWindow(); sendCmd('settings'); },
+      quit: () => app.quit(),
+    })));
+    tray.setToolTip(state.hasTrack && state.title ? `Neko Music —— ${state.title}` : 'Neko Music');
+  } catch (err) {
+    console.error('[tray] 重建菜单失败：', err);
+  }
+}
+
+// ============================================================
 //  第 3 部分：本地存档（歌单、收藏、历史）
 // ============================================================
 //  就是一个 JSON 文件，存在系统的应用数据目录里。
@@ -393,52 +672,20 @@ function readDataFile() {
   }
 }
 
-const DEFAULT_DATA = {
-  playlists: [],  // 歌单列表，每个歌单里有 tracks
-  favorites: [],  // 我喜欢的
-  history: [],    // 最近播放
-  lastTrack: null,// 上次听到的歌（下次打开可以接着播）
-  settings: {     // 外观与习惯（新增）
-    theme: 'pink',   // pink / violet / green / amber / cyan
-    volume: 80,      // 音量记忆，0-100
-    bg:    { file: null, dim: 0.55, blur: 0 },  // 背景图文件名 / 压暗程度 / 额外模糊
-    glass: { blur: 18, alpha: 0.55 },           // 毛玻璃：模糊半径 / 不透明度
-    autoLyric: false,   // 自动加载歌词（默认关，可手动点「词」）
-  },
-};
-
-const THEMES = ['pink', 'violet', 'green', 'amber', 'cyan'];
-
 /**
- * 存档"补洞"。
- * 老版本的存档里没有 settings 字段，直接读进来会让界面取到 undefined。
- * 这个函数保证不管多老的存档，读出来都是结构完整的 —— 老数据一条都不会丢。
+ * 直接从存档文件里读"关窗行为"。
+ * 用途：界面还没跑起来的时候（比如启动几毫秒内就有人点了 ✕），
+ * 主进程也得知道该弹窗、该退、还是该缩小。界面起来之后会通过 win:ui-state 覆盖它。
  */
-function migrate(data) {
-  const d = (data && typeof data === 'object') ? data : {};
-  d.playlists = Array.isArray(d.playlists) ? d.playlists : [];
-  d.favorites = Array.isArray(d.favorites) ? d.favorites : [];
-  d.history   = Array.isArray(d.history)   ? d.history   : [];
-  d.lastTrack = d.lastTrack || null;
-
-  const old = (d.settings && typeof d.settings === 'object') ? d.settings : {};
-  const s = {
-    theme:  THEMES.includes(old.theme) ? old.theme : 'pink',
-    volume: (typeof old.volume === 'number' && old.volume >= 0 && old.volume <= 100) ? old.volume : 80,
-    bg:    Object.assign({ file: null, dim: 0.55, blur: 0 }, old.bg || {}),
-    glass: Object.assign({ blur: 18, alpha: 0.55 }, old.glass || {}),
-    autoLyric: typeof old.autoLyric === 'boolean' ? old.autoLyric : false,
-  };
-
-  // 背景图如果已经不在硬盘上（比如换过电脑、清过缓存），就悄悄置空，别留个裂图
-  if (s.bg.file) {
-    const ok = /^[\w.\-]+$/.test(s.bg.file) && fs.existsSync(path.join(BG_DIR, s.bg.file));
-    if (!ok) s.bg.file = null;
+function readCloseActionFromStore() {
+  try {
+    const d = readDataFile();
+    return normalizeCloseAction(d && d.settings && d.settings.close && d.settings.close.action);
+  } catch (_) {
+    return 'ask';
   }
-
-  d.settings = s;
-  return d;
 }
+
 
 // ============================================================
 //  第 4 部分：接收界面的请求（IPC 处理）
@@ -524,7 +771,7 @@ function registerHandlers() {
 
   handle('store:load', () => {
     const saved = readDataFile();
-    return migrate(saved || DEFAULT_DATA);
+    return migrate(saved || DEFAULT_DATA, { bgDir: BG_DIR });
   });
 
   // 存档写成"原子操作"：先写临时文件，写完了再改名顶替。
@@ -563,10 +810,40 @@ function registerHandlers() {
   // ★ 真正的逻辑在 win-mini.js 的 handleMiniRequest 里（抽出去是为了能离线实测）。
   ipcMain.on('win:mini', (_event, opts) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    const st = handleMiniRequest(mainWindow, miniState, opts, screen.getPrimaryDisplay().workAreaSize);
-    try {
-      mainWindow.webContents.send('win:mini-state', { on: st.on, expanded: st.expanded });
-    } catch (_) {}
+    const o = (opts && typeof opts === 'object') ? opts : {};
+    const st = handleMiniRequest(mainWindow, miniState, o, screen.getPrimaryDisplay().workAreaSize);
+    // 回推状态 + 顺手刷新两样跟着 mini 变的东西（缩略图裁哪一块、托盘里的窗口模式打勾）
+    pushMiniState(st);
+  });
+
+  // ---- 界面状态回传（v2.2.0）----
+  // 歌名 / 播放状态 / 播放模式 / 桌面歌词 / 关窗行为 —— 界面推过来，主进程拿它画托盘菜单。
+  // ★ 界面那边做了"状态没变就不发"的过滤（播放中这个会被频繁调到），这里再做一次兜底：
+  //   真没变就什么都不做，免得把原生菜单反复重建。
+  ipcMain.on('win:ui-state', (_event, st) => {
+    const next = normalizeUiState(st);
+    const prev = uiState;
+    const changed = ['playing', 'hasTrack', 'title', 'playMode', 'lyricOn', 'lyricLocked', 'closeAction']
+      .some((k) => next[k] !== prev[k]);
+    const rectChanged = JSON.stringify(next.coverRect) !== JSON.stringify(prev.coverRect);
+    if (!changed && !rectChanged) return;
+    uiState = next;
+    if (changed) {
+      if (next.playing !== prev.playing || next.title !== prev.title || next.hasTrack !== prev.hasTrack) refreshThumbar();
+      refreshTrayMenu();
+    }
+    if (rectChanged) applyThumbnailClip();
+  });
+
+  // ---- 关闭弹窗的结果（v2.2.0）----
+  // 界面弹完窗之后回这里：action 只有 'quit' / 'tray' 两种；remember = 勾了「设为默认值」。
+  ipcMain.on('win:close-choice', (_event, payload) => {
+    const p = (payload && typeof payload === 'object') ? payload : {};
+    // 界面只可能选这两个；万一传来别的东西，一律按"缩小到任务栏"处理（这个不会丢数据）
+    const action = normalizeCloseAction(p.action) === 'quit' ? 'quit' : 'tray';
+    if (p.remember) uiState = Object.assign({}, uiState, { closeAction: action });
+    if (action === 'quit') requestMainWindowClose();   // 真退出：走存盘握手
+    else hideMainWindow();                             // 缩小到任务栏：只藏起来
   });
 
   // ---- 自定义背景 ----
@@ -834,13 +1111,25 @@ app.whenReady().then(() => {
   registerHandlers();
   createWindow();
 
+  // ---- v2.2.0：托盘 / 任务栏缩略图按钮 / 任务栏右键任务 ----
+  // 都必须在窗口建好之后 —— 它们要挂在 mainWindow 上（托盘除外，但菜单里要显示歌名）
+  createTray();
+  refreshThumbar();
+  refreshUserTasks();
+
   // Windows 上点 Dock/任务栏图标重新打开窗口
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-// 除了 macOS，其他系统关闭所有窗口就退出程序
+// 退出前把托盘图标销毁，否则它会**残留在托盘里**，直到鼠标划过去才消失
+// （这条是从参考项目 biu 学来的，见 docs/参考实现研究-biu.md §2.5）
+app.on('will-quit', () => { destroyTray(); });
+
+// 除了 macOS，其他系统关闭所有窗口就退出程序。
+// ★ 注意：选「缩小到任务栏」时窗口是 hide() 而不是 close()，
+//   所以这里**不会**被触发、app.quit() 也不会被调用 —— 后台播放正是靠这一点。
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });

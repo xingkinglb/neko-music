@@ -76,6 +76,23 @@ contextBridge.exposeInMainWorld('neko', {
   // （下次打开就能回到上次那样的大小和位置）
   onWinBounds: (cb) => ipcRenderer.on('win:bounds', (_e, b) => cb(b || {})),
 
+  // ---------- 托盘 / 任务栏（v2.2.0） ----------
+  // 主进程发来的命令：'toggle' / 'prev' / 'next' / 'mode:<id>' / 'lyric-open' /
+  // 'lyric-lock' / 'settings'。来源是托盘菜单、任务栏缩略图按钮、任务栏右键的「任务」。
+  onWinCmd: (cb) => ipcRenderer.on('win:cmd', (_e, cmd) => cb(String(cmd || ''))),
+
+  // 把界面的状态告诉主进程（它拿这个画托盘菜单和任务栏按钮）：
+  // { playing, hasTrack, title, playMode, lyricOn, lyricLocked, closeAction, coverRect }
+  // ★ 界面侧做了"状态没变就不发"的过滤 —— 播放中这个函数会被频繁调到。
+  reportUiState: (state) => ipcRenderer.send('win:ui-state', state),
+
+  // 主进程问"点 ✕ 想怎么关"（settings.close.action === 'ask' 时才会来）
+  onAskClose: (cb) => ipcRenderer.on('win:ask-close', () => cb()),
+
+  // 弹窗的结果回给主进程：action 是 'quit'（彻底关闭）或 'tray'（缩小到任务栏），
+  // remember = 用户勾了「将此选项设为默认值」。
+  closeChoice: (action, remember) => ipcRenderer.send('win:close-choice', { action, remember: !!remember }),
+
   // ---------- 字幕 / 歌词 ----------
   // 取某个视频（某一 P）的字幕，返回 [{t: 开始秒数, text: 一句话}]
   subtitle: (bvid, cid) => ipcRenderer.invoke('bili:subtitle', bvid, cid),

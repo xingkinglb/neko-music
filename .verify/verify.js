@@ -24,6 +24,12 @@ const preload = stripBlock(read('src/preload.js'));
 const mainjs = stripBlock(read('src/main.js'));
 const winmini = stripBlock(read('src/win-mini.js'));
 const bgproto = stripBlock(read('src/bg-protocol.js'));
+/* v2.2.0 新增的三个模块 + main.js 的"去行注释"版本。
+   ★ 为什么 main.js 要多一份去行注释的：新加的断言要查 setThumbnailClip / hide() /
+     `const s = {` 这类片段，而注释里正好会举例提到它们 —— 不挖掉就会把注释当代码（假阳性）。 */
+const appmenus = stripLine(stripBlock(read('src/app-menus.js')));
+const storemigrate = stripLine(stripBlock(read('src/store-migrate.js')));
+const mainCode = stripLine(stripBlock(read('src/main.js')));
 const gitignore = read('.gitignore');
 
 let fail = 0;
@@ -274,8 +280,9 @@ else if (!/resetLyricsOnTrackChange\(\)/.test(appjs.split('function resetLyricsO
   err('resetLyricsOnTrackChange() 定义了却从没被调用 —— 换歌后旧歌词会残留');
 } else ok('换歌时会清掉上一首的歌词');
 
-/* 自动歌词开关必须真的连着存档字段，而不是写死 */
-if (!/autoLyric/.test(appjs) || !/autoLyric/.test(mainjs)) err('autoLyric 没贯穿 界面↔ 主进程存档 —— 开关关掉后再开软件会丢');
+/* 自动歌词开关必须真的连着存档字段，而不是写死。
+   ★ v2.2.0：主进程那半边的"补洞"搬到了 src/store-migrate.js，所以这里改查那个文件。 */
+if (!/autoLyric/.test(appjs) || !/autoLyric/.test(storemigrate)) err('autoLyric 没贯穿 界面↔ 主进程存档 —— 开关关掉后再开软件会丢');
 else ok('自动歌词开关会存进存档（重启后还记得）');
 
 /* ---- 14) 字幕必须走 api() 解包（这是个真实踩过的坑） ---- */
@@ -1910,5 +1917,245 @@ console.log('\n[48] mini 模式 · 同一个窗口换布局（v2.1.0）：');
   else ok('窗口图标已接上（src/assets/app.png）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 48 大类检查）');
+/* ============================================================
+   [49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
+   ============================================================ */
+console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）：');
+{
+  /* ---- ① 单实例锁 ---- */
+  if (!/requestSingleInstanceLock\(\)/.test(mainCode)) {
+    err('main.js 没有 requestSingleInstanceLock —— 双击两次图标能开出两个软件，JumpList 任务也会各开一个抢存档');
+  } else ok('main.js 有单实例锁（第二个进程直接退出）');
+
+  // ★ 这里要**跨函数**看：second-instance 只负责"叫窗口 + 转交命令"，
+  //   "最小化也要还原"那三步在 showMainWindow() 里（抽出来给托盘单击一起用）。
+  const si = (mainCode.match(/app\.on\('second-instance'[\s\S]*?\n\}\);/) || [''])[0];
+  const showFn = (mainCode.match(/function showMainWindow\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  if (!showFn) {
+    err('没找到 showMainWindow()');
+  } else if (!/isMinimized\(\)/.test(showFn) || !/\.restore\(\)/.test(showFn)) {
+    err('showMainWindow 里没有 isMinimized → restore —— 窗口最小化时点图标会"什么都不发生"');
+  } else if (!/\.show\(\)/.test(showFn) || !/\.focus\(\)/.test(showFn)) {
+    err('showMainWindow 里少了 show() / focus()');
+  } else if (!/showMainWindow\(\)/.test(si)) {
+    err('second-instance 没有先调 showMainWindow —— 第二个实例启动时窗口不会露头');
+  } else ok('second-instance → showMainWindow：restore → show → focus 三步都做（最小化时也能叫回来）');
+
+  if (!/parseSecondInstanceCmd/.test(mainCode)) err('没有解析第二个实例带来的 --cmd= 参数 —— JumpList 任务点了没反应');
+  else ok('会从第二个实例的 argv 里解析 --cmd=（且只认白名单里的命令）');
+
+  /* ---- ② 安全与崩溃兜底 ---- */
+  if (!/setWindowOpenHandler\(\(\)\s*=>\s*\(\{\s*action:\s*'deny'\s*\}\)\)/.test(mainCode)) {
+    err('没有 setWindowOpenHandler deny —— target="_blank" / window.open 会开出没 preload 的原生窗口');
+  } else ok('堵住了"原生新窗口"这个后门（setWindowOpenHandler deny）');
+
+  if (!/process\.on\('uncaughtException'/.test(mainCode)) {
+    err('没有 uncaughtException 兜底 —— 主进程崩了会留一个没反应的托盘图标，用户以为卡死了');
+  } else ok('主进程崩溃时会主动退出（不留僵尸托盘图标）');
+
+  /* ---- ③ 关窗流程 ---- */
+  if (!/app\.on\('before-quit'[\s\S]{0,80}app\.quitting = true/.test(mainCode)) {
+    err("没有在 before-quit 里设 app.quitting —— 托盘里的「退出」可能被当成缩小到托盘");
+  } else ok("before-quit 会设 app.quitting（覆盖托盘退出 / Ctrl+Q / 系统关机所有路径）");
+
+  const closeH = (mainCode.match(/mainWindow\.on\('close'[\s\S]*?\n  \}\);/) || [''])[0];
+  if (!closeH) {
+    err('没找到 mainWindow.on(\'close\') 的处理函数');
+  } else {
+    if (!/decideCloseAction/.test(closeH)) err('close 处理没有走 decideCloseAction（三态分叉）');
+    else ok('close 处理走 decideCloseAction 分三态（quit / tray / ask）');
+
+    if (!/action === 'quit'[\s\S]{0,160}requestMainWindowClose\(\)/.test(closeH)) {
+      err('"真退出"分支没有走 requestMainWindowClose —— 会丢掉最后一次存盘');
+    } else ok('真退出仍然走存盘握手（跳过弹窗，但不跳过存盘）');
+
+    if (!/action === 'tray'[\s\S]{0,80}hideMainWindow\(\)/.test(closeH)) {
+      err('"缩小到任务栏"分支没走 hideMainWindow');
+    } else ok('"缩小到任务栏"走的是 hide()（后台播放靠这一点）');
+
+    if (/action === 'tray'[\s\S]{0,80}mainWindow\.close\(\)/.test(closeH)) {
+      err('★ "缩小到任务栏"居然调了 close() —— 会把后台播放直接弄没');
+    }
+
+    if (!/win:ask-close/.test(closeH)) err('close 处理里没有发 win:ask-close —— 缺省不会弹窗');
+    else ok('缺省（ask）会发 win:ask-close，让界面弹窗');
+  }
+
+  /* ---- ④ 托盘 ---- */
+  if (!/new Tray\(/.test(mainCode)) err('main.js 里没有 new Tray —— 图5 那个菜单没地方挂');
+  else ok('main.js 建了托盘图标');
+
+  if (!/tray\.ico/.test(mainCode)) err('托盘图标不是 .ico —— 高分屏（125% / 150%）会糊');
+  else ok('托盘图标用的是 .ico（多分辨率容器，系统按 DPI 自己挑）');
+
+  if (!/isEmpty\(\)/.test(mainCode)) err('没有 isEmpty() 检查 —— 图标路径写错时托盘会静默不出现，非常难查');
+  else ok('图标加载失败会吭声（isEmpty 检查）');
+
+  if (!/will-quit'[\s\S]{0,80}destroyTray\(\)/.test(mainCode)) err('退出前没有销毁托盘图标 —— 它会残留在托盘里直到鼠标划过去');
+  else ok('退出前销毁托盘图标');
+
+  if (!/tray\.setContextMenu\(/.test(mainCode)) err('托盘没有设置右键菜单');
+  else ok('托盘挂上了右键菜单（状态一变就整个重建）');
+
+  if (!/tray\.on\('click'/.test(mainCode)) err('托盘图标不能单击唤回窗口 —— "缩小到任务栏"之后就没出口了');
+  else ok('单击 / 双击托盘图标能把窗口叫回来');
+
+  if (!/if \(tray\) \{ tray\.destroy\(\)/.test(mainCode)) err('createTray 没有"先销毁旧的" —— 热重启会在托盘里留两个图标');
+  else ok('建托盘前先销毁旧的（不会出现两个图标）');
+
+  /* ---- ⑤ 菜单模板结构 ---- */
+  const menuFn = (appmenus.match(/function buildTrayMenu\(state, h\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  if (!menuFn) err('app-menus.js 里没找到 buildTrayMenu');
+  else {
+    const subs = (menuFn.match(/submenu:/g) || []).length;
+    if (subs < 2) err(`托盘菜单只有 ${subs} 个子菜单 —— 图5 有「播放模式 ▸」和「窗口模式 ▸」两个`);
+    else ok(`托盘菜单有两个子菜单（播放模式 / 窗口模式）`);
+
+    if (!/type: 'radio'/.test(menuFn)) err('子菜单里没有 type: radio —— 当前项不会打勾');
+    else ok('子菜单用 radio 打勾标出当前项');
+
+    if (!/type: 'checkbox'/.test(menuFn)) err('「锁定桌面歌词」没有做成 checkbox');
+    else ok('「锁定桌面歌词」是 checkbox（能看到锁没锁）');
+
+    const want = ['显示主窗口', '上一首', '下一首', '设置', '退出'];
+    const miss = want.filter((l) => !menuFn.includes(`'${l}'`));
+    if (miss.length) err('托盘菜单少了：' + miss.join(' / '));
+    else ok('托盘菜单该有的项都在（显示主窗口 / 上一首 / 下一首 / 设置 / 退出 …）');
+
+    if (!/enabled: false/.test(menuFn)) err('菜单里没有"只读"的当前歌名项（图5 第一项）');
+    else ok('当前歌名是只读项（enabled: false）');
+
+    if (!/s\.lyricOn \? '关闭桌面歌词' : '打开桌面歌词'/.test(menuFn)) err('歌词那项不是动态标签 —— 开着的时候还写着"打开"会很怪');
+    else ok('歌词项标签跟着开关状态走（打开 ⇄ 关闭）');
+  }
+
+  /* ---- ⑥ 播放模式清单两边必须一致 ---- */
+  const appModes = [...appjs.matchAll(/\{\s*id:\s*'(\w+)',\s*icon:\s*'[\w-]+',\s*name:\s*'([^']+)'\s*\}/g)].map((m) => m[1] + '=' + m[2]);
+  const menuModes = [...appmenus.matchAll(/\{\s*id:\s*'(\w+)',\s*name:\s*'([^']+)'\s*\}/g)].map((m) => m[1] + '=' + m[2]);
+  if (!appModes.length || !menuModes.length) {
+    err('没解析到播放模式清单（两边的写法可能改了，正则要跟着改）');
+  } else if (appModes.join('|') !== menuModes.join('|')) {
+    err(`播放模式清单两边对不上：app.js [${appModes.join(' ')}] vs app-menus.js [${menuModes.join(' ')}]`);
+  } else ok(`播放模式清单两边一致（${appModes.join(' / ')}）`);
+
+  /* ---- ⑦ CLOSE_ACTIONS 两边必须一致 ---- */
+  const normList = (s) => String(s || '').split(',').map((x) => x.trim().replace(/'/g, '')).filter(Boolean).join(',');
+  const ca1 = normList((appjs.match(/const CLOSE_ACTIONS = \[([^\]]+)\]/) || [, ''])[1]);
+  const ca2 = normList((appmenus.match(/const CLOSE_ACTIONS = \[([^\]]+)\]/) || [, ''])[1]);
+  if (!ca1 || !ca2) err('两边的 CLOSE_ACTIONS 没找齐');
+  else if (ca1 !== ca2) err(`CLOSE_ACTIONS 两边对不上：app.js [${ca1}] vs app-menus.js [${ca2}]`);
+  else ok(`CLOSE_ACTIONS 两边一致（${ca1}）`);
+
+  /* ---- ⑧ 任务栏缩略图按钮 ---- */
+  const missThumb = ['setThumbarButtons', 'setThumbnailClip', 'setThumbnailToolTip'].filter((f) => !mainCode.includes(f));
+  if (missThumb.length) err('main.js 里没有：' + missThumb.join(' / '));
+  else ok('任务栏缩略图三件套齐了（按钮 / 裁剪区域 / 悬停提示）');
+
+  if (!/nativeImage\.createFromPath/.test(mainCode)) err('图标不是用 nativeImage 读的 —— setThumbarButtons 不接受 SVG');
+  else ok('图标走 nativeImage（setThumbarButtons 只吃这个）');
+
+  if (!/coverRect/.test(appjs) || !/coverRect/.test(mainCode)) {
+    err('缩略图裁哪一块不是由界面量好交给主进程的 —— 写死在主进程里，改一次 CSS 就错一次');
+  } else ok('缩略图裁哪一块由界面量好交给主进程（coverRect）');
+
+  if (!/thumbIcon\(playing \? 'pause' : 'play'\)/.test(mainCode)) err('播放 / 暂停按钮不会跟着状态换图标');
+  else ok('播放 / 暂停按钮跟着播放状态换图标');
+
+  /* ---- ⑨ JumpList（任务栏右键的「任务」） ---- */
+  if (!/app\.setUserTasks\(/.test(mainCode)) err('没有 setUserTasks —— 任务栏右键看不到「任务」那一组');
+  else ok('任务栏右键的「任务」已接上（阉割版，无子菜单 —— Windows 的硬限制）');
+
+  if (!/--cmd=/.test(appmenus)) err('JumpList 任务没有带 --cmd= 参数 —— 点了不会有任何反应');
+  else ok('JumpList 任务带 --cmd= 参数，靠单实例锁转交给已经在跑的窗口');
+
+  if (!/app\.isPackaged/.test(mainCode)) err('JumpList 没有区分"打包后 / 开发期" —— 开发期点任务会开出一个空白 Electron');
+  else ok('JumpList 在开发期会把工程目录一起带上（不会开出空白 Electron）');
+
+  /* ---- ⑩ ★★ 存档"补洞"绝不许白名单重建 ---- */
+  const migFn = (storemigrate.match(/function migrate\(data, opts\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  if (!migFn) {
+    err('没找到 store-migrate.js 的 migrate 函数');
+  } else if (/const s = \{/.test(migFn)) {
+    err('★ migrate 又写成了"白名单重建"（const s = {）—— 每加一个新设置项都会被它悄悄吃掉，存得进去读不出来');
+  } else if (!/Object\.assign\(\{\},\s*old\)/.test(migFn)) {
+    err('★ migrate 不是"从存档里已有的出发" —— 新字段会被丢掉');
+  } else ok('★ migrate 只补不删（lyricWin / playMode / window 这些不会再被吃掉）');
+
+  if (!/s\.close\s*=\s*Object\.assign\(\{\s*action:\s*'ask'\s*\}/.test(storemigrate)) {
+    err('store-migrate.js 没给 settings.close 兜默认值');
+  } else ok('store-migrate.js 给 settings.close 兜了默认值（老存档零迁移）');
+
+  /* ---- ⑪ 关窗弹窗的界面 ---- */
+  const needIds = ['closeMask', 'closeQuit', 'closeTray', 'closeRemember', 'closeCancel'];
+  const missIds = needIds.filter((id) => !htmlIds.has(id));
+  if (missIds.length) err('index.html 少了：' + missIds.map((i) => '#' + i).join(' / '));
+  else ok('关窗弹窗的五个元素都在（遮罩 / 彻底关闭 / 缩小到任务栏 / 设为默认 / 取消）');
+
+  if (!htmlIds.has('i-power')) err('没有 #i-power 图标（"彻底关闭"那个电源键）');
+  else ok('"彻底关闭"用的是电源键图标（不是 ✕，避免和"关窗口"歧义）');
+
+  if (!/\.close-choice/.test(css)) err('style.css 里没有 .close-choice（两张大按钮）的样式');
+  else ok('关窗弹窗的样式在（两张大按钮 + 一行小字说明后果）');
+
+  if (!/finishCloseChoice/.test(appjs)) err('app.js 里没有 finishCloseChoice —— 弹窗点了没反应');
+  else if (!/await flushPersistence\(\)/.test(appjs)) err('勾了「设为默认值」之后没有先存盘 —— 主进程马上退出，勾就白打了');
+  else ok('勾了「设为默认值」会先存盘再通知主进程（不然勾白打）');
+
+  if (!/onAskClose\(/.test(appjs)) err('app.js 没有监听 win:ask-close —— 弹窗不会自己冒出来');
+  else ok('界面会响应主进程的"问一次"');
+
+  /* ---- ⑫ 设置面板「窗口」页 ---- */
+  if (!/data-tab="window"/.test(html)) err('设置面板没有「窗口」标签页');
+  else ok('设置面板新增了「窗口」页');
+  const radios = ['radCloseAsk', 'radCloseQuit', 'radCloseTray'].filter((id) => htmlIds.has(id));
+  if (radios.length !== 3) err(`「关闭主窗口时」的三选一没齐（只找到 ${radios.join(' / ') || '无'}）`);
+  else ok('「关闭主窗口时」是三个单选（每次询问 / 彻底关闭 / 缩小到任务栏）');
+
+  if (!/syncCloseActionUI/.test(appjs)) err('app.js 里没有 syncCloseActionUI —— 设置里的选项不会跟着弹窗的选择同步');
+  else ok('设置里的选项和弹窗的「设为默认」共用同一个字段，两边同步');
+
+  if (!/close:\s*\{\s*action:\s*'ask'\s*\}/.test(appjs)) err("DEFAULT_SETTINGS 里没有 close（缺省 action:'ask'）");
+  else ok("DEFAULT_SETTINGS 有 close，缺省 action:'ask'（老用户升级后第一次关窗会问一下）");
+
+  if (!/close:\s*\{\s*\n?\s*action:\s*CLOSE_ACTIONS\.includes/.test(appjs)) err('migrateSettings 没有把 settings.close 洗成三种之一');
+  else ok('migrateSettings 会把 settings.close 洗成三种之一（存档被手改坏也不会失灵）');
+
+  /* ---- ⑬ 界面 → 主进程的状态回传 ---- */
+  const needPreload = ['onWinCmd', 'reportUiState', 'onAskClose', 'closeChoice'];
+  const missP = needPreload.filter((k) => !preload.includes(k));
+  if (missP.length) err('preload.js 少了：' + missP.join(' / '));
+  else ok('preload 暴露了 onWinCmd / reportUiState / onAskClose / closeChoice');
+
+  if (!/win:ui-state/.test(mainCode) || !/win:close-choice/.test(mainCode)) err('main.js 少了 win:ui-state 或 win:close-choice 通道');
+  else ok('主进程收得到界面状态和关窗选择');
+
+  if (!/reportUiState\(\);\s*\n\}/.test(appjs)) err('updatePlayBtn 里没有调 reportUiState —— 播放状态变了托盘菜单不会跟着变');
+  else ok('播放状态一变就上报（托盘菜单 / 任务栏按钮跟着变）');
+
+  if (!/if \(key === lastUiStateKey\) return;/.test(appjs)) {
+    err('reportUiState 没有"状态没变就不发"的过滤 —— 主进程会把原生菜单反复重建');
+  } else ok('reportUiState 有去重（状态没变不打扰主进程）');
+
+  if (!/handleWinCmd/.test(appjs)) err('app.js 没有 handleWinCmd —— 托盘 / 任务栏发来的命令没人接');
+  else ok('托盘 / 任务栏发来的命令有处理（复用播放条本来就在用的那些函数）');
+
+  /* ---- ⑭ 图标文件必须真的在 ---- */
+  const iconFiles = [
+    'tray.ico',
+    'thumb-prev.png', 'thumb-play.png', 'thumb-pause.png', 'thumb-next.png',
+    'menu-show.png', 'menu-note.png', 'menu-play.png', 'menu-pause.png',
+    'menu-prev.png', 'menu-next.png', 'menu-mode.png', 'menu-win.png',
+    'menu-lyric.png', 'menu-lock.png', 'menu-settings.png', 'menu-quit.png',
+  ];
+  const missIcon = iconFiles.filter((f) => !fs.existsSync(path.join(ROOT, 'src/assets', f)));
+  if (missIcon.length) err('src/assets 里少了：' + missIcon.join(' / ') + '（跑 node .verify/make-icons.js 生成）');
+  else ok(`图标文件都在（托盘 1 + 缩略图 4 + 菜单 12 = ${iconFiles.length} 个）`);
+
+  /* ---- ⑮ .gitignore 不能把图标挡在门外 ---- */
+  if (/assets\/\*\.png/.test(gitignore) || /^\s*\*\.ico\s*$/m.test(gitignore)) {
+    err('.gitignore 把图标挡住了 —— 提交上去会缺图');
+  } else ok('.gitignore 不会挡住 src/assets 里的图标');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 49 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

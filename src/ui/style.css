@@ -1333,6 +1333,54 @@ body.glass-live .lyric-overlay {
 }
 .prompt-input:focus { border-color: rgb(var(--accent-rgb) / 0.55); outline: none; }
 
+/* ============================================================
+   关闭方式弹窗 + 设置里的单选行（v2.2.0）
+   ============================================================ */
+
+.close-modal { width: 400px; }
+.close-body { padding: 2px 18px 8px; display: flex; flex-direction: column; gap: 10px; }
+.close-ask { font-size: 13px; color: var(--text-2); margin: 0 0 2px; }
+
+/* 两个选项做成**两张大按钮**（各带一行小字说明后果），而不是普通的"确定 / 取消" ——
+   得让"点了会发生什么"一眼看懂。 */
+.close-choice {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; text-align: left;
+  padding: 13px 14px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px;
+  transition: background 0.16s, border-color 0.16s, transform 0.12s;
+}
+.close-choice:hover { background: var(--panel-2); border-color: rgb(var(--accent-rgb) / 0.45); }
+.close-choice:active { transform: scale(0.985); }
+.close-choice .cc-ic {
+  flex: 0 0 auto;
+  width: 34px; height: 34px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.22), rgb(var(--accent-2-rgb) / 0.16));
+  color: var(--accent);
+}
+.close-choice .cc-ic .ic { width: 18px; height: 18px; }
+.close-choice .cc-txt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.close-choice .cc-txt b { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.close-choice .cc-txt small { font-size: 11.5px; color: var(--muted-2); line-height: 1.5; }
+.close-remember { margin-top: 4px; }
+
+/* 设置面板「窗口」页里的单选行 */
+.radio-row {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 0; cursor: pointer;
+}
+.radio-row input[type="radio"] {
+  flex: 0 0 auto; width: 15px; height: 15px; margin: 1px 0 0;
+  accent-color: var(--accent); cursor: pointer;
+}
+.radio-row .radio-label { font-size: 12.5px; color: var(--text-2); line-height: 1.5; }
+.radio-row .radio-label b { color: var(--accent); font-weight: 600; }
+.radio-row .radio-label small {
+  display: block; color: var(--muted-2); font-size: 11px; margin-top: 3px; line-height: 1.6;
+}
+
 /* 选歌单：每个歌单一行，右边显示已存首数 */
 .pl-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
 .pl-row {
