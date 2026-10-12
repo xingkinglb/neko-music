@@ -63,6 +63,19 @@ contextBridge.exposeInMainWorld('neko', {
   // F11 全屏切换（网页自己没法直接进全屏，得请主进程帮忙）
   setFullScreen: (flag) => ipcRenderer.send('win:fullscreen', !!flag),
 
+  // ---------- mini 模式（v2.1.0） ----------
+  // 请主进程把窗口缩成"一条小窗"（on=true，expanded 表示要不要展开队列列表），
+  // 或还原成进 mini 之前的大小和位置（on=false）。
+  // 布局那一半由界面自己加/去 body.mini 类完成，这里只管窗口本身。
+  winMini: (on, expanded) => ipcRenderer.send('win:mini', { on: !!on, expanded: !!expanded }),
+
+  // 主进程回推"现在是不是 mini / 展没展开"，界面据此切换按钮和 ☰ 的行为
+  onWinMiniState: (cb) => ipcRenderer.on('win:mini-state', (_e, st) => cb(st || {})),
+
+  // 完整模式下窗口被拖动 / 缩放后，主进程把新位置尺寸送回来存档
+  // （下次打开就能回到上次那样的大小和位置）
+  onWinBounds: (cb) => ipcRenderer.on('win:bounds', (_e, b) => cb(b || {})),
+
   // ---------- 字幕 / 歌词 ----------
   // 取某个视频（某一 P）的字幕，返回 [{t: 开始秒数, text: 一句话}]
   subtitle: (bvid, cid) => ipcRenderer.invoke('bili:subtitle', bvid, cid),

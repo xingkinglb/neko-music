@@ -1437,3 +1437,166 @@ body.glass-live .lyric-overlay {
   white-space: nowrap; transition: background 0.15s, color 0.15s;
 }
 .track .badge:hover { background: var(--accent); color: #fff; }
+
+/* ============================================================
+   mini 模式（v2.1.0）
+   ------------------------------------------------------------
+   不是"新开一个小窗口" —— 就是**同一个窗口**加一个 body.mini 类，
+   布局整个换掉；同时由 main.js 把窗口缩到 420×132（展开态 420×520）。
+   参考项目 biu 用的是同一招（它把标记挂在 URL hash 上、另开一个窗口，
+   我们挂在类名上、共用本窗口，等价）。
+
+   ★★ 铁律（原因写在上面 .app 那一段）：body.mini 下**绝不能**给 .app
+   或它的任何祖先加 transform / filter / opacity / will-change ——
+   那会生成 "backdrop root"，把子元素的 backdrop-filter（毛玻璃）打成一块纯色。
+   这一节只动 display / 网格 / 尺寸，安全。
+   ============================================================ */
+
+/* ---- 收起态：整个窗口只剩播放条这一块 ---- */
+body.mini .app {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+  grid-template-areas: "player";
+}
+
+/* 完整模式的四块面板全藏掉。
+   ★ .main 一定要一起藏：它里面装着 .topbar + .content，而新的网格里已经没有
+     "main" 这个区域了 —— 不藏的话它会被塞进一条隐式行，把布局整个顶歪。 */
+body.mini .titlebar,
+body.mini .sidebar,
+body.mini .main,
+body.mini .topbar,
+body.mini .content { display: none; }
+
+/* 播放条：重排成图2 那"一条小窗" —— 封面左、控制中、杂项右、歌名下 */
+body.mini .player {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: center;
+  align-items: center;
+  /* ★ 这一行的宽度是**算出来的**，不是拍脑袋：
+     窗口 420 − 左内边距 14 = 406 的内容宽。
+     第一行要放下：封面 48 + 控制键 128 + ♡ 30 + 🔊 28 + ☰ 28 + ✕▢ 68 = 330，
+     加上 5 个 9px 的间隔（45）和 ✕▢ 左边那 8px = 383，还剩 23px 余量。
+     余量必须留够 —— flex-wrap 是**按"假设尺寸"先断行、再收缩**的，
+     一旦第一行超宽，✕▢ 会被整个挤到第二行去（离线实测第 3 组踩到过）。 */
+  gap: 4px 9px;
+  padding: 12px 0 12px 14px;   /* 右边不留内边距：让 ✕ ▢ 贴到窗口右边缘（和标题栏一个规矩） */
+  border-top: 0;               /* 只剩一块面板了，别再画那条分隔线 */
+  -webkit-app-region: drag;    /* 没有标题栏了，这一整条就是窗口把手 */
+}
+
+/* ★ .np / .volume 这两个"分组盒"在 mini 下让位：display:contents 让盒子本身消失，
+   它们的子元素（封面 / 歌名 / ♡ / 🔊 / ☰）直接参与上面那条 flex 布局。
+   这样不用改动 HTML 结构，就能把"歌名"从封面那一组里拆出来、单独放第二行。 */
+body.mini .np,
+body.mini .volume { display: contents; }
+
+/* 排列顺序（对应图2 从左到右）：封面 → ⏮⏸⏭ → ♡ → 🔊 → ☰ → ✕ ▢ ；歌名另起一行。
+   .controls 后面的 auto 外边距把"♡ 🔊 ☰ ✕ ▢"整组推到右边，于是 ⏭ 和 ♡ 之间
+   自然留出图2 里那道空隙。 */
+body.mini .np-cover     { order: 1; }
+body.mini .controls     { order: 2; margin-right: auto; }
+body.mini .heart-btn    { order: 3; }
+body.mini .vol-wrap     { order: 4; }
+body.mini #btnQueue     { order: 5; }
+body.mini .mini-actions { order: 6; }
+body.mini .np-meta      { order: 7; flex: 0 0 100%; }
+
+/* 收起态用不到的零件先收起来（图2 里没有它们）：
+   · 播放模式按钮（图2 只有 ⏮⏸⏭ 三个）
+   · 进度条（那条小窗里放不下，展开态也不用 —— 列表里"正在播放"那行会高亮）
+   · 「词」和「在浏览器打开」（mini 窗太小，整页歌词铺不开；要歌词回完整模式）
+   · 音量滑杆（120px 高的竖滑杆在 132px 的小窗里会被窗口边缘裁掉；
+     喇叭图标本身还能点=静音、滚轮=调音量，功能没丢） */
+body.mini #btnMode,
+body.mini .progress-row,
+body.mini .lyric-wrap,
+body.mini #btnOpenBili,
+body.mini .vol-pop { display: none; }
+/* 收起态里封面不再进歌词页（app.js 里同步做了拦截），那"歌词"两个字也别再浮出来 */
+body.mini .np-cover::after { display: none; }
+
+/* 收起态的控制键：把"占位撑齐 5 个槽位"的空位去掉，三个键才居中。
+   间距也从 12 收到 8 —— 这一行只有 406px 可用，省下的每一像素都算进上面的余量里。 */
+body.mini .ctrl-row { gap: 8px; }
+body.mini .ctrl-row::after { display: none; }
+
+/* 封面在小窗里缩到 48（原 54）：132px 高的窗口里 54 有点顶，而且能多让出 6px 给第一行 */
+body.mini .np-cover { width: 48px; height: 48px; border-radius: 9px; }
+
+/* 歌名那一行：原来是"标题 / 作者"上下两行，mini 里压成一行（高度宝贵）。
+   两个都允许省略号，标题先缩。 */
+body.mini .np-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 14px;
+}
+body.mini .np-title { font-size: 12.5px; flex: 0 1 auto; min-width: 0; }
+body.mini .np-sub   { margin-top: 0; font-size: 11.5px; flex: 0 1 auto; min-width: 0; }
+
+/* mini 模式专用的 ✕ / ▢（在播放条最右）。平时（完整模式）必须 display:none ——
+   不然它会作为第 4 个格子挤进 .player 那套三列网格，把布局撑坏。 */
+.mini-actions { display: none; }
+body.mini .mini-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;   /* 和 ☰ 之间留一点空隙，别糊成一坨 */
+}
+body.mini .mini-actions .win-btn {
+  width: 32px; height: 30px;
+  border-radius: 8px;   /* 标题栏里是通高的直角，这里缩小了配圆角更像"按钮" */
+}
+body.mini .mini-actions .win-btn .ic { width: 14px; height: 14px; }
+
+/* ★ 上面把整条设成了"窗口把手"（-webkit-app-region: drag），
+   里面每个可点的东西都得单独放行，否则会被拖动区吃掉点击、按不动。
+   这和标题栏里 .win-controls 标 no-drag 是同一个道理。 */
+body.mini .player button,
+body.mini .player .controls,
+body.mini .player .heart-btn,
+body.mini .player .vol-wrap,
+body.mini .player .mini-actions { -webkit-app-region: no-drag; }
+
+/* ---- 展开态（对应图3）：mini 条下面挂一块"播放队列" ---- */
+/* 平时（完整模式 / 收起态）藏起来 —— 不藏的话它会在 .app 里被自动放进一条隐式行 */
+.mini-list { display: none; }
+
+body.mini.mini-open .app {
+  grid-template-rows: auto 1fr;   /* 上面一条是播放条（内容高），剩下的全给列表 */
+  grid-template-areas:
+    "player"
+    "mini-list";
+}
+body.mini.mini-open .mini-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  /* 和另外几块面板同一套"半透明磨砂"，观感一致 */
+  --panel-a: var(--frame-a);
+  background: rgb(var(--glass-rgb) / var(--panel-a));
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border-top: 1px solid var(--line);
+  -webkit-app-region: no-drag;    /* 列表要能滚能点，不能算在拖动区里 */
+}
+
+/* 列表顶上那条小标题：钉住不滚（不然一滚就不知道这列表是什么了） */
+.mini-head {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 11px 14px 9px;
+  font-size: 12px; color: var(--muted);
+  background: rgb(var(--glass-rgb) / var(--frame-a));
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border-bottom: 1px solid var(--line);
+}
+.mini-head .mh-n { color: var(--muted-2); font-variant-numeric: tabular-nums; }
+
+/* 列表里那几行直接复用队列抽屉的 .collect-row（编号 / 标题 / 时长 / 移除），
+   只是左右内边距小一点，配 mini 窗的宽度 */
+body.mini .mini-list .collect-row { padding: 9px 12px; border-radius: 8px; }
+

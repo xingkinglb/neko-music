@@ -59,6 +59,25 @@ let allowCloseOnce = false;
 let closeTimeout = null;
 
 // ============================================================
+//  mini 模式（v2.1.0）—— 主进程这一半
+// ============================================================
+//  不是"新开一个小窗口"：就是**同一个窗口**，界面那边给 body 加一个 mini 类换布局，
+//  这边负责把窗口本身缩成"一条小窗"。两边各管一半，谁也不越界：
+//    · 界面（app.js + style.css）：布局、按钮、存档
+//    · 主进程（这里）：窗口的位置和大小
+//
+//  ★ 真正的"尺寸怎么算"抽在 win-mini.js 里 —— 抽出去是为了让离线实测能拿真窗口
+//    跑真逻辑（理由同 bg-protocol.js）。这里只留"什么时候调它"。
+const {
+  MINI_W, MINI_H_COLLAPSED, MINI_H_EXPANDED,
+  FULL_MIN_W, FULL_MIN_H, FULL_DEF_W, FULL_DEF_H,
+  applyMiniBounds, restoreFullBounds, handleMiniRequest,
+} = require('./win-mini');
+
+// 进 mini 之前的窗口位置和大小（退出时原样还回去）+ 当前 mini 的两态
+let miniState = { on: false, expanded: false, fullBounds: null };
+
+// ============================================================
 //  第 1 部分：bili:// 协议 —— 音频流的"偷渡通道"
 // ============================================================
 //  问题：B 站的音频地址必须带 Referer: https://www.bilibili.com 才能下载，
@@ -170,15 +189,71 @@ function finishMainWindowClose(saved) {
   mainWindow.close();
 }
 
+/* ---------- mini 模式的几个小工具 ---------- */
+
+// 存档里记的"上次完整模式的窗口位置和大小"。读不出来就返回 {}（当成第一次打开）
+function readSavedWindowSettings() {
+  try {
+    const d = readDataFile();
+    const w = d && d.settings && d.settings.window;
+    return w && typeof w === 'object' ? w : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+// 把存档里的 bounds 洗一遍：尺寸不合理（比最小尺寸还小、或不是数字）就当没有，
+// 免得存档被写坏之后窗口打不开。
+function normalizeBounds(b) {
+  if (!b || typeof b !== 'object') return null;
+  const width = Math.round(Number(b.width));
+  const height = Math.round(Number(b.height));
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (width < FULL_MIN_W || height < FULL_MIN_H) return null;
+
+  const out = { width, height };
+  const x = Math.round(Number(b.x));
+  const y = Math.round(Number(b.y));
+  // 位置还要确认"这块屏幕还在" —— 拔掉外接显示器之后，存档里的坐标可能已经在屏幕外，
+  // 照搬过去窗口就"打开在看不见的地方"了。落不到任何屏幕上就交给系统居中。
+  if (Number.isFinite(x) && Number.isFinite(y) && pointOnSomeDisplay(x, y)) {
+    out.x = x;
+    out.y = y;
+  }
+  return out;
+}
+
+function pointOnSomeDisplay(x, y) {
+  try {
+    return screen.getAllDisplays().some((d) => {
+      const a = d.workArea;
+      // 允许窗口左上角稍微出界一点，但至少要有一小块留在可见区域里
+      return x >= a.x - 60 && x < a.x + a.width - 60 && y >= a.y - 20 && y < a.y + a.height - 60;
+    });
+  } catch (_) {
+    return false;
+  }
+}
+
 function createWindow() {
   closeInProgress = false;
   allowCloseOnce = false;
-  mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 760,
-    minWidth: 900,
-    minHeight: 600,
+
+  // ★ v2.1.0：上次退出时是不是 mini、完整模式下的窗口多大，都记在存档里。
+  //   启动时照着它开窗 —— 否则"上次明明缩在 mini，这次一打开却是个大窗"。
+  const saved = readSavedWindowSettings();
+  const startMini = !!saved.mini;
+  const startExpanded = !!(startMini && saved.miniExpanded);
+  const fullBounds = normalizeBounds(saved.fullBounds) || { width: FULL_DEF_W, height: FULL_DEF_H };
+  miniState = { on: startMini, expanded: startExpanded, fullBounds };
+
+  const winOpts = {
+    width: startMini ? MINI_W : fullBounds.width,
+    height: startMini ? (startExpanded ? MINI_H_EXPANDED : MINI_H_COLLAPSED) : fullBounds.height,
     title: 'Neko Music',
+    // ★ v2.1.0：窗口图标。之前一个图标文件都没有，任务栏 / Alt+Tab 里显示的是
+    //   Electron 的默认图标（一个灰色的电子）。图是 .verify/make-icon.js 手搓出来的。
+    icon: path.join(__dirname, 'assets', 'app.png'),
     backgroundColor: '#12121c', // 窗口还没画出来时的底色，避免白闪
     autoHideMenuBar: true,       // 隐藏顶部菜单栏，更清爽
     show: false,                 // 等页面准备好再显示，避免白屏闪烁
@@ -200,7 +275,24 @@ function createWindow() {
       nodeIntegration: false,
       spellcheck: false,
     },
-  });
+  };
+
+  // 位置：存档里有、而且那块屏幕还在，就照搬；否则交给系统居中
+  if (fullBounds.x !== undefined) { winOpts.x = fullBounds.x; winOpts.y = fullBounds.y; }
+
+  // 尺寸限制：mini 下卡死在 420 宽（高 132~520）；完整模式用常规下限
+  if (startMini) {
+    winOpts.minWidth = MINI_W;
+    winOpts.minHeight = MINI_H_COLLAPSED;
+    winOpts.maxWidth = MINI_W;
+    winOpts.maxHeight = MINI_H_EXPANDED;
+    winOpts.resizable = false;
+  } else {
+    winOpts.minWidth = FULL_MIN_W;
+    winOpts.minHeight = FULL_MIN_H;
+  }
+
+  mainWindow = new BrowserWindow(winOpts);
 
   mainWindow.loadFile(path.join(__dirname, 'ui', 'index.html'));
 
@@ -223,6 +315,54 @@ function createWindow() {
   // （双击标题栏最大化、拖到顶部最大化，都会触发这里。）
   mainWindow.on('maximize',   () => { try { mainWindow.webContents.send('win:state', true);  } catch (_) {} });
   mainWindow.on('unmaximize', () => { try { mainWindow.webContents.send('win:state', false); } catch (_) {} });
+
+  // ============================================================
+  //  无边框窗口的三处加固（v2.1.0，做法参考同类项目 biu）
+  // ============================================================
+  //  我们不用系统标题栏、整套界面都自己画。自绘带来两个副作用，顺手一起堵上。
+
+  // ① 拦掉 Windows 的系统菜单（WM_INITMENU = 0x0116）。
+  //    无边框窗口按 Alt+Space、或在标题栏右键，会冒出系统那个"还原/移动/大小/最小化/关闭"菜单，
+  //    和我们自绘的界面格格不入。做法是"拦下这条消息，把窗口瞬间禁用再启用"。
+  //    ⚠️ hookWindowMessage 是实验性 API，**只在 Windows 有效**，别的平台要跳过
+  //    （macOS / Linux 上这个方法不存在，所以先用 typeof 探一下）。
+  if (process.platform === 'win32' && typeof mainWindow.hookWindowMessage === 'function') {
+    mainWindow.hookWindowMessage(0x0116, () => {
+      try { mainWindow.setEnabled(false); } catch (_) {}
+      setTimeout(() => {
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setEnabled(true); } catch (_) {}
+      }, 100);
+    });
+  }
+
+  // ② 禁掉 Ctrl+R（刷新页面）。
+  //    误按一下，整个界面会被重载回首页 —— 歌还在响，看着却像崩了。
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if ((input.control || input.meta) && String(input.key || '').toLowerCase() === 'r') event.preventDefault();
+  });
+
+  // ③ 禁掉 Chromium 自带的右键菜单（"返回 / 重新加载 / 检查"那一坨，和自绘风格完全不搭）。
+  //    ⚠️ 但输入框里要放行：搜索框、Cookie 输入框里右键要用系统的"粘贴 / 全选"，
+  //       全禁掉会让人没法粘贴 Cookie。
+  mainWindow.webContents.on('context-menu', (event, params) => {
+    if (params && (params.isEditable || params.selectionText)) return;
+    event.preventDefault();
+  });
+
+  // ---- 记住"完整模式下的窗口位置和大小" ----
+  // 拖动 / 缩放停下来 0.5 秒后，把当前的位置尺寸推给界面存档。
+  // 用 getNormalBounds() 而不是 getBounds()：最大化的时候前者给的才是"还原后"的尺寸。
+  // mini 模式下不推 —— 那时的尺寸是固定两档，存了反而会把 fullBounds 覆盖掉。
+  let boundsTimer = null;
+  const pushBounds = () => {
+    if (boundsTimer) clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed() || miniState.on) return;
+      try { mainWindow.webContents.send('win:bounds', mainWindow.getNormalBounds()); } catch (_) {}
+    }, 500);
+  };
+  mainWindow.on('resize', pushBounds);
+  mainWindow.on('move', pushBounds);
 
   // 把网页里的日志转发到终端 —— 只在"调试模式"下开启。
   // 平时关着，原因有两个：
@@ -414,6 +554,20 @@ function registerHandlers() {
   ipcMain.on('win-close', () => requestMainWindowClose());
   ipcMain.on('win:close-ready', (_event, ok) => finishMainWindowClose(!!ok));
   ipcMain.on('win:fullscreen', (flag) => { if (mainWindow) mainWindow.setFullScreen(!!flag); });
+
+  // ---- mini 模式（v2.1.0）----
+  // 界面那边已经先把 body.mini 类加好了（布局由 CSS 换），这里只负责窗口本身：
+  //   进：记下"完整模式的样子" → 缩成 420×132（展开态 420×520）
+  //   出：放开尺寸限制 → 还原成记下来的样子
+  // 完事回推一条 win:mini-state，让界面把图标、☰ 的行为跟着切过来。
+  // ★ 真正的逻辑在 win-mini.js 的 handleMiniRequest 里（抽出去是为了能离线实测）。
+  ipcMain.on('win:mini', (_event, opts) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const st = handleMiniRequest(mainWindow, miniState, opts, screen.getPrimaryDisplay().workAreaSize);
+    try {
+      mainWindow.webContents.send('win:mini-state', { on: st.on, expanded: st.expanded });
+    } catch (_) {}
+  });
 
   // ---- 自定义背景 ----
   // 弹系统文件选择框 → 把选中的图复制到 backgrounds/ → 返回文件名

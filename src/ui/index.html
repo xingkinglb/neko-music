@@ -153,6 +153,16 @@
     <symbol id="i-win-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
       <path d="M6 6 18 18M18 6 6 18"/>
     </symbol>
+    <!-- ---- mini 模式：一个"画中画"形状的小图标（外框 + 右下角一小块） ---- -->
+    <symbol id="i-win-mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+      <rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/>
+      <rect x="12.5" y="12" width="6" height="4.5" rx="1.2" fill="currentColor" stroke="none"/>
+    </symbol>
+    <!-- ---- 回到完整模式：一个"往外扩"的方框（和"最小化"区分开） ---- -->
+    <symbol id="i-win-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>
+      <path d="M9.5 14.5 14.5 9.5M14.5 9.5h-3.6M14.5 9.5v3.6"/>
+    </symbol>
 
     <!-- ---- 歌词：播放条上的「词」按钮 ---- -->
     <symbol id="i-lyric" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -224,6 +234,8 @@
     <span class="brand-dot"></span>
     <span class="brand-text">Neko Music</span>
     <div class="win-controls">
+      <!-- mini 模式：把窗口缩成一条小窗（在"最小化"左边，和网易云 / QQ 音乐的位置一致） -->
+      <button class="win-btn" id="btnMini" title="mini 模式（Ctrl+M）" aria-label="mini 模式"><svg class="ic"><use href="#i-win-mini"/></svg></button>
       <button class="win-btn" id="winMin" title="最小化" aria-label="最小化"><svg class="ic"><use href="#i-win-min"/></svg></button>
       <button class="win-btn" id="winMax" title="最大化" aria-label="最大化"><svg class="ic"><use href="#i-win-max"/></svg></button>
       <button class="win-btn close" id="winClose" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
@@ -359,7 +371,18 @@
         </div>
       </div>
     </div>
+
+    <!-- mini 模式专用：关闭 / 回到完整模式。平时藏起来，只在 body.mini 下显示。
+         顺序照图2：✕ 在左、▢（还原）在最右角 —— 和 Windows 把"关闭"放在最角上不同，
+         这里故意让最角上是"回到完整模式"，免得手一抖就把程序关掉。 -->
+    <div class="mini-actions" id="miniActions">
+      <button class="win-btn close" id="miniClose" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
+      <button class="win-btn" id="btnRestoreFull" title="回到完整模式（Ctrl+M）" aria-label="回到完整模式"><svg class="ic"><use href="#i-win-expand"/></svg></button>
+    </div>
   </footer>
+
+  <!-- mini 模式展开态：就地显示的"播放队列"。平时藏起来，只在 body.mini.mini-open 下显示。 -->
+  <section class="mini-list" id="miniList"></section>
 </div>
 
 <!--

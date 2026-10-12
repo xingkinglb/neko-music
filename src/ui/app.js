@@ -204,6 +204,9 @@ const DEFAULT_SETTINGS = {
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
   playMode: 'list',   // 播放模式：list 列表循环 / one 单曲循环 / shuffle 随机 / order 顺序
+  // v2.1.0：窗口状态 —— 上次是不是 mini、mini 展开没展开、完整模式下的窗口位置尺寸。
+  // 缺省全为"不是 mini"，所以老存档零迁移，行为和以前一模一样。
+  window: { mini: false, fullBounds: null, miniExpanded: false },
 };
 
 /** 这是一个合法的播放模式吗（以 PLAY_MODES 为唯一准绳，避免两处清单对不上） */
@@ -223,6 +226,14 @@ function migrateSettings() {
     lyricWin: null,   // 下面单独补（要逐项夹范围，不能整块照抄）
     // 播放模式：老存档（以前是"随机开关 + 循环开关"两个字段）里没有这一项，就默认列表循环
     playMode: isPlayModeId(old.playMode) ? old.playMode : DEFAULT_SETTINGS.playMode,
+    // v2.1.0：窗口状态（mini 模式 + 完整模式的窗口位置尺寸）。
+    // 老存档没有这一项 → 补成缺省（非 mini），打开后的行为完全不变。
+    window: {
+      mini: !!(old.window && old.window.mini),
+      miniExpanded: !!(old.window && old.window.mini && old.window.miniExpanded),
+      fullBounds: (old.window && typeof old.window.fullBounds === 'object' && old.window.fullBounds)
+        ? old.window.fullBounds : null,
+    },
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -1307,21 +1318,19 @@ function bindCollect() {
    这里给它一个能从右侧拉开的抽屉：看得见"接下来播什么"，能跳播、移除、打乱、清空。
    ============================================================ */
 
-function renderQueueList(filter) {
-  const box = $('queueList');
-  if (!box) return;
+/**
+ * 队列行的 HTML —— 右侧抽屉和 mini 展开态那块列表**共用同一份**。
+ * 抽出来是为了不让两处各画一套：改一次两边一起变，样式和"正在播放"高亮不会跑偏。
+ * @param {string} filter 关键词（按标题过滤，或直接输序号）；空字符串 = 不过滤
+ * @returns {string[]} 每一行一段 HTML
+ */
+function queueRowsHTML(filter) {
   const cur = queue.tracks[queue.index];
   const q = (filter || '').trim().toLowerCase();
-  const rows = queue.tracks
+  return queue.tracks
     .map((t, i) => ({ t, i }))
-    .filter(({ t, i }) => !q || (t.title || '').toLowerCase().includes(q) || String(i + 1) === q);
-
-  $('queueSub').textContent = queue.tracks.length
-    ? `共 ${queue.tracks.length} 首${queue.name ? ' · 来自「' + queue.name + '」' : ''}`
-    : '队列是空的';
-
-  box.innerHTML = rows.length
-    ? rows.map(({ t, i }) => `
+    .filter(({ t, i }) => !q || (t.title || '').toLowerCase().includes(q) || String(i + 1) === q)
+    .map(({ t, i }) => `
         <div class="collect-row ${sameTrack(t, cur) ? 'on' : ''}" data-qi="${i}">
           <span class="cn">${i + 1}</span>
           <span class="ct" title="${esc(t.title)}">${esc(t.title)}</span>
@@ -1329,7 +1338,20 @@ function renderQueueList(filter) {
           <span class="cops">
             <button class="op-ic" data-qact="remove" data-qi="${i}" data-tip="从队列移除">${ic('i-trash')}</button>
           </span>
-        </div>`).join('')
+        </div>`);
+}
+
+function renderQueueList(filter) {
+  const box = $('queueList');
+  if (!box) return;
+  const rows = queueRowsHTML(filter);
+
+  $('queueSub').textContent = queue.tracks.length
+    ? `共 ${queue.tracks.length} 首${queue.name ? ' · 来自「' + queue.name + '」' : ''}`
+    : '队列是空的';
+
+  box.innerHTML = rows.length
+    ? rows.join('')
     : `<div class="empty" style="padding:34px 16px">
          <div class="msg">队列是空的</div>
          <div class="hint">在列表里点整行开始播放，或用合集面板的「加入队列」一次塞进一整段</div>
@@ -1363,7 +1385,12 @@ function removeFromQueue(i) {
 function bindQueue() {
   const mask = $('queueMask');
   if (!mask) return;
-  $('btnQueue').addEventListener('click', openQueue);
+  // ★ v2.1.0：mini 模式下 ☰ 不拉这个抽屉（420px 宽的小窗里塞不下右侧抽屉），
+  //   改成"就地展开 / 收起"mini 条下面那块队列列表。完整模式下行为完全没变。
+  $('btnQueue').addEventListener('click', () => {
+    if (mini.on) { setMini(true, !mini.expanded); return; }
+    openQueue();
+  });
   $('btnCloseQueue').addEventListener('click', closeQueue);
   mask.addEventListener('click', (e) => { if (e.target.id === 'queueMask') closeQueue(); });
   $('queueSearch').addEventListener('input', (e) => renderQueueList(e.target.value));
@@ -1409,6 +1436,125 @@ function bindQueue() {
 function refreshQueueIfOpen() {
   const mask = $('queueMask');
   if (mask && mask.classList.contains('show')) renderQueueList($('queueSearch').value);
+}
+
+/* ============================================================
+   第 3.8.5 部分：mini 模式（v2.1.0）
+   ------------------------------------------------------------
+   不是"另开一个小窗口"，就是**同一个窗口**换一套布局：
+     · 界面这一半：给 <body> 加/去 mini 类（CSS 见 style.css 那一节）、
+       渲染展开态的队列列表、把状态写进存档。
+     · 主进程那一半：把窗口本身缩成 420×132 / 展开 420×520（见 main.js 的 win:mini）。
+   两边各管一半，谁也不越界 —— 所以这里只发消息、不直接改窗口尺寸。
+
+   ★ 状态只有一个来源：mini.on / mini.expanded 这两个变量。
+     别处一律通过 setMini() / applyMiniUI() 改，免得"界面说在 mini、主进程说不在"。
+   ============================================================ */
+
+const mini = { on: false, expanded: false };
+
+/**
+ * 只换界面（类名、提示文字、列表），**不通知主进程**。
+ * 用途：主进程回推状态时、启动时按存档恢复时 —— 那时窗口尺寸已经是对的了，
+ * 再发一次消息就会"回推 → 改界面 → 再发消息"转成死循环。
+ */
+function applyMiniUI(on, expanded) {
+  mini.on = !!on;
+  mini.expanded = !!on && !!expanded;
+
+  document.body.classList.toggle('mini', mini.on);
+  document.body.classList.toggle('mini-open', mini.on && mini.expanded);
+
+  const bm = $('btnMini');
+  if (bm) {
+    bm.title = mini.on ? '退出 mini 模式（Ctrl+M）' : 'mini 模式（Ctrl+M）';
+    bm.setAttribute('aria-label', bm.title);
+  }
+  // mini 模式下 ☰ 不再拉右侧抽屉，改成"就地展开 / 收起队列列表"，
+  // 所以提示文字也得跟着换，不然鼠标停上去写的是"播放队列"，点出来却是另一回事。
+  const bq = $('btnQueue');
+  if (bq) bq.title = mini.on ? (mini.expanded ? '收起队列列表' : '展开队列列表') : '播放队列';
+
+  renderMiniList();
+}
+
+/**
+ * 进 / 出 mini 模式（界面主动触发：点按钮、按 Ctrl+M）。
+ * 先换界面，再请主进程调窗口 —— 这样看起来是"布局和窗口同时变"。
+ */
+function setMini(on, expanded, opts = {}) {
+  const wantOn = !!on;
+  const wantExpanded = wantOn ? !!expanded : false;
+  if (mini.on === wantOn && mini.expanded === wantExpanded) return;
+
+  // ★ 进 mini 前先把整页歌词收起来：那个浮层是铺满整个窗口的，
+  //   在 132px 高的小窗里根本没法看（而且小窗里也点不到封面去关它）。
+  if (wantOn && lyricState.showing) toggleLyrics(false);
+
+  applyMiniUI(wantOn, wantExpanded);
+  window.neko.winMini(wantOn, wantExpanded);
+
+  DB.settings.window = DB.settings.window || {};
+  DB.settings.window.mini = wantOn;
+  DB.settings.window.miniExpanded = wantExpanded;
+  if (!opts.silent) persistLater();
+}
+
+/** mini 展开态那块列表：就是当前播放队列（"接下来播什么"最贴图3） */
+function renderMiniList() {
+  const box = $('miniList');
+  if (!box) return;
+  if (!mini.on) { box.innerHTML = ''; return; }
+
+  const rows = queueRowsHTML('');
+  const head = `<div class="mini-head"><span>播放队列</span><span class="mh-n">共 ${queue.tracks.length} 首</span></div>`;
+  box.innerHTML = head + (rows.length
+    ? rows.join('')
+    : `<div class="empty" style="padding:34px 16px">
+         <div class="msg">队列是空的</div>
+         <div class="hint">在列表里点整行开始播放，或用合集面板的「加入队列」一次塞进一整段</div>
+       </div>`);
+}
+
+/** 绑定 mini 模式的所有交互 */
+function bindMini() {
+  $('btnMini').addEventListener('click', () => setMini(true, false));
+  // mini 窗右上角那两个：▢ 回完整模式、✕ 关程序
+  $('btnRestoreFull').addEventListener('click', () => setMini(false, false));
+  $('miniClose').addEventListener('click', () => window.neko.winClose());
+
+  // 展开态列表里：点整行跳播、点垃圾桶从队列拿掉（和右侧抽屉同一套动作）
+  $('miniList').addEventListener('click', (e) => {
+    const rm = e.target.closest('[data-qact="remove"]');
+    if (rm) { removeFromQueue(Number(rm.dataset.qi)); return; }
+    const row = e.target.closest('.collect-row');
+    if (row) goTo(Number(row.dataset.qi));
+  });
+
+  // 主进程回推"现在是不是 mini / 展没展开"。
+  // 它是唯一的真相来源（比如它在进 mini 时顺手退掉了最大化，就得由它来定状态）。
+  window.neko.onWinMiniState((st) => {
+    const on = !!st.on;
+    const expanded = !!st.expanded;
+    if (mini.on === on && mini.expanded === expanded) return;
+    if (on && lyricState.showing) toggleLyrics(false);
+    applyMiniUI(on, expanded);
+    DB.settings.window = DB.settings.window || {};
+    DB.settings.window.mini = on;
+    DB.settings.window.miniExpanded = expanded;
+    persistLater();
+  });
+
+  // 完整模式下窗口被拖动 / 缩放后，主进程把新位置尺寸送回来 —— 存下来，下次打开还原
+  window.neko.onWinBounds((b) => {
+    if (!b || !b.width || !b.height) return;
+    DB.settings.window = DB.settings.window || {};
+    DB.settings.window.fullBounds = {
+      x: Math.round(b.x), y: Math.round(b.y),
+      width: Math.round(b.width), height: Math.round(b.height),
+    };
+    persistLater();
+  });
 }
 
 /* ============================================================
@@ -1862,6 +2008,9 @@ function renderAll() {
   else if (currentView === 'up') renderUp();
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
   else if (currentView === 'parsed') renderParsed();
+
+  // mini 展开态那块队列列表也跟着刷（不在 mini 里的话它直接返回，不做事）
+  renderMiniList();
 }
 
 /**
@@ -2419,6 +2568,9 @@ function bindEvents() {
     $('winMax').setAttribute('aria-label', max ? '还原' : '最大化');
   });
 
+  /* ---- mini 模式（v2.1.0）：标题栏那个按钮 + mini 条里的 ✕ / ▢ ---- */
+  bindMini();
+
   /* ---- 新建歌单（用自家弹窗，不能用 prompt —— 见第 4.4 部分的说明） ---- */
   $('btnNewPlaylist').addEventListener('click', async () => {
     const name = await askName('新建歌单', '我的歌单', '创建');
@@ -2695,6 +2847,13 @@ function bindEvents() {
     if (ctrl && (e.key === 'd' || e.key === 'D')) {
       e.preventDefault();
       toggleLyrics();
+      return;
+    }
+
+    // Ctrl + M：进 / 出 mini 模式（v2.1.0）。进来时一律是"收起态"，不带着上次的展开状态。
+    if (ctrl && (e.key === 'm' || e.key === 'M')) {
+      e.preventDefault();
+      setMini(!mini.on, false);
       return;
     }
 
@@ -3179,6 +3338,10 @@ function bindLyrics() {
   const cover = $('npCover');
   if (cover) {
     cover.addEventListener('click', () => {
+      // ★ v2.1.0：mini 模式下封面不再是"进歌词页"的入口 ——
+      //   整页歌词是铺满整个窗口的，在 132px 高的小窗里没法看。
+      //   （style.css 里同时把封面上的"歌词"两字也藏了，免得提示一个点了没反应的按钮。）
+      if (mini.on) return;
       // 正开着 → 再点一次就是收起，回到刚才那个列表（这就是"收起"该有的行为）
       if (lyricState.showing) { toggleLyrics(false); return; }
       if (!queue.tracks[queue.index]) { toast('先放一首歌，再点封面看歌词'); return; }
@@ -3668,6 +3831,15 @@ async function boot() {
 
   // 4) 画界面
   renderAll();
+
+  // 4.2) mini 模式：上次退出时缩在 mini 里，这次照样缩着。
+  //   窗口尺寸主进程已经按存档开好了（见 main.js 的 createWindow），这里只负责
+  //   把 body.mini 类补上 —— 少了这一步就会"窗口是小的、界面还是完整布局"。
+  const savedWin = DB.settings.window || {};
+  if (savedWin.mini) {
+    applyMiniUI(true, !!savedWin.miniExpanded);
+    window.neko.winMini(true, !!savedWin.miniExpanded);
+  }
 
   // 4.5) 量出顶部工具栏的真实高度（歌词大屏要贴着它的下沿铺，不能盖住搜索框）
   syncTopbarHeight();

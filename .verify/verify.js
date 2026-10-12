@@ -22,6 +22,7 @@ const rawAppjs = read('src/ui/app.js');
 const appjs = stripLine(stripBlock(rawAppjs));
 const preload = stripBlock(read('src/preload.js'));
 const mainjs = stripBlock(read('src/main.js'));
+const winmini = stripBlock(read('src/win-mini.js'));
 const bgproto = stripBlock(read('src/bg-protocol.js'));
 const gitignore = read('.gitignore');
 
@@ -1501,8 +1502,14 @@ console.log('\n[42] 歌词页 · 透明化：');
 /* ---- 43) 歌词页 · 空状态（P2） ---- */
 console.log('\n[43] 歌词页 · 空状态：');
 {
-  if (/box\.innerHTML\s*=\s*''/.test(appjs))
-    err("取词失败时还是 box.innerHTML = ''（一片空白）");
+  // ★ v2.1.0：以前这里是"全局搜 box.innerHTML = ''"，范围太宽 ——
+  //   mini 展开态那块列表里也有一个 box.innerHTML = ''，会被这条误伤。
+  //   改成"只有被清空的 box 确实是歌词区（$('lyricBox')）时才算问题"，
+  //   这才是这条断言真正要守的东西。
+  const blanked = [...appjs.matchAll(/innerHTML\s*=\s*''/g)]
+    .filter((m) => /lyricBox/.test(appjs.slice(Math.max(0, m.index - 240), m.index)));
+  if (blanked.length)
+    err("取词失败时还是把歌词区清成空白（box.innerHTML = ''）");
   else ok('取词失败不再把歌词区清成空白');
   if (/（没有歌词）/.test(appjs)) err('还在用「（没有歌词）」那种空提示');
   else ok('不再用「（没有歌词）」占位');
@@ -1703,5 +1710,205 @@ console.log('\n[47] 播放条 · 封面兜底 ｜ 歌词页「收起」不再常
   else ok('合集封面只存一张（collectCovers）：存缓存时记下、读缓存时套给每一条');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 47 大类检查）');
+/* ---- 48) mini 模式（v2.1.0） ---- */
+console.log('\n[48] mini 模式 · 同一个窗口换布局（v2.1.0）：');
+{
+  /* ---- ① index.html：按钮和图标都得在 ---- */
+  if (!htmlIds.has('btnMini')) err('index.html 里没有 #btnMini（mini 模式的入口）');
+  else if (!htmlIds.has('btnRestoreFull')) err('index.html 里没有 #btnRestoreFull（回完整模式的出口）');
+  else if (!htmlIds.has('miniClose')) err('index.html 里没有 #miniClose（mini 条上的关闭）');
+  else if (!htmlIds.has('miniActions')) err('index.html 里没有 .mini-actions 那一块');
+  else if (!htmlIds.has('miniList')) err('index.html 里没有 #miniList（展开态的队列列表容器）');
+  else ok('index.html：入口 / 出口 / 关闭 / 展开列表，四样都在');
+
+  // 图标：照 #i-win-close 那一套画的两个新 symbol
+  if (!/<symbol id="i-win-mini"/.test(html)) err('没有 #i-win-mini 这个 SVG symbol');
+  else if (!/<symbol id="i-win-expand"/.test(html)) err('没有 #i-win-expand 这个 SVG symbol（mini 条的 ▢）');
+  else ok('两个新图标 #i-win-mini / #i-win-expand 都定义了');
+
+  // #btnMini 必须排在 #winMin 左边（顺序 = mini / 最小化 / 最大化 / 关闭）
+  const iMini = html.indexOf('id="btnMini"');
+  const iMin = html.indexOf('id="winMin"');
+  if (iMini < 0 || iMin < 0 || iMini > iMin)
+    err('#btnMini 不在 #winMin 左边 —— 标题栏按钮顺序不是 [mini][min][max][close]');
+  else ok('标题栏顺序正确：#btnMini 在 #winMin 左边');
+
+  /* ---- ② style.css：body.mini 那一节 ---- */
+  if (!/body\.mini\s+\.app\s*\{/.test(css)) err('style.css 里没有 body.mini .app 那一节');
+  else ok('style.css 有 body.mini .app（整个窗口只剩播放条）');
+
+  // 收起态只留 player 一块
+  const miniAppRule = /body\.mini\s+\.app\s*\{([^}]*)\}/.exec(css);
+  if (!miniAppRule || !/grid-template-areas:\s*"player"/.test(miniAppRule[1]))
+    err('mini 收起态没有把网格收成只有 "player" 一块');
+  else ok('收起态网格只留 "player" 一块');
+
+  // ★★ 铁律：mini 下给 .app（或它的祖先 body）加 transform/filter/opacity/will-change，
+  //    会生成 backdrop root，把子元素的毛玻璃打成一块纯色。这是本项目最容易踩、也最难查的坑。
+  const rootBodies = [
+    ...css.matchAll(/body\.mini[^{]*\.app\s*\{([^}]*)\}/g),
+    ...css.matchAll(/body\.mini\s*\{([^}]*)\}/g),
+  ].map((m) => m[1]);
+  const badProp = rootBodies
+    .map((b) => (/(^|[\s;{])transform\s*:/.test(b) ? 'transform'
+      : /(^|[\s;{])opacity\s*:/.test(b) ? 'opacity'
+      : /(^|[\s;{])will-change\s*:/.test(b) ? 'will-change'
+      : /(^|[\s;{])filter\s*:/.test(b) || /backdrop-filter\s*:/.test(b) ? 'filter' : null))
+    .find(Boolean);
+  if (badProp) err(`body.mini 下给 .app / body 加了 ${badProp} —— 会生成 backdrop root，毛玻璃会变成纯色`);
+  else ok('body.mini 下没有给 .app / body 加 transform / filter / opacity / will-change');
+
+  // .np / .volume 用 display:contents 让子元素直接参与 flex 布局（不改 HTML 结构的关键一招）
+  if (!/body\.mini\s+\.np\s*,[\s\S]{0,40}body\.mini\s+\.volume\s*\{[^}]*display:\s*contents/.test(css))
+    err('.np / .volume 没有 display:contents —— 封面和歌名拆不到两行去');
+  else ok('.np / .volume 在 mini 下用 display:contents 让位');
+
+  // 播放条整条是窗口把手（没有标题栏了）
+  const miniPlayerRule = /body\.mini\s+\.player\s*\{([^}]*)\}/.exec(css);
+  if (!miniPlayerRule || !/-webkit-app-region:\s*drag/.test(miniPlayerRule[1]))
+    err('body.mini .player 没设成可拖动 —— mini 窗没有标题栏，会拖不动');
+  else if (!/body\.mini\s+\.player\s+button[\s\S]{0,200}no-drag/.test(css))
+    err('拖动区里的按钮没有单独放行 no-drag —— 会被拖动区吃掉点击、按不动');
+  else ok('mini 播放条整条可拖动，里面的按钮都单独放行了 no-drag');
+
+  // 平时（完整模式）必须藏起来 —— 否则它们会挤进 .player 那套三列网格，把布局撑坏
+  if (!/\.mini-actions\s*\{[^}]*display:\s*none/.test(css))
+    err('.mini-actions 平时没有 display:none —— 完整模式下会多出一列，播放条布局会被撑坏');
+  else ok('.mini-actions 平时藏起来（不会挤进完整模式的播放条网格）');
+  if (!/\.mini-list\s*\{[^}]*display:\s*none/.test(css))
+    err('.mini-list 平时没有 display:none —— 会被自动塞进 .app 的隐式行');
+  else ok('.mini-list 平时藏起来（不会在 .app 里多占一行）');
+
+  // 展开态：播放条在上、列表在下
+  if (!/body\.mini\.mini-open\s+\.app\s*\{[^}]*grid-template-areas:\s*"player"\s*"mini-list"/.test(css))
+    err('mini 展开态没有把网格排成"播放条在上、队列列表在下"');
+  else ok('展开态：播放条在上，队列列表在下');
+
+  /* ---- ③ app.js：设置、存档、绑定、快捷键 ---- */
+  if (!/window:\s*\{\s*mini:\s*false/.test(appjs))
+    err('DEFAULT_SETTINGS 里没有 window:{mini:false} —— 老存档没有这一项，缺省必须是"非 mini"');
+  else ok('DEFAULT_SETTINGS 有 window 且缺省 mini:false（老存档零迁移）');
+  if (!/old\.window\s*&&\s*old\.window\.mini/.test(appjs))
+    err('migrateSettings 没有补 window 这一项');
+  else ok('migrateSettings 会补齐 settings.window');
+
+  for (const fn of ['applyMiniUI', 'setMini', 'renderMiniList', 'bindMini']) {
+    if (!new RegExp(`function ${fn}\\b`).test(appjs)) { err(`app.js 里没有 ${fn}()`); }
+  }
+  if (!/function applyMiniUI[\s\S]*?function setMini/.test(appjs)) err('mini 的几个函数没找齐');
+  else ok('applyMiniUI / setMini / renderMiniList / bindMini 都在');
+
+  // 状态只能有一个来源：applyMiniUI 不能反过来再通知主进程（否则会来回死循环）
+  const applyBody = /function applyMiniUI\([\s\S]*?\n\}/.exec(appjs);
+  if (!applyBody) err('取不到 applyMiniUI 的函数体');
+  else if (/winMini\(/.test(applyBody[0]))
+    err('applyMiniUI 里又调了一次 winMini —— 主进程回推 → 改界面 → 再发消息，会转成死循环');
+  else ok('applyMiniUI 只改界面、不回调主进程（不会和主进程来回打转）');
+
+  if (!/window\.neko\.winMini\(/.test(appjs)) err('app.js 没请主进程调窗口（没有调 winMini）');
+  else ok('app.js 会请主进程把窗口缩起来 / 还回去');
+  if (!/window\.neko\.onWinMiniState\(/.test(appjs)) err('app.js 没有监听 win:mini-state 的回推');
+  else ok('app.js 监听主进程回推的 mini 状态');
+  if (!/window\.neko\.onWinBounds\(/.test(appjs)) err('app.js 没有监听 win:bounds（记不住窗口尺寸）');
+  else ok('app.js 会把完整模式的窗口尺寸存下来');
+
+  // ☰ 在 mini 下要改成"就地展开/收起"，不能再拉右侧抽屉
+  if (!/\$\(\s*'btnQueue'\s*\)\.addEventListener\('click',[\s\S]{0,200}mini\.on/.test(appjs))
+    err('mini 模式下 #btnQueue 仍然直接开右侧抽屉 —— 小窗里塞不下，应该是就地展开列表');
+  else ok('mini 下 ☰ 改成"就地展开/收起队列列表"');
+
+  // Ctrl+M
+  if (!/ctrl\s*&&\s*\(e\.key === 'm' \|\| e\.key === 'M'\)/.test(appjs))
+    err('没有 Ctrl+M 快捷键');
+  else if (!/setMini\(!mini\.on, false\)/.test(appjs)) err('Ctrl+M 没有调用 setMini 切换');
+  else ok('Ctrl+M 能进 / 出 mini 模式');
+
+  // 封面在 mini 下不再进歌词页
+  if (!/function bindLyrics[\s\S]*?if \(mini\.on\) return;/.test(appjs))
+    err('mini 下点封面仍会打开整页歌词 —— 132px 高的小窗里没法看，应该直接不响应');
+  else ok('mini 下封面不再是歌词页入口（小窗里铺不开）');
+
+  // 进 mini 时收起歌词大屏
+  if (!/function setMini[\s\S]*?lyricState\.showing\)\s*toggleLyrics\(false\)/.test(appjs))
+    err('进 mini 时没有把整页歌词收起来 —— 会留一个铺满小窗的歌词浮层');
+  else ok('进 mini 时先收起整页歌词');
+
+  // 启动时按存档恢复
+  if (!/savedWin\.mini[\s\S]{0,200}applyMiniUI\(true/.test(appjs))
+    err('boot() 没有按存档恢复 mini 状态 —— 上次缩在 mini，这次打开会"窗口小、界面却是完整的"');
+  else ok('启动时按存档恢复 mini 状态');
+
+  // 队列行 HTML 两处共用（抽屉 + mini 列表）
+  if (!/function queueRowsHTML/.test(appjs))
+    err('没有 queueRowsHTML()：抽屉和 mini 列表各画一套行，样式迟早跑偏');
+  else if (!/renderMiniList[\s\S]{0,400}queueRowsHTML\(/.test(appjs))
+    err('renderMiniList 没有复用 queueRowsHTML');
+  else ok('mini 列表和队列抽屉共用同一份行 HTML');
+
+  /* ---- ④ preload.js：三个新传话筒 ---- */
+  for (const api of ['winMini', 'onWinMiniState', 'onWinBounds']) {
+    if (!new RegExp(`${api}\\s*:`).test(preload)) err(`preload.js 没有暴露 ${api}()`);
+  }
+  if (!/winMini[\s\S]*onWinMiniState[\s\S]*onWinBounds/.test(preload)) err('preload 里的三个接口没找齐');
+  else ok('preload 暴露了 winMini / onWinMiniState / onWinBounds');
+
+  /* ---- ⑤ main.js：通道 + 尺寸记忆 + 三处加固 ---- */
+  if (!/ipcMain\.on\('win:mini'/.test(mainjs)) err('main.js 没有 win:mini 通道');
+  else ok('main.js 有 win:mini 通道');
+
+  const miniHandler = /ipcMain\.on\('win:mini'[\s\S]*?\n  \}\);/.exec(mainjs);
+  // ★ 真正的逻辑抽在 win-mini.js 里（为了离线实测能拿真窗口跑真逻辑），
+  //   所以这条断言要跨两个文件看：main.js 负责"什么时候调"，win-mini.js 负责"怎么调"。
+  const applyFn = /function applyMiniBounds\([\s\S]*?\n\}/.exec(winmini);
+  const reqFn = /function handleMiniRequest\([\s\S]*?\n\}/.exec(winmini);
+  if (!miniHandler) err('取不到 win:mini 的处理体');
+  else if (!applyFn) err('win-mini.js 里没有 applyMiniBounds()');
+  else if (!reqFn) err('win-mini.js 里没有 handleMiniRequest()');
+  else {
+    const body = miniHandler[0] + reqFn[0] + applyFn[0];
+    const need = ['setMinimumSize', 'setMaximumSize', 'setResizable', 'getNormalBounds'];
+    const lack = need.filter((n) => !body.includes(n));
+    if (lack.length) err('win:mini 这条路上少了：' + lack.join(' / '));
+    else ok('win:mini 会卡住最小/最大尺寸、关掉自由缩放，并记住完整模式的窗口样子');
+
+    // 退出 mini 要还原成"进 mini 之前"的样子，而不是回默认尺寸
+    if (!/restoreFullBounds\(win,\s*state\.fullBounds/.test(reqFn[0]))
+      err('退出 mini 没有拿进 mini 前记下的 fullBounds 去还原 —— 会回到默认尺寸而不是原来的位置');
+    else ok('退出 mini 会还原成进 mini 之前的大小和位置');
+
+    // 主进程真的调了它（不是抽出来没人用）
+    if (!/handleMiniRequest\(mainWindow/.test(miniHandler[0]))
+      err('main.js 的 win:mini 没有调 handleMiniRequest()（抽出去的那份逻辑没人用）');
+    else ok('main.js 的 win:mini 走的就是 win-mini.js 里那份逻辑');
+
+    // 尺寸常数只许有一处定义（两处各写一份迟早对不上）
+    if (!/MINI_W = 420/.test(winmini) || !/MINI_H_COLLAPSED = 132/.test(winmini) || !/MINI_H_EXPANDED = 520/.test(winmini))
+      err('win-mini.js 里的两档尺寸不是 420×132 / 420×520');
+    else ok('两档尺寸 420×132 / 420×520 只在 win-mini.js 定义一次');
+  }
+
+  // 三处加固（§6.2）
+  if (!/hookWindowMessage\(0x0116/.test(mainjs))
+    err('没有拦 WM_INITMENU(0x0116) —— 无边框窗口按 Alt+Space 会冒出系统菜单');
+  else if (!/process\.platform === 'win32'[\s\S]{0,200}hookWindowMessage\(0x0116/.test(mainjs))
+    err('hookWindowMessage 没有用 win32 判断包起来 —— 别的平台这个方法不存在，会直接抛错');
+  else ok('拦掉了 Windows 系统菜单（WM_INITMENU 0x0116，且只在 win32 下挂）');
+
+  if (!/before-input-event[\s\S]{0,200}preventDefault\(\)/.test(mainjs))
+    err('没有拦 Ctrl+R —— 误按会把界面重载回首页，看着像崩了');
+  else ok('拦掉了 Ctrl+R 刷新');
+
+  if (!/context-menu'[\s\S]{0,200}preventDefault\(\)/.test(mainjs))
+    err('没有拦 Chromium 的默认右键菜单');
+  else ok('拦掉了 Chromium 默认右键菜单（输入框里放行，不然没法粘贴）');
+
+  /* ---- ⑥ 窗口图标 ---- */
+  if (!fs.existsSync(path.join(ROOT, 'src/assets/app.png')))
+    err('src/assets/app.png 不存在 —— 任务栏 / Alt+Tab 里会是 Electron 的默认图标');
+  else if (!/icon:\s*path\.join\(__dirname, 'assets', 'app\.png'\)/.test(mainjs))
+    err('createWindow 没有把 icon 指到 assets/app.png');
+  else ok('窗口图标已接上（src/assets/app.png）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 48 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
