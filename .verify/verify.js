@@ -1582,25 +1582,39 @@ console.log('\n[45] 性能 · 每帧重算的路径已拿掉 ｜ 播放请求的
      后一次会把 audio.src 换掉，前一次还挂着的 audio.play() 就被浏览器打断并抛
      AbortError（"interrupted by a new load request"）。那**不是**取地址失败：
      旧代码会弹「播放失败」、还会 900ms 后自动跳下一首（莫名跳歌）。 */
-  if (!/let playSeq = 0;/.test(appjs)) err('没有 playSeq：两次 playAt 会叠在一起跑，旧的请求回来还会抢播放器');
-  else ok('有 playSeq（每次切歌领一个序号，旧的请求回来直接放弃）');
-
-  if (!/function isPlayInterrupted\(/.test(appjs)) err('没有 isPlayInterrupted：分不出"被新加载打断"和"真失败"');
-  else if (!/AbortError/.test(appjs) || !/interrupted by a new load request/.test(appjs))
-    err('isPlayInterrupted 没有认 AbortError / "interrupted by a new load request"');
-  else ok('isPlayInterrupted 认得出"被新的加载请求打断"（AbortError）');
-
-  // playAt 里三处"过期就放弃"的闸门（补 cid 后 / 取地址后 / play 后）
+  // playAt 的函数体（下面多条断言都要用，先抠出来）
   const playAtBody = (() => {
     const m = /async function playAt\(index\)\s*\{([\s\S]*?)\n\}/.exec(appjs);
     return m ? m[1] : '';
   })();
+  if (!playAtBody) err('抠不出 playAt 的函数体（播放健壮性的断言没法验）');
+
+  if (!/let playSeq = 0;/.test(appjs)) err('没有 playSeq：两次 playAt 会叠在一起跑，旧的请求回来还会抢播放器');
+  else ok('有 playSeq（每次切歌领一个序号，旧的请求回来直接放弃）');
+
+  if (!/function isPlayInterrupted\(/.test(appjs)) err('没有 isPlayInterrupted：分不出"被新加载打断"和"真失败"');
+  else if (!/AbortError/.test(appjs) || !/interrupted by/.test(appjs))
+    err('isPlayInterrupted 没有认 AbortError / "interrupted by"（Chromium 的消息末尾还会附媒体地址，必须用"包含"判断）');
+  else ok('isPlayInterrupted 认得出"被打断"（AbortError / interrupted by…，不靠整串相等）');
+
+  // ★ v2.0.5：再加一道**不依赖错误消息文字**的闸门 —— 地址被换过就算过期
+  if (!/let lastSetSrc = '';/.test(appjs))
+    err("没有 lastSetSrc：只靠消息文字判断「被打断」太脆（Chromium 会在消息末尾附媒体地址）");
+  else if (!/lastSetSrc !== mySrc/.test(playAtBody))
+    err('playAt 里没有"地址已被换掉 → 本次过期"的闸门（只认消息文字）');
+  else if (!/\(mySrc && lastSetSrc !== mySrc\)/.test(playAtBody))
+    err('那道闸门没有先确认"我们确实设过地址"（mySrc 为空时会误判成过期，把真失败也吞掉）');
+  else ok('playAt 另有一道闸门：地址被换掉就判过期（不依赖错误消息文字）');
+
+  if (!/function cleanPlayError\(/.test(appjs))
+    err('没有 cleanPlayError：真失败时会把 Chromium 附的媒体地址一起弹出来（又长又难看）');
+  else ok('真失败时剪掉消息末尾的媒体地址再弹提示');
+
   const gates = (playAtBody.match(/if \(seq !== playSeq\) return;/g) || []).length;
-  if (!playAtBody) err('抠不出 playAt 的函数体（v2.0.4 的闸门没法验）');
-  else if (gates < 3) err(`playAt 里的"过期就放弃"闸门只有 ${gates} 处（应当 ≥3：补 cid 后 / 取地址后 / play 后）`);
+  if (gates < 3) err(`playAt 里的"过期就放弃"闸门只有 ${gates} 处（应当 ≥3：补 cid 后 / 取地址后 / play 后）`);
   else ok(`playAt 里有 ${gates} 处"过期就放弃"的闸门（旧的播放请求不会再来抢播放器）`);
 
-  if (!/if \(isPlayInterrupted\(playErr\)\) return;/.test(playAtBody))
+  if (!/if \(isPlayInterrupted\(playErr\)/.test(playAtBody))
     err('playAt 把"被打断"当成真失败了（会弹「播放失败」+ 莫名跳歌）');
   else ok('playAt 把"被打断"静默忽略，不再误报、不再误跳');
 
@@ -1655,5 +1669,39 @@ console.log('\n[46] 颜色语法 · 空格三元组只能配斜杠写法：');
   else ok('没有其它硬编码的 rgba(R G B, A) 混搭写法');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 46 大类检查）');
+console.log('\n[47] 播放条 · 封面兜底 ｜ 歌词页「收起」不再常驻（v2.0.5）：');
+{
+  // ① 「收起」改成"移上去才出现"：.np-cover.open::after 里**不能**再有常驻的 opacity:1
+  //    （出现时机交给上面那条 .np-cover:hover::after）。抠规则体再查，避免全文搜到别处。
+  const openAfter = /\.np-cover\.open::after\s*\{([^}]*)\}/.exec(css);
+  if (!openAfter) err('找不到 .np-cover.open::after 规则（歌词页开着时封面上的提示没了？）');
+  else if (/opacity\s*:\s*1/.test(openAfter[1]))
+    err('歌词页开着时「收起」还是常驻（.np-cover.open::after 里仍写着 opacity:1），会一直挡住封面');
+  else ok('歌词页开着时「收起」不再常驻，鼠标移上去才出现');
+
+  // ② 没封面时的音符兜底
+  if (!/\.np-cover\.no-art\s*\{/.test(css))
+    err('没有 .np-cover.no-art 的音符兜底：没封面时只剩一块纯色，看着像坏了');
+  else if (!/\.np-cover\.no-art\s*\{[^}]*background-image\s*:\s*url\(/.test(css))
+    err('.np-cover.no-art 里没有 background-image（兜底图形没画上）');
+  else ok('没封面时有 .np-cover.no-art 的音符兜底（底图是内联 SVG data-URI）');
+
+  // ③ app.js：没封面时挂 no-art（且不能再塞 'none' 把兜底盖掉）
+  if (!/classList\.toggle\('no-art'/.test(appjs))
+    err('app.js 里没有 no-art 类的切换 —— 兜底 CSS 永远不会生效');
+  else if (/style\.backgroundImage\s*=\s*track\.cover\s*\?\s*`url\("?\$\{track\.cover\}"?\)`\s*:\s*'none'/.test(appjs))
+    err("没封面时仍把 backgroundImage 设成 'none'（行内样式会盖掉 CSS 兜底）");
+  else ok('没封面时挂 no-art，且不再把 backgroundImage 设成 none');
+
+  // ④ 合集封面缓存：存缓存时记下、读缓存时套给每一条
+  if (!/DB\.collectCovers/.test(appjs))
+    err('没有 DB.collectCovers：重启后再播"展开过的合集"，缓存里没封面 → 播放条和列表封面全空');
+  else if (!/DB\.collectCovers\[track\.bvid\]\s*=/.test(appjs))
+    err('collectCovers 只读不写（存曲目表缓存时没把合集封面记下来）');
+  else if (!/cachedCollectEntries\(/.test(appjs))
+    err('读缓存时没有把合集封面套给每一条（collectEntriesFor 仍直接 return cached）');
+  else ok('合集封面只存一张（collectCovers）：存缓存时记下、读缓存时套给每一条');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 47 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

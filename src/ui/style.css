@@ -709,9 +709,21 @@ body.perf-idle .spinner {
 }
 .np-cover:hover::after { opacity: 1; }
 
-/* 歌词页正开着：封面上常驻一句"收起" —— 再点一下就返回原来的窗口，
-   不用猜它是不是个开关。（和"词"按钮一样，点了就有反馈。） */
-.np-cover.open::after { content: "收起"; opacity: 1; }
+/* 歌词页正开着：封面上的提示文字换成"收起" —— 再点一下就返回原来的窗口。
+   ★ v2.0.5：以前这里是"常驻显示"（写了 opacity:1），于是歌词页一开，
+   那块就一直盖着「收起」挡住封面，看着像没做完。现在和上面「歌词」一样，
+   **只换文字、出现时机交给 :hover** —— 鼠标移上去才浮出来。 */
+.np-cover.open::after { content: "收起"; }
+
+/* ★ v2.0.5：没有封面时的兜底 —— 居中一个淡淡的音符，而不是一块什么都没有的色块。
+   触发条件：app.js 里 track.cover 为空时给 .np-cover 加 .no-art 类（并把行内
+   background-image 清空，好让这条 CSS 生效）。底图用内联 SVG（CSP 的 img-src 已放行 data:）。 */
+.np-cover.no-art {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238f8fa8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M9 18V5l12-2v13'/><circle cx='6' cy='18' r='3'/><circle cx='18' cy='16' r='3'/></svg>");
+  background-size: 24px 24px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
 
 .np-meta { min-width: 0; flex: 1; }
 .np-title { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

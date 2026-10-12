@@ -6,7 +6,7 @@
 
 把 B 站视频里的音频在线播放出来 —— 搜歌、合集、歌单、收藏、歌词、动态背景，一个不少。
 
-![version](https://img.shields.io/badge/version-2.0.4-ff6fa5)
+![version](https://img.shields.io/badge/version-2.0.5-ff6fa5)
 ![license](https://img.shields.io/badge/license-MIT-7c5cff)
 ![platform](https://img.shields.io/badge/platform-Windows-4c8dff)
 ![electron](https://img.shields.io/badge/Electron-33-37d6c0)
@@ -309,13 +309,14 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 
 ## 更新日志
 
-### 最近更新（v2.0.4）
+### 最近更新（v2.0.5）
 
-- 🎯 **修掉「播放失败：The play() request was interrupted by a new load request.」**：以前**连着点两首歌**时，两个"播放"会**叠在一起跑**，后一个换掉音源、把前一个还没走完的 `audio.play()` 打断，旧代码**把"被打断"当成了"真失败"** —— 于是你明明已经在听歌，却冒出一句吓人的「播放失败」，还可能莫名跳下一首。**它根本不是"取歌失败"**
-- 🔢 **改法**：给每次切歌发一个**序号**，旧的请求回来一看序号变了就**静默放弃**（不换音源 / 不记历史 / 不提示 / 不跳歌）；单独认出"被打断"这个错并吞掉，只有**真失败**才照旧提示 + 跳下一首
-- 🔇 播放条按钮统一走 `safePlay()`：以前"不接错"的 `audio.play()` 被打断时会变成一条"未处理的 promise 拒绝"，控制台一片红
-- ✅ 新增离屏实测 `.verify/test-play-interrupt.js`（4 组）；**在修复前的代码上会真的失败 4 项**，弹的提示**逐字复现你截图里那一句**
-- ✅ 静态自检 46 大类全过（新增 6 条断言：`playSeq` / `isPlayInterrupted` / ≥3 处闸门 / 自动跳歌带闸门 / `safePlay`，并禁止旧式未接错的 `audio.play()`）
+- 🎯 **播放条封面不再空白**：从**合集 / 选集**里播的歌，重启软件后再播，封面**不再消失**（根因：存档里的"曲目表"当初故意剥掉了封面地址；现在给每个合集**只存一张封面**，读的时候套给每一条）
+- 🎵 **没封面时的音符兜底**：真取不到封面时，封面中间显示一个**淡淡的音符**，而不是一块什么都没有的灰紫色方块
+- 🎯 **歌词页的「收起」不再常驻**：打开整页歌词时封面是干净的，鼠标**移上去**才浮出「收起」（和「歌词」出现的时机一致）
+- 🧹 **"播放失败"提示更干净**：浏览器会往错误消息末尾**附一串媒体地址**（截图里那行 `https://…`），现在判定不再依赖"文字完全相等"，真失败时也**只显示原因本身**、完整信息进控制台
+- 🔒 **多一道不依赖文字的闸门**：播放器里的地址已经不是我们要的那条 → 说明中间换过歌 → 静默忽略（不提示、不跳歌）
+- ✅ 静态自检 **47 大类全过**（新增第 47 区块）；`test-round9.js` 扩 6 条、`test-play-interrupt.js` 扩到 5 组；**用修复前的代码跑会真的失败**
 
 > 完整历史见 [CHANGELOG.md](CHANGELOG.md) ·
 > 所有版本见 [Releases](https://github.com/xingkinglb/neko-music/releases)

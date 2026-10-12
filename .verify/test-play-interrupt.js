@@ -1,16 +1,19 @@
-/* 「The play() request was interrupted by a new load request」的实测（v2.0.4 修的 bug）：
+/* 「The play() request was interrupted by a new load request」的实测（v2.0.4 修的 bug，v2.0.5 加固）：
 
    现象（Neo 的截图）：有些歌点了播放会弹「播放失败：The play() request was interrupted
-   by a new load request.」，可歌**已经在唱了**。
+   by a new load request.」，可歌**已经在唱了**；提示条第二行还挂着那首歌的媒体地址。
 
    真相：这**不是"取音频地址失败"**，而是**两次播放请求叠在一起**了 ——
    playAt() 里有两段 await（补 cid、取音频地址），期间用户又点了另一首，
    后一次把 audio.src 换掉，前一次还挂着的 audio.play() 就被浏览器打断并抛 AbortError。
    旧代码把这个 AbortError 当成真失败：弹提示 + 900ms 后自动跳下一首（会莫名跳歌）。
 
+   v2.0.5 加固：Chromium 会在这类消息**末尾再附一行媒体地址**，所以判定改成"包含"，
+   并加了第二道不依赖消息文字的闸门（地址被换掉 = 本次已过期）；真失败时提示条只显示原因。
+
    这里不是文本断言 —— 真的把 index.html + app.js 跑起来，把 audio 的 play()/src
-   换成"和浏览器一样的行为"（src 一变，还挂着的 play() 就以 AbortError 拒绝），
-   然后连点两首，看有没有弹提示、有没有多跳一首。
+   换成"和浏览器一样的行为"（src 一变，还挂着的 play() 就以 AbortError 拒绝，
+   消息末尾同样附上地址），然后连点两首，看有没有弹提示、有没有多跳一首。
 
    开发期检查脚本，不参与打包。 */
 const { app, BrowserWindow, ipcMain } = require('electron');
@@ -97,7 +100,9 @@ app.whenReady().then(async () => {
         if (pending) {
           const fire = pending; pending = null;
           window.__aborts++;
-          const e = new Error('The play() request was interrupted by a new load request.');
+          // ★ 和真实 Chromium 一致：消息末尾会**再附一行媒体地址**（Neo 的截图就是这样，
+          //   第二行是 https://goo.gl/LdLk22）。所以判定不能用"整串相等"。
+          const e = new Error('The play() request was interrupted by a new load request. https://goo.gl/LdLk22');
           e.name = 'AbortError';
           fire(e);
         }
@@ -109,6 +114,12 @@ app.whenReady().then(async () => {
     a.play = () => {
       window.__playCalls++;
       window.__paused = false;
+      // 专门用来测"真失败 + 消息里带媒体地址"：应该弹提示，但提示里不该出现那串地址
+      if (/BVBADPLAY/.test(window.__src)) {
+        const e = new Error('Failed to load because no supported source was found. https://goo.gl/LdLk22');
+        e.name = 'NotSupportedError';
+        return Promise.reject(e);
+      }
       return new Promise((res, rej) => {
         const t = setTimeout(() => { if (pending) pending = null; res(); }, 800);
         pending = (e) => { clearTimeout(t); rej(e); };
@@ -205,8 +216,28 @@ app.whenReady().then(async () => {
   if (r3.index === 1) ok('真失败后自动跳下一首（原有兜底行为保留）');
   else bad(`真失败后应当自动跳到第 2 首，实际 index=${r3.index}`);
 
-  say('\n[4] 页面控制台报错：');
-  const real = errors.filter((m) => !/media|video|decode|DEMUXER|pipeline|autoplay|Audio/i.test(m));
+  say('\n[4] 真失败的消息末尾带着媒体地址时，提示条只显示原因本身（别把那串 URL 也弹出来）');
+  const r4 = await evalJS(`(async () => {
+    document.getElementById('toast').classList.remove('show');
+    document.getElementById('toast').textContent = '';
+    DB.history = [];
+    queue = { tracks: [{ bvid: 'BVBADPLAY', cid: 1, title: '放不出来的歌', author: 'UP', duration: 200 }],
+              index: -1, name: '' };
+    playAt(0);
+    await new Promise((r) => setTimeout(r, 600));
+    return { shown: document.getElementById('toast').classList.contains('show'),
+             text: document.getElementById('toast').textContent };
+  })()`);
+  say(`    提示条：${r4.shown ? '「' + r4.text + '」' : '没有显示'}`);
+  if (!r4.shown) bad('真失败（源不支持）却没有任何提示 —— 静默做过头了');
+  else if (/https?:\/\//.test(r4.text)) bad(`提示里还挂着媒体地址：「${r4.text}」`);
+  else if (!/播放失败/.test(r4.text)) bad(`提示文案不对：「${r4.text}」`);
+  else ok('真失败照旧提示，且剪掉了消息末尾的媒体地址');
+
+  say('\n[5] 页面控制台报错：');
+  // 本脚本会**故意**制造真失败，app 会按设计打一条 `[播放失败] …` 到控制台（含媒体地址，方便排查），
+  // 那是预期内的，不算"非预期报错"。
+  const real = errors.filter((m) => !/media|video|decode|DEMUXER|pipeline|autoplay|Audio|播放失败/i.test(m));
   if (!real.length) ok('没有非预期的页面报错');
   else { bad('页面有报错：'); real.forEach((m) => say('       ' + m)); }
 

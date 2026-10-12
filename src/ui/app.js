@@ -114,12 +114,31 @@ let queue = { tracks: [], index: -1, name: '' };
    有了序号，旧的请求回来时一看序号变了就直接放弃，一声不吭。 */
 let playSeq = 0;
 
-/** 这个播放错误是不是"被新的播放请求打断了"（不是真失败，静默忽略） */
+/* ★ v2.0.5：最后一次写进 audio.src 的地址。
+   用途：给"这次播放请求已经过期"再加一道**不依赖错误消息文字**的闸门 ——
+   只要地址已经不是我们刚设的那条，就说明中间有人换过歌，本次的失败一律静默。
+   （为什么不直接读 audio.src 来比：浏览器会对 URL 做规范化，比字符串容易误判。） */
+let lastSetSrc = '';
+
+/** 这个播放错误是不是"被新的播放请求打断了"（不是真失败，静默忽略）。
+ *
+ *  ★ v2.0.5 加固：以前只认两条固定的英文句子。但实测发现 Chromium 会在这类消息
+ *  **末尾附上媒体地址**（Neo 的截图里就是 "…new load request." 换行后跟一个 URL），
+ *  句子本身没变、但整串不再相等 —— 所以这里一律用"包含"判断，并且放宽到
+ *  `interrupted by`（既覆盖 "a new load request" 也覆盖 "a call to pause"）。
+ *  宁可把"打断"判宽一点（它本来就该静默），也不要漏掉一条又弹一次吓人的提示。 */
 function isPlayInterrupted(err) {
   if (!err) return false;
   if (err.name === 'AbortError') return true;
-  return /interrupted by a new load request|interrupted by a call to pause|The play\(\) request was interrupted/i
-    .test(String(err.message || err));
+  return /interrupted by|The play\(\) request was interrupted/i.test(String(err.message || err));
+}
+
+/** 把 Chromium 附在消息末尾的媒体地址剪掉，弹提示时只显示原因本身。
+ *  （否则 toast 里会挂一行又长又难看的 URL，Neo 截图里就是这样。） */
+function cleanPlayError(err) {
+  const msg = String((err && err.message) || err || '').trim();
+  const cut = msg.replace(/\s*https?:\/\/\S+\s*$/i, '').trim();
+  return cut || '这首歌的音频地址取不到，换一首试试';
 }
 
 /** 播放条那几个按钮直接调 audio.play() 时用这个包一层。
@@ -646,8 +665,16 @@ async function playAt(index) {
   // 更新底部播放条的外观（先显示信息，再慢慢加载音频）
   $('npTitle').textContent = track.title;
   $('npSub').textContent = track.author || (queue.name || 'B 站');
-  $('npCover').style.backgroundImage = track.cover ? `url("${track.cover}")` : 'none';
-  $('npCover').style.backgroundSize = 'cover';
+  // ★ v2.0.5：没有封面时不再塞 'none'（那会盖掉 CSS 里的音符兜底），
+  //   改成清空行内样式 + 挂 .no-art 类，由 CSS 显示一个淡淡的音符。
+  if (track.cover) {
+    $('npCover').style.backgroundImage = `url("${track.cover}")`;
+    $('npCover').style.backgroundSize = 'cover';
+  } else {
+    $('npCover').style.backgroundImage = '';
+    $('npCover').style.backgroundSize = '';
+  }
+  $('npCover').classList.toggle('no-art', !track.cover);
   $('btnFav').innerHTML = ic(isFav(track) ? 'i-heart-fill' : 'i-heart');
   $('btnFav').classList.toggle('on', isFav(track));
   // ★ 换歌不再先转圈：图标由 updatePlayBtn() 按"当前是否在播"决定。
@@ -662,6 +689,7 @@ async function playAt(index) {
   const openBtn = $('btnOpenBili');
   if (openBtn) openBtn.classList.toggle('disabled', !track.bvid);
 
+  let mySrc = '';   // 本次给播放器设的地址（给 catch 里那道"过期"闸门用）
   try {
     // 如果这首歌还不知道自己的 cid（搜索来的），先查一次补上
     await ensureCid(track);
@@ -673,6 +701,8 @@ async function playAt(index) {
     if (seq !== playSeq) return;   // 同上：回来晚了就别再抢播放器
 
     audio.src = info.url;
+    lastSetSrc = info.url;
+    mySrc = info.url;
     audio.volume = (DB.settings.volume ?? 80) / 100;
 
     try {
@@ -682,7 +712,9 @@ async function playAt(index) {
       //   是**用户换了歌**造成的（新的加载把上一次还没走完的 play() 打断了），
       //   不是"取音频地址失败"。旧版本会把它当失败弹提示、还会自动跳下一首 ——
       //   于是你明明已经听到歌在唱，却冒出一句吓人的"播放失败"，还可能莫名跳歌。
-      if (isPlayInterrupted(playErr)) return;
+      //   两道闸门一起用：① 消息像"被打断"；② 我们**确实设过地址、而它已经被换掉**（不依赖消息文字）。
+      //   注意 mySrc 为空表示"还没走到设地址那一步"（比如取地址就失败了），那种不算过期。
+      if (isPlayInterrupted(playErr) || (mySrc && lastSetSrc !== mySrc)) return;
       throw playErr;
     }
     if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
@@ -695,8 +727,10 @@ async function playAt(index) {
     renderAll();   // 刷新列表里的"正在播放"高亮
   } catch (err) {
     // 被换歌打断 / 已经是过期的那一次请求 → 静默放弃，不提示也不跳歌
-    if (seq !== playSeq || isPlayInterrupted(err)) return;
-    toast('播放失败：' + err.message);
+    if (seq !== playSeq || isPlayInterrupted(err) || (mySrc && lastSetSrc !== mySrc)) return;
+    // 真的失败了：控制台留下完整信息（含媒体地址，方便排查），提示条只显示原因本身
+    console.error('[播放失败]', (track && track.title) || '', err);
+    toast('播放失败：' + cleanPlayError(err));
     // 自动跳下一首，避免卡死在这一首（同样只在"还是当前这一次播放"时才跳）
     if (queue.tracks.length > 1) {
       setTimeout(() => { if (seq === playSeq) next(1); }, 900);
@@ -954,9 +988,29 @@ function enabledCount(track) {
  * 同一个 bvid 同时只查一次（播放和展开面板撞在一起也不会发两次请求）。
  */
 const collectFetching = new Map();
+
+/* ★ v2.0.5：给每个合集只存"一张封面"，读缓存时再套给每一条。
+   为什么需要：DB.collectParts 是**故意剥掉封面**存的（上百集的长链接会把存档撑大），
+   结果是"展开过合集 → 重启 → 再播这个合集"时，缓存里的条目没有 cover，
+   播放条和列表的封面全空了（改造计划 v2.0.5 §1.1）。
+   存法：DB.collectCovers = { 合集bvid: 封面URL } —— 每个合集只多 1 个 URL，不吃存档。
+   memo 是为了保持"同一个 bvid 每次拿到的是同一批对象"（身份稳定），
+   免得每次调用都造一批新对象，给后面的比对埋坑。 */
+const collectCoverMemo = new Map();
+function cachedCollectEntries(bvid, cached) {
+  const hit = collectCoverMemo.get(bvid);
+  if (hit) return hit;
+  const cover = (DB.collectCovers && DB.collectCovers[bvid]) || '';
+  const list = cover
+    ? cached.map((e) => (e.cover ? e : Object.assign({}, e, { cover })))
+    : cached;
+  collectCoverMemo.set(bvid, list);
+  return list;
+}
+
 async function collectEntriesFor(track) {
   const cached = DB.collectParts[track.bvid];
-  if (cached && cached.length > 1) return cached;
+  if (cached && cached.length > 1) return cachedCollectEntries(track.bvid, cached);
 
   if (collectFetching.has(track.bvid)) return collectFetching.get(track.bvid);
 
@@ -972,6 +1026,12 @@ async function collectEntriesFor(track) {
         bvid: e.bvid, cid: e.cid, page: e.page,
         title: e.title, duration: e.duration, author: e.author,
       }));
+      // ★ v2.0.5：顺手把这张合集封面单独记一条（整张表只多这 1 个 URL）
+      const cover = info.cover || (entries[0] && entries[0].cover) || '';
+      if (!DB.collectCovers) DB.collectCovers = {};
+      if (cover) DB.collectCovers[track.bvid] = cover;
+      else delete DB.collectCovers[track.bvid];
+      collectCoverMemo.delete(track.bvid);   // 有新封面了，丢掉旧的 memo
       persistLater();
     }
     return entries;
@@ -3585,6 +3645,8 @@ async function boot() {
     // 合集的"单集开关"与"曲目表缓存"：老存档没有这两项，补成空的（= 全部启用）
     DB.collectOff = (DB.collectOff && typeof DB.collectOff === 'object') ? DB.collectOff : {};
     DB.collectParts = (DB.collectParts && typeof DB.collectParts === 'object') ? DB.collectParts : {};
+    // ★ v2.0.5：合集封面表（每个合集一张）。老存档没有 → 补成空的（= 走音符兜底，不报错）
+    DB.collectCovers = (DB.collectCovers && typeof DB.collectCovers === 'object') ? DB.collectCovers : {};
   } catch (e) {
     console.error('读取存档失败', e);
   }
@@ -3621,6 +3683,8 @@ async function boot() {
       $('npCover').style.backgroundImage = `url("${DB.lastTrack.cover}")`;
       $('npCover').style.backgroundSize = 'cover';
     }
+    // 上次那首没封面 → 也用音符兜底（和 playAt 里一致）
+    $('npCover').classList.toggle('no-art', !DB.lastTrack.cover);
   }
 
   // 6) 上次退出时桌面歌词是开着的，就把它重新挂回屏幕上（位置也还是上次那个）

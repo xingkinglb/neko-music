@@ -962,6 +962,98 @@ app.whenReady().then(async () => {
     win2.destroy();
   }
 
+  /* ================= 8) v2.0.5：播放条封面兜底 / 歌词页「收起」不再常驻 ================= */
+  say('\n[8] v2.0.5：播放条封面兜底 / 歌词页「收起」不再常驻：');
+  {
+    // 8.1 歌词页开着时，封面上的「收起」不该常驻（::after 计算 opacity 应为 0）
+    await evalJS(`(() => { toggleLyrics(true); return true; })()`);
+    await sleep(260);
+    const st = await evalJS(`(() => {
+      const el = document.getElementById('npCover');
+      const cs = getComputedStyle(el, '::after');
+      return { open: el.classList.contains('open'), op: parseFloat(cs.opacity), content: cs.content };
+    })()`);
+    if (!st.open) bad('歌词页开了但封面没有 .open 类（测试前提不成立）');
+    else if (st.op !== 0) bad(`歌词页开着时「收起」仍常驻（::after 计算 opacity=${st.op}，应为 0）`);
+    else ok(`歌词页开着时「收起」不常驻（::after opacity=${st.op}，文字=${st.content}）`);
+
+    // 8.2 鼠标移上去才浮出「收起」—— 用合成鼠标事件真的 hover 一下
+    //     （歌词浮层的 bottom 是 --player-h，播放条露在它外面，所以封面可以被 hover 到）
+    const pt = await evalJS(`(() => {
+      const r = document.getElementById('npCover').getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: pt.x, y: pt.y });
+    await sleep(420);
+    const hover = await evalJS(`(() => parseFloat(getComputedStyle(document.getElementById('npCover'), '::after').opacity))()`);
+    if (hover !== 1) bad(`鼠标移到封面上时「收起」没浮出来（::after opacity=${hover}，应为 1）`);
+    else ok('鼠标移到封面上时才浮出「收起」（合成 hover 实测 opacity=1）');
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: 4, y: 4 });   // 移开，别影响后面的截图
+    await sleep(220);
+    await evalJS(`(() => { toggleLyrics(false); return true; })()`);
+    await sleep(160);
+
+    // 8.3 没封面 → 挂 no-art + 底图不是 none（音符兜底）
+    //     真的走一遍 playAt（cid 已给，ensureCid 直接返回；audioUrl 走 IPC 桩）
+    const noArt = await evalJS(`(async () => {
+      queue.tracks = [{ bvid: 'BV1nocover9', cid: 7, title: '没有封面的歌', author: '测试UP', mid: 1, cover: '', duration: 200 }];
+      queue.index = -1;
+      await playAt(0);
+      const el = document.getElementById('npCover');
+      const cs = getComputedStyle(el);
+      return {
+        cls: el.classList.contains('no-art'),
+        bg: cs.backgroundImage,
+        size: cs.backgroundSize,
+        inlineBg: el.style.backgroundImage,
+      };
+    })()`);
+    if (!noArt.cls) bad('没封面时 .np-cover 没有 no-art 类（兜底 CSS 不会生效）');
+    else if (noArt.bg === 'none' || !noArt.bg) bad(`没封面时底图是 ${noArt.bg}（应为音符兜底的 data-URI，不能是 none）`);
+    else ok(`没封面时挂 no-art 且底图是音符兜底（background-image 长度=${noArt.bg.length}）`);
+
+    // 8.4 有封面 → 不挂 no-art，底图是那张封面（回归：别把正常封面弄丢）
+    const withArt = await evalJS(`(async () => {
+      queue.tracks = [{ bvid: 'BV1withcover9', cid: 8, title: '有封面的歌', author: '测试UP', mid: 1, cover: 'https://example.invalid/c9.jpg', duration: 200 }];
+      queue.index = -1;
+      await playAt(0);
+      const el = document.getElementById('npCover');
+      return { cls: el.classList.contains('no-art'), bg: el.style.backgroundImage };
+    })()`);
+    if (withArt.cls) bad('有封面时仍挂了 no-art（会把真封面盖成音符）');
+    else if (!/c9\.jpg/.test(withArt.bg)) bad(`有封面时底图没设上（backgroundImage=${withArt.bg}）`);
+    else ok('有封面时正常显示封面、不挂 no-art（回归）');
+
+    // 8.5 合集封面缓存：collectParts（剥掉封面）+ collectCovers（一张）→ 读出来每条都带封面
+    const coll = await evalJS(`(async () => {
+      DB.collectParts['BV1coll9'] = [
+        { bvid: 'BV1coll9', cid: 101, page: 1, title: '第一集', duration: 100 },
+        { bvid: 'BV1coll9', cid: 102, page: 2, title: '第二集', duration: 100 },
+        { bvid: 'BV1coll9', cid: 103, page: 3, title: '第三集', duration: 100 },
+      ];
+      DB.collectCovers['BV1coll9'] = 'https://example.invalid/coll-cover9.jpg';
+      const list = await collectEntriesFor({ bvid: 'BV1coll9' });
+      return { n: list.length, covers: list.map((e) => e.cover || '') };
+    })()`);
+    const allHave = coll.covers.length > 0 && coll.covers.every((c) => /coll-cover9\.jpg/.test(c));
+    if (coll.n !== 3) bad(`合集曲目表读回来是 ${coll.n} 条（应为 3）`);
+    else if (!allHave) bad(`合集缓存里的条目没套上封面：${JSON.stringify(coll.covers)}`);
+    else ok(`合集缓存（collectCovers）读回来 ${coll.n} 条，每条都带上了那张封面`);
+
+    // 8.6 没存过封面的合集 → 条目 cover 为空（说明封面真的来自 collectCovers，不是凭空造的）
+    const collNo = await evalJS(`(async () => {
+      DB.collectParts['BV1coll9b'] = [
+        { bvid: 'BV1coll9b', cid: 201, page: 1, title: '甲', duration: 100 },
+        { bvid: 'BV1coll9b', cid: 202, page: 2, title: '乙', duration: 100 },
+      ];
+      delete DB.collectCovers['BV1coll9b'];
+      const list = await collectEntriesFor({ bvid: 'BV1coll9b' });
+      return list.map((e) => e.cover || '');
+    })()`);
+    if (collNo.some((c) => c)) bad(`没存过封面的合集却读出了封面：${JSON.stringify(collNo)}`);
+    else ok('没存过封面的合集读出来仍是无封面（封面确实来自 collectCovers）');
+  }
+
   say('\n已保存 shot-round9-{plain,prebake,live,lyric,empty}.png');
   if (errors.length) say('\n页面里的报错：\n  ' + errors.slice(0, 8).join('\n  '));
   else say('\n页面里没有报错');
