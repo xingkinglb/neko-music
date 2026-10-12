@@ -41,8 +41,13 @@
        prebake 用 JS 预先 canvas 糊好的静态壁纸图当背景 —— 默认，成本≈0
        plain   只压半透明底色、完全不模糊 —— 最省（就是 BetterNCM / 网易云插件那种做法） */
   --glass-blur:  12px;  /* 实时模糊半径（live 档用；prebake 档拿它当"预先糊多少"）。越大越糊、也越贵 */
-  --glass-alpha: 0.55;  /* 不透明度：越小越透，能看到更多背景 */
-  --glass-boost: 0;     /* 额外加深量：关掉真模糊的档（prebake / plain）由 <body> 抬高，补偿观感 */
+  /* ★ v2.0.2：面板的不透明度**统一成一个值**，四块面板共用。
+     以前每块面板各写一个偏移量（侧栏 +0.16、顶栏 -0.12、播放条 +0.10、标题栏 -0.05），
+     四块互不相同、又都比内容区暗得多 —— 于是"动态背景（视频）只在内容区看得见"，
+     而且"四块框架看着不协调"。现在收敛成这一个变量。
+     含义：面板比内容区**多压**多少（0 = 面板与内容区完全一致 = 纯壁纸）。
+     由设置里的「面板不透明度」滑杆控制（settings.glass.frameAlpha）。 */
+  --frame-a: 0.12;
   --glass-rgb:   16 16 26;  /* 玻璃本身带的底色（接近纯黑，保证白字可读）。
                                注意它是"空格分隔"的 RGB 三分量，用的时候必须配斜杠语法：
                                写 rgb(var(--glass-rgb) / 0.55) ✅
@@ -232,10 +237,8 @@ body:not(.has-bg) .player {
   -webkit-backdrop-filter: none;
 }
 
-/* 关掉真模糊的档位，底色只抬一点，让背景的壁纸能从面板背后透出来
-   （v2.0.1 调整：boost 从 0.12 降到 0.04 —— 之前面板太"实"，壁纸只在内容区那一小块） */
-body.glass-plain,
-body.glass-prebake { --glass-boost: 0.04; }
+/* v2.0.2：原来的 --glass-boost（"关掉真模糊时抬高面板底色"）已删除。
+   面板底色现在统一由 --frame-a 一个变量控制，不再按档位抬高。 */
 
 /* prebake 档：面板背景换成"预先糊好的壁纸图"（--glass-img，由 app.js 生成 data:URL）。
    三层背景：最上层半透明玻璃底色；中间层按 --bg-dim 压暗预烘焙壁纸；最底层是糊好的壁纸。
@@ -252,10 +255,11 @@ body.glass-prebake.has-imgbg .sidebar,
 body.glass-prebake.has-imgbg .topbar,
 body.glass-prebake.has-imgbg .player {
   background:
-    /* 上层暗罩：alpha 改用固定的 0.26（v2.0.1）。
-       之前用 var(--panel-a)（约 0.54~0.75），把预先糊好的壁纸图盖得太死，
-       看上去跟 plain 档几乎一样"不透明"。0.26 是"够压住白字可读性、但壁纸还看得到"的折中。 */
-    linear-gradient(rgb(var(--glass-rgb) / 0.26), rgb(var(--glass-rgb) / 0.26)) center/cover no-repeat fixed,
+    /* 上层暗罩：alpha 用全局的 --frame-a（v2.0.2）。
+       v2.0.1 这里是写死的 0.26，与"动态背景（视频）"那条路（--panel-a）不是同一个来源 ——
+       于是图片背景的面板比内容区多暗 26%、动态背景（视频）的面板又暗 47%~75%，两套数、四块还不一致。
+       现在两条路都读同一个 --frame-a，图片 / 视频的面板观感就对齐了。 */
+    linear-gradient(rgb(var(--glass-rgb) / var(--frame-a)), rgb(var(--glass-rgb) / var(--frame-a))) center/cover no-repeat fixed,
     linear-gradient(rgb(0 0 0 / var(--bg-dim)), rgb(0 0 0 / var(--bg-dim))) center/cover no-repeat fixed,
     var(--glass-img) center/cover no-repeat fixed;
 }
@@ -291,9 +295,9 @@ body.glass-prebake.has-imgbg .player {
      否则它们会点不动（真要放，就得给那个元素单独写 -webkit-app-region: no-drag）。 */
   -webkit-app-region: drag;
 
-  /* 面板底色：--panel-a 是本面板的"不透明度档位"，
-     三档共用它（prebake 档的多层背景也要拿它当上面那层底色）。 */
-  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) - 0.05);
+  /* 面板底色：--panel-a 一律等于全局的 --frame-a（四块面板必须完全一致）。
+     以前这里是 calc(--glass-alpha + --glass-boost - 0.05)，每块面板还各写一个偏移量。 */
+  --panel-a: var(--frame-a);
 
   /* 和其它面板一样走"半透明磨砂"，而不是一条实心深色（那样顶栏又暗又闷）。
      右上角那三个窗口按钮（最小化/最大化/关闭）是我们自己用 HTML 画的（见 .win-controls），
@@ -337,9 +341,10 @@ body.glass-prebake.has-imgbg .player {
    ============================================================ */
 .sidebar {
   grid-area: sidebar;
-  /* 毛玻璃：先按 --glass-alpha 压一层半透明底色，再把背后的画面糊掉。
-     侧边栏字最多，所以故意比别处实一点（+0.16）保证可读。 */
-  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) + 0.16);
+  /* 毛玻璃：先按 --frame-a 压一层半透明底色，再把背后的画面糊掉。
+     ★ v2.0.2 起不再"比别处实一点"（原来 +0.16）—— 四块面板必须一致，
+       否则侧栏一块深、顶栏一块浅，就是 Neo 报的"各个框架透明度不一样、看着怪怪的"。 */
+  --panel-a: var(--frame-a);
   background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-right: 1px solid var(--line);
@@ -436,8 +441,8 @@ body.glass-prebake.has-imgbg .player {
   display: flex; gap: 12px; align-items: center;
   padding: 16px 22px;
   border-bottom: 1px solid var(--line);
-  /* 比侧边栏更透（-0.12），让背景多露一点 */
-  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) - 0.12);
+  /* v2.0.2 起与其它三块完全一致（原来这里单独写 -0.12） */
+  --panel-a: var(--frame-a);
   background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
 }
@@ -668,7 +673,7 @@ body.perf-idle .spinner {
   grid-area: player;
   /* 以前写的是 rgba(20,20,30,0.94) —— 太实心了，加上去那一 backdrop-filter 根本没有东西可糊，
      等于白写。现在换成统一的可调透明度，背景一换它就能真正透出下面的图。 */
-  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) + 0.1);
+  --panel-a: var(--frame-a);   /* v2.0.2：与其它三块统一（原来单独 +0.10） */
   background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-top: 1px solid var(--line);
@@ -939,6 +944,20 @@ body.perf-idle .spinner {
   overflow: hidden;
 }
 .lyric-overlay.show { opacity: 1; pointer-events: auto; }
+
+/* ★ v2.0.2：打开整页歌词时，把内容区（列表 / 卡片）藏起来。
+   浮层本身只有 34% 不透明（v2.0.0 为了"透出壁纸"降到这么低），挡不住背后的列表 ——
+   于是"上一个打开的页面"会透出来，看着脏。藏掉 #content 之后，背后就只剩壁纸，干净。
+   ★ .lyric-overlay 挂在 <body> 下（不在 .app 里），所以藏 #content 不会连它一起藏掉。
+   ★ 用 visibility 而不是 display：不改布局，就不会触发重排 / 滚动位置错乱。
+   ★★ 藏的是"#content 的子元素"，不是 #content 本身 —— 这点很关键，别改回去：
+      ① 藏容器走的是"合成器把整个滚动图层隐藏"这条优化。实测在离屏软件光栅下它不重绘，
+         DOM 里计算样式明明已经是 hidden，画面上列表照旧挂在歌词页后面（截图也拍得出来）。
+         藏子元素则是让内容真正重绘成"空"，这条才靠谱。
+      ② 藏子元素同样能盖住"歌词页开着时列表重新渲染"：子元素是 hidden，它下面新生成的行
+         一律继承 hidden（没有任何规则会把 visibility 改回 visible）。
+      ③ 容器本身保持 visible，布局完全不变。 */
+body.lyric-open #content > * { visibility: hidden; }
 
 /* live 档：整页歌词也跟着糊（Neo 定的：高画质档要一起通透）。
    其余两档**一律不挂 backdrop-filter** —— 它正是"一坨黑"和显卡被打满的共同来源。 */

@@ -166,22 +166,30 @@ app.whenReady().then(async () => {
     const out = {};
     sel.forEach((s) => { const el = document.querySelector(s);
       out[s] = el ? getComputedStyle(el).backdropFilter : 'MISSING'; });
+    const pick = (s, k) => getComputedStyle(document.querySelector(s))[k];
     return { mode: DB.settings.glass.mode, filters: out,
-             boost: getComputedStyle(document.body).getPropertyValue('--glass-boost').trim() };
+             frameA: getComputedStyle(document.documentElement).getPropertyValue('--frame-a').trim(),
+             alphas: sel.map((s) => pick(s, 'backgroundColor')),
+             bgis: sel.map((s) => pick(s, 'backgroundImage').slice(0, 80)) };
   })()`);
 
   await evalJS(`(() => { DB.settings.bg.file = '${TEST_IMAGE}'; DB.settings.bg.kind = 'image';
     DB.settings.glass.mode = 'prebake'; applyAppearance(); syncSettingsUI(); return true; })()`);
   await sleep(700);
   const gp = await glassOf();
-  say(`  图片背景 + prebake：mode=${gp.mode}，四面板 backdrop-filter=${JSON.stringify(gp.filters)}，--glass-boost=${gp.boost}`);
+  say(`  图片背景 + prebake：mode=${gp.mode}，四面板 backdrop-filter=${JSON.stringify(gp.filters)}`);
   if (gp.mode === 'prebake') ok('默认档是 prebake（用预先糊好的图，成本≈0）');
   else bad('默认档不是 prebake：' + gp.mode);
   const notNone = Object.keys(gp.filters).filter((k) => gp.filters[k] !== 'none');
   if (notNone.length === 0) ok('prebake 档四块常驻面板都没有真 backdrop-filter（不再每帧重算）');
   else bad('这些面板还开着毛玻璃：' + notNone.join(' / ') + ' → ' + JSON.stringify(gp.filters));
-  if (parseFloat(gp.boost) > 0) ok('关掉真模糊的档同时抬高了面板底色（--glass-boost=' + gp.boost + '）');
-  else bad('没有抬高面板底色：' + gp.boost);
+  // ★ v2.0.2：四块面板必须**完全一致**（都来自同一个 --frame-a），不再各写偏移量 / 暗罩
+  const uniqOf = (a) => [...new Set(a)];
+  say(`  四块面板底色=${JSON.stringify(gp.alphas)}；--frame-a=${gp.frameA}`);
+  if (uniqOf(gp.alphas).length === 1) ok('四块面板的底色完全一致（都来自 --frame-a=' + gp.frameA + '）');
+  else bad('四块面板的底色不一致：' + JSON.stringify(gp.alphas));
+  if (uniqOf(gp.bgis).length === 1) ok('四块面板的背景层完全一致（不再有谁多一层暗罩）');
+  else bad('四块面板的背景层不一致：' + JSON.stringify(gp.bgis));
 
   await evalJS(`(() => { DB.settings.glass.mode = 'live'; applyAppearance(); syncSettingsUI(); return true; })()`);
   await sleep(400);

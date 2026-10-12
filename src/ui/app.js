@@ -97,7 +97,7 @@ let DB = {
     volume: 80,
     bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
              pauseOnBlur: true },
-    glass: { blur: 12, alpha: 0.55, mode: 'prebake' },
+    glass: { blur: 12, frameAlpha: 0.12, mode: 'prebake' },
     autoLyric: false,
   },
 };
@@ -152,7 +152,8 @@ const DEFAULT_SETTINGS = {
   bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
            pauseOnBlur: true },
   // glass.mode：面板毛玻璃三档 —— 'plain' 纯半透明 / 'prebake' 预先糊好的图（默认）/ 'live' 实时毛玻璃
-  glass: { blur: 12, alpha: 0.55, mode: 'prebake' },
+  // glass.frameAlpha：四块面板的"比内容区多压多少"（v2.0.2 起取代旧的 alpha，四块面板共用同一个值）
+  glass: { blur: 12, frameAlpha: 0.12, mode: 'prebake' },
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
   playMode: 'list',   // 播放模式：list 列表循环 / one 单曲循环 / shuffle 随机 / order 顺序
@@ -196,6 +197,13 @@ function migrateSettings() {
   //   不这样切，老用户永远拿不到这次优化。想换档，去设置里勾一下即可（勾「实时毛玻璃」会有提醒）。
   const gm = old.glass && old.glass.mode;
   DB.settings.glass.mode = (gm === 'plain' || gm === 'live') ? gm : DEFAULT_SETTINGS.glass.mode;
+  // ★ v2.0.2：面板不透明度收敛成 glass.frameAlpha（--frame-a），取代旧的 glass.alpha。
+  //   老存档没有这一项 → 用新默认 0.12。**故意让老存档也走新默认**：
+  //   旧观感（四块面板 47%~75% 深色、互不一致）正是这次要修的问题。
+  const fa = DB.settings.glass.frameAlpha;
+  DB.settings.glass.frameAlpha = (typeof fa === 'number' && isFinite(fa))
+    ? Math.max(0, Math.min(0.4, fa)) : DEFAULT_SETTINGS.glass.frameAlpha;
+  delete DB.settings.glass.alpha;   // 字段退役：别在存档里留一个没人再读的旧值
   delete DB.settings.bg.perfLite;   // 字段退役：别在存档里留一个没人再读的旧值
 
   // 桌面歌词的设置：老存档没有，就给一套默认值；有就逐项夹到合法范围，
@@ -347,10 +355,12 @@ function applyAppearance() {
   root.style.setProperty('--bg-dim', String(s.bg.dim ?? 0.55));
 
   // 2) 毛玻璃：三档（plain 纯半透明 / prebake 预先糊好的图 / live 实时毛玻璃）
-  //    三档共用 --glass-blur 与 --glass-alpha；区别只在"面板到底用不用真 backdrop-filter"，
+  //    三档共用 --glass-blur；区别只在"面板到底用不用真 backdrop-filter"，
   //    那是靠 <body> 上的类 + CSS 决定的（见 style.css 的「面板毛玻璃三档」）。
-  root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 12) + 'px');
-  root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));
+  root.style.setProperty('--glass-blur', (s.glass.blur ?? 12) + 'px');
+  // ★ v2.0.2：四块面板的不透明度统一成 --frame-a（以前是 --glass-alpha + 每块各一个偏移量）。
+  //   写在 <html> 上，让 prebake 的多层背景（也拿 --frame-a 当上层暗罩）读到同一个值。
+  root.style.setProperty('--frame-a', String(s.glass.frameAlpha ?? 0.12));
   const glassMode = (s.glass.mode === 'plain' || s.glass.mode === 'live') ? s.glass.mode : 'prebake';
   document.body.classList.toggle('glass-live',    glassMode === 'live');
   document.body.classList.toggle('glass-prebake', glassMode === 'prebake');
@@ -2001,7 +2011,7 @@ function syncSettingsUI() {
   const fGB = $('fieldGlassBlur');
   if (fGB) fGB.classList.toggle('is-off', gm === 'plain');
 
-  $('rngGlassAlpha').value = Math.round((s.glass.alpha ?? 0.55) * 100);
+  $('rngGlassAlpha').value = Math.round((s.glass.frameAlpha ?? 0.12) * 100);
   $('valAlpha').textContent = $('rngGlassAlpha').value + '%';
 
   // 自动歌词开关
@@ -2151,14 +2161,14 @@ function bindSettings() {
   bindRange('rngDim',        'valDim',    '%',  (v) => { DB.settings.bg.dim = v / 100; });
   bindRange('rngBgBlur',     'valBgBlur', 'px', (v) => { DB.settings.bg.blur = v; });
   bindRange('rngGlassBlur',  'valGlass',  'px', (v) => { DB.settings.glass.blur = v; });
-  bindRange('rngGlassAlpha', 'valAlpha',  '%',  (v) => { DB.settings.glass.alpha = v / 100; });
+  bindRange('rngGlassAlpha', 'valAlpha',  '%',  (v) => { DB.settings.glass.frameAlpha = v / 100; });
 
   /* ---- 恢复默认外观 ---- */
   $('btnResetAppearance').addEventListener('click', () => {
     DB.settings.theme = 'pink';
     DB.settings.bg    = { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
                           pauseOnBlur: true };
-    DB.settings.glass = { blur: 12, alpha: 0.55, mode: 'prebake' };
+    DB.settings.glass = { blur: 12, frameAlpha: 0.12, mode: 'prebake' };
     api('clearBackground').catch(() => {});
     applyAppearance(); syncSettingsUI(); persist();
     toast('外观已恢复默认');

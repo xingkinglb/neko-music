@@ -1325,9 +1325,19 @@ console.log('\n[40] 面板毛玻璃 · 三档：');
     err('glass-plain 下没有把 backdrop-filter 设成 none（用 blur(0px) 仍会把背后画面拷进纹理，省不下来）');
   else ok('glass-plain / glass-prebake 下把 backdrop-filter 设为 none');
 
-  if (!/body\.glass-plain,\s*body\.glass-prebake\s*\{\s*--glass-boost:/.test(css))
-    err('关掉真模糊的档没有抬高面板底色（--glass-boost）—— 观感会变太透');
-  else ok('关掉真模糊的档同时抬高面板底色，观感仍是磨砂');
+  // ★ v2.0.2：--glass-boost 机制退役；四块面板的不透明度必须来自**同一个** --frame-a。
+  //   （以前四块各写一个偏移量，导致"动态背景只在内容区看得见" + "四块框架看着不协调"。）
+  if (/--glass-boost/.test(css))
+    err('style.css 里还有 --glass-boost（v2.0.2 已删除该机制，面板底色统一由 --frame-a 控制）');
+  else ok('--glass-boost 机制已移除');
+  const offFrame = panels.filter((p) => {
+    const r = new RegExp('(^|\\n)\\.' + p + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
+    if (!r) return true;
+    const m = /--panel-a:([^;]*);/.exec(r[2]);
+    return !m || !/^\s*var\(--frame-a\)\s*$/.test(m[1]);   // 必须"直接等于 --frame-a"，不许再 calc 偏移
+  });
+  if (offFrame.length) err('这些面板的 --panel-a 没有统一成 var(--frame-a)（四块会不一致）：' + offFrame.join(' / '));
+  else ok('4 块面板的 --panel-a 统一来自 var(--frame-a)（不再各写偏移量）');
 
   const noPanelA = panels.filter((p) => {
     const r = new RegExp('(^|\\n)\\.' + p + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
@@ -1459,6 +1469,17 @@ console.log('\n[42] 歌词页 · 透明化：');
   const lm2 = /\.lyric-box \.l\s*\{([\s\S]*?)\}/.exec(css);
   if (!lm2 || !/text-shadow/.test(lm2[1])) err('歌词行没有 text-shadow —— 去掉糊背景后文字会读不清');
   else ok('歌词行有 text-shadow（可读性不靠糊背景）');
+
+  // ★ v2.0.2：打开整页歌词时把内容区藏起来 —— 否则 34% 的浮层挡不住列表，上一个页面会透出来。
+  //   藏的是 #content 的**子元素**（不是容器本身）：容器走的是"合成器隐藏整个滚动图层"，
+  //   实测在离屏软件光栅下不重绘（计算样式是 hidden，画面照旧）；藏子元素才真正重绘成空。
+  //   而且子元素 hidden 之后，它下面新渲染出来的行一律继承 hidden，不用再补规则。
+  if (!/body\.lyric-open\s+#content\s*>\s*\*\s*\{\s*visibility:\s*hidden/.test(css))
+    err('没有 body.lyric-open #content > * { visibility: hidden } —— 歌词页背后会透出上一个页面');
+  else ok('歌词页打开时内容区（列表）被隐藏（背后只剩壁纸）');
+  if (/body\.lyric-open\s+#content\s*[,{]/.test(css))
+    err('歌词页把 #content 容器本身也藏了 —— 会丢滚动位置，而且那条在离屏下不重绘');
+  else ok('只藏内容、不藏容器（布局与滚动位置不变）');
 }
 
 /* ---- 43) 歌词页 · 空状态（P2） ---- */
@@ -1483,9 +1504,16 @@ console.log('\n[43] 歌词页 · 空状态：');
 /* ---- 44) 毛玻璃三档 · 数据与设置项 ---- */
 console.log('\n[44] 毛玻璃三档 · 数据与设置项：');
 {
-  if (!/glass:\s*\{\s*blur:\s*12,\s*alpha:\s*0\.55,\s*mode:\s*'prebake'\s*\}/.test(appjs))
-    err("DEFAULT_SETTINGS.glass 不是 { blur:12, alpha:0.55, mode:'prebake' }");
-  else ok("默认设置 = blur 12 / alpha 0.55 / mode 'prebake'");
+  if (!/glass:\s*\{\s*blur:\s*12,\s*frameAlpha:\s*0\.12,\s*mode:\s*'prebake'\s*\}/.test(appjs))
+    err("DEFAULT_SETTINGS.glass 不是 { blur:12, frameAlpha:0.12, mode:'prebake' }");
+  else ok("默认设置 = blur 12 / frameAlpha 0.12 / mode 'prebake'");
+  // 只允许"一行 delete 清理存档"提到旧字段；其余任何读写都算没退役干净
+  const alphaUses = appjs.split('\n').filter((l) => /glass\.alpha/.test(l) && !/^\s*delete\b/.test(l));
+  if (alphaUses.length) err('app.js 里还在读写 glass.alpha（v2.0.2 已由 glass.frameAlpha 取代）：' + alphaUses[0].trim());
+  else ok('旧的 glass.alpha 已退役（存档里只留一行 delete 清理），改用 glass.frameAlpha');
+  if (!/setProperty\('--frame-a'/.test(appjs))
+    err('applyAppearance() 没有把面板不透明度写成全局 --frame-a');
+  else ok('applyAppearance() 把面板不透明度写成全局 --frame-a');
   if (!/s\.glass\.mode === 'plain' \|\| s\.glass\.mode === 'live'/.test(appjs))
     err('没有对 glass.mode 做合法性校验（非法值该退回 prebake）');
   else ok('glass.mode 有合法性校验');
@@ -1560,9 +1588,9 @@ console.log('\n[46] 颜色语法 · 空格三元组只能配斜杠写法：');
     err(`斜杠写法 rgb(var(--… ) / α) 只有 ${slash ? slash.length : 0} 处，半透明主题色可能整片失效`);
   else ok(`斜杠写法 rgb(var(--…) / α) 共 ${slash.length} 处`);
 
-  if (!/linear-gradient\(rgb\(var\(--glass-rgb\) \/ 0\.26\),\s*rgb\(var\(--glass-rgb\) \/ 0\.26\)\)\s*center\/cover no-repeat fixed/.test(css))
-    err('prebake 的固定暗罩没有保持斜杠颜色语法或 0.26 alpha');
-  else ok('prebake 多层背景的固定 0.26 暗罩使用斜杠语法');
+  if (!/linear-gradient\(rgb\(var\(--glass-rgb\) \/ var\(--frame-a\)\),\s*rgb\(var\(--glass-rgb\) \/ var\(--frame-a\)\)\)\s*center\/cover no-repeat fixed/.test(css))
+    err('prebake 的上层暗罩没有用全局 var(--frame-a)（会与动态背景那条路不是一个来源、四块也不一致）');
+  else ok('prebake 多层背景的上层暗罩与面板共用 var(--frame-a)，且保持斜杠颜色语法');
 
   // 开关勾上必须真的变色（曾经因为上面那个坑，勾上反而变成全透明）
   if (!/input:checked \+ \.switch \{ background: rgb\(var\(--accent-rgb\) \/ 0\.85\)/.test(css))
