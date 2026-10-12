@@ -33,13 +33,12 @@ function ic(name, extraClass) {
 }
 
 /* "正在播放"那行的小动效：三根上下跳的柱子。
-   它没有放进图标库，因为动画需要 CSS 精确选中里面每一根柱子，
-   而 <use> 引用的内容在"影子树"里，外面的 CSS 选不中它。 */
-const BARS_ICON = `<svg class="ic bars" viewBox="0 0 24 24" aria-hidden="true">
-  <rect x="4"    y="9" width="3.4" height="6"  rx="1.7"/>
-  <rect x="10.3" y="5" width="3.4" height="14" rx="1.7"/>
-  <rect x="16.6" y="8" width="3.4" height="8"  rx="1.7"/>
-</svg>`;
+   ★ v2.0.0（L2）：从 SVG 的 <rect> 换成普通 <i>。
+     原因：Chromium 里 SVG 的 transform 动画**不走合成器**，是每帧重新光栅化（贵）；
+     普通元素 + transform 才走合成器，每帧只移动图层、不重绘。观感一模一样，成本降一个量级。
+     它同样没放进图标库 —— 动画需要 CSS 精确选中里面每一根柱子，
+     而 <use> 引用的内容在"影子树"里，外面的 CSS 选不中它。 */
+const BARS_ICON = `<span class="ic bars" aria-hidden="true"><i></i><i></i><i></i></span>`;
 
 /** 秒 → "3:45" */
 function fmtTime(sec) {
@@ -97,8 +96,8 @@ let DB = {
     theme: 'pink',
     volume: 80,
     bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
-             perfLite: true, pauseOnBlur: true },
-    glass: { blur: 18, alpha: 0.55 },
+             pauseOnBlur: true },
+    glass: { blur: 12, alpha: 0.55, mode: 'prebake' },
     autoLyric: false,
   },
 };
@@ -151,8 +150,9 @@ const DEFAULT_SETTINGS = {
   theme: 'pink',
   volume: 80,
   bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
-           perfLite: true, pauseOnBlur: true },
-  glass: { blur: 18, alpha: 0.55 },
+           pauseOnBlur: true },
+  // glass.mode：面板毛玻璃三档 —— 'plain' 纯半透明 / 'prebake' 预先糊好的图（默认）/ 'live' 实时毛玻璃
+  glass: { blur: 12, alpha: 0.55, mode: 'prebake' },
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
   playMode: 'list',   // 播放模式：list 列表循环 / one 单曲循环 / shuffle 随机 / order 顺序
@@ -189,9 +189,14 @@ function migrateSettings() {
     loop:  bgv.loop  !== false,   // 默认循环
     speed: (typeof bgv.speed === 'number' && bgv.speed >= 0.5 && bgv.speed <= 2) ? bgv.speed : 1,
   };
-  // 动态背景的两个"省显卡"开关（老存档没有 → 默认开）
-  DB.settings.bg.perfLite    = DB.settings.bg.perfLite    !== false;
+  // "窗口不在前台时暂停"（老存档没有 → 默认开）
   DB.settings.bg.pauseOnBlur = DB.settings.bg.pauseOnBlur !== false;
+  // ★ v2.0.0：老存档里的 bg.perfLite（「降低毛玻璃（省显卡）」开关）被「面板毛玻璃三档」取代。
+  //   按 Neo 拍板：**一律迁到 'prebake'（省显卡档）** —— 包括当年主动关过 perfLite 的。
+  //   不这样切，老用户永远拿不到这次优化。想换档，去设置里勾一下即可（勾「实时毛玻璃」会有提醒）。
+  const gm = old.glass && old.glass.mode;
+  DB.settings.glass.mode = (gm === 'plain' || gm === 'live') ? gm : DEFAULT_SETTINGS.glass.mode;
+  delete DB.settings.bg.perfLite;   // 字段退役：别在存档里留一个没人再读的旧值
 
   // 桌面歌词的设置：老存档没有，就给一套默认值；有就逐项夹到合法范围，
   // 防止存档被手改过之后字号变成 999、不透明度变成 -3 这种离谱值。
@@ -215,6 +220,122 @@ function migrateSettings() {
   };
 }
 
+/* ============================================================
+   prebake 档：预先糊好的壁纸图（--glass-img）
+   ------------------------------------------------------------
+   为什么可以"预先糊"：backdrop-filter 做的就是把"面板背后那块"糊一遍。
+   当面板背后是一张**不动的壁纸**时，"实时糊"和"预先糊"算出来的是同一张图 ——
+   那就干脆只算一次，存成 data:URL 反复用，把"每帧重算"这条最贵的路彻底拿掉。
+   真正的差别只在"有内容从面板背后经过（滚动）"时才出现，而当前布局没有这种情况。
+
+   生成时机：换背景图 / 拖动「毛玻璃强度」/ 窗口尺寸变化超过 15%。
+   ★ 拿不到 canvas、或 ctx.filter 不被支持、或画布被跨域污染时一律返回 null，
+     调用方会自动降级为"纯半透明"（不会白屏，也不会偷偷退回实时毛玻璃）。
+   ============================================================ */
+const glassImgState = { url: 'none', file: '', blur: -1, w: 0, h: 0, token: 0 };
+let glassImgTimer = null;
+
+/** 读一张图（带 crossOrigin，避免画进 canvas 后"污染画布"） */
+function loadImageEl(src) {
+  return new Promise((resolve) => {
+    const im = new Image();
+    // ★ bg:// 协议回了 Access-Control-Allow-Origin:*，但必须带 crossOrigin 去请求，
+    //   画进 canvas 才不会污染画布 —— 否则 toDataURL() 会直接抛 SecurityError。
+    im.crossOrigin = 'anonymous';
+    im.onload = () => resolve(im);
+    im.onerror = () => resolve(null);
+    im.src = src;
+  });
+}
+
+/** 真的去糊一张图，返回 data:URL（失败返回 null） */
+async function buildGlassImage(file, blur) {
+  const img = await loadImageEl(`bg://local/${file}`);
+  if (!img || !img.width || !img.height) return null;
+
+  const W = Math.max(1, window.innerWidth);
+  const H = Math.max(1, window.innerHeight);
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  if (!ctx || typeof ctx.filter !== 'string') return null;   // 不支持 ctx.filter → 降级
+
+  // 往外多画一圈（pad），免得模糊在窗口边缘"糊出一圈透明"。
+  const pad = Math.round(blur * 2 + 4);
+  const bw = W + pad * 2, bh = H + pad * 2;
+  const scale = Math.max(bw / img.width, bh / img.height);   // cover：等比放大到至少铺满，再居中裁切
+  const dw = img.width * scale, dh = img.height * scale;
+  const dx = (W - dw) / 2, dy = (H - dh) / 2;
+
+  try {
+    ctx.filter = blur > 0 ? `blur(${blur}px)` : 'none';
+    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.filter = 'none';
+    return canvas.toDataURL('image/jpeg', 0.86);
+  } catch (e) {
+    return null;   // 画布被污染 / 编码失败 → 降级
+  }
+}
+
+/**
+ * 按需生成 / 丢弃 --glass-img。prebake 档 + 图片背景才需要，其余情况一律清空。
+ * 不阻塞调用方（生成是异步的，慢个几十毫秒也没关系）。
+ */
+function syncGlassImage() {
+  const s = DB.settings;
+  const mode = (s.glass.mode === 'plain' || s.glass.mode === 'live') ? s.glass.mode : 'prebake';
+  const want = mode === 'prebake' && !!s.bg.file && s.bg.kind !== 'video';   // 视频没法预先糊
+
+  if (!want) {
+    clearTimeout(glassImgTimer);
+    if (glassImgState.url !== 'none' || glassImgState.file) {
+      glassImgState.url = 'none'; glassImgState.file = ''; glassImgState.blur = -1;
+      glassImgState.token++;
+      document.documentElement.style.setProperty('--glass-img', 'none');
+    }
+    document.body.classList.remove('has-imgbg');
+    return;
+  }
+
+  const file = s.bg.file;
+  const blur = Number(s.glass.blur) || 0;
+  const st = glassImgState;
+
+  // 已经是最新的一张？文件没换、模糊没改、窗口尺寸变化也没超过 15% → 直接复用。
+  // （失败过也算"已处理过"，不反复重试，免得一直白烧 CPU。）
+  const sizeOk = st.w > 0 &&
+    Math.abs(window.innerWidth - st.w) / st.w <= 0.15 &&
+    Math.abs(window.innerHeight - st.h) / st.h <= 0.15;
+  if (st.file === file && st.blur === blur && sizeOk) {
+    document.body.classList.toggle('has-imgbg', st.url !== 'none');
+    return;
+  }
+
+  const token = ++st.token;
+  // ★ 先判断"是换图/换尺寸（要立刻重生成）"还是"只拖了强度滑杆（防抖 300ms）"，
+  //   再写回 st —— 顺序反了的话 st.file 已经等于 file，永远判成"没换图"。
+  const fileOrSizeChanged = st.url === 'none' || st.file !== file || !sizeOk;
+  st.file = file; st.blur = blur; st.w = window.innerWidth; st.h = window.innerHeight;
+
+  const run = () => {
+    buildGlassImage(file, blur).then((url) => {
+      if (token !== st.token) return;   // 期间又换过图 / 改过强度 → 丢弃这次结果
+      st.url = url || 'none';
+      // ★ 必须包成 url("…") 再写进自定义属性：
+      //   data:image/jpeg;base64,… 里那个**分号**会让整条 CSS 声明被判非法、被静默丢掉
+      //   （表现就是 has-imgbg 打了、--glass-img 却还是 none）。包进带引号的 url() 里，
+      //   分号落在字符串内部，才是合法的值。
+      document.documentElement.style.setProperty('--glass-img', url ? `url("${url}")` : 'none');
+      // 糊好了才打 has-imgbg；失败就退回纯半透明（而不是留一块空面板）
+      document.body.classList.toggle('has-imgbg', !!url);
+    });
+  };
+
+  clearTimeout(glassImgTimer);
+  if (fileOrSizeChanged) run();
+  else glassImgTimer = setTimeout(run, 300);   // 只是拖强度滑杆：攒 300ms 再糊一次
+}
+
 /** 把 DB.settings 里的外观设置"刷"到界面上 */
 function applyAppearance() {
   const s = DB.settings;
@@ -223,9 +344,15 @@ function applyAppearance() {
   // 1) 主题（给 <html> 打标记，CSS 里的 [data-theme="xxx"] 就会生效）
   root.dataset.theme = s.theme || 'pink';
 
-  // 2) 毛玻璃
-  root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 18) + 'px');
+  // 2) 毛玻璃：三档（plain 纯半透明 / prebake 预先糊好的图 / live 实时毛玻璃）
+  //    三档共用 --glass-blur 与 --glass-alpha；区别只在"面板到底用不用真 backdrop-filter"，
+  //    那是靠 <body> 上的类 + CSS 决定的（见 style.css 的「面板毛玻璃三档」）。
+  root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 12) + 'px');
   root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));
+  const glassMode = (s.glass.mode === 'plain' || s.glass.mode === 'live') ? s.glass.mode : 'prebake';
+  document.body.classList.toggle('glass-live',    glassMode === 'live');
+  document.body.classList.toggle('glass-prebake', glassMode === 'prebake');
+  document.body.classList.toggle('glass-plain',   glassMode === 'plain');
 
   // 3) 背景：图片走 .bg-image 的 CSS 背景（--bg-image），视频走 <video id="bgVideo">；同一时刻只用一种
   const layer = $('bgLayer');
@@ -244,9 +371,9 @@ function applyAppearance() {
     const img = $('bgImage');
     if (img) img.style.filter = b > 0 ? `blur(${b}px)` : 'none';
 
-    // 动态背景（视频）时给 <body> 打 perf-lite，把四块常驻面板的毛玻璃整个关掉 —— 省显卡收益最大的一步。
-    // 背景是图片时不动（静态图糊一次就缓存住了，毛玻璃几乎不花钱）。
-    document.body.classList.toggle('perf-lite', !!(isVideo && s.bg.perfLite !== false));
+    // 面板毛玻璃的"预先糊好的图"（prebake 档专用）：按需生成 / 丢弃 --glass-img。
+    // 放在这里是因为它依赖 bg.file / bg.kind，和上面的背景设置是同一件事。
+    syncGlassImage();
 
     // 视频：显示/隐藏 + 把静音/循环/速度刷上去；播不播统一交给"该停就停"总闸判定
     const v = $('bgVideo');
@@ -292,7 +419,32 @@ function bgOverlayOpen() {
   });
 }
 
+/**
+ * 省显卡：把"看不见的动画"停掉（v2.0.0 的 L1 / S3）。
+ *
+ * backdrop-filter 之所以贵，是因为"合成器一直在产帧"，而产帧的源头是**动画**。
+ * 所以只要会动的东西被盖住、用户看不见，就应该暂停它 —— 这是纯赚的优化：
+ *   · has-overlay —— 模态遮罩盖住整块界面（设置 / 选集 / 队列 / 弹窗）：
+ *                    连播放条里那条封面旋转弧线一起停（它也在遮罩后面）。
+ *   · lyric-open  —— 整页歌词开着：只盖住内容区，播放条还看得见，
+ *                    所以**只停内容区的动画**（那三根跳动的柱子），旋转弧线留着 ——
+ *                    停了会让人以为"没在播"。
+ *   · perf-idle   —— 窗口失焦 / 最小化 / 切后台：什么都看不见，全停。
+ *
+ * CSS 侧在 style.css 的「省显卡：把"看不见的动画"停掉」一节。
+ */
+function syncPauseClasses() {
+  const ly = $('lyricOverlay');
+  document.body.classList.toggle('has-overlay', bgOverlayOpen());
+  document.body.classList.toggle('lyric-open', !!(ly && ly.classList.contains('show')));
+  document.body.classList.toggle('perf-idle', document.hidden || !winFocused);
+}
+
 function updateBgVideoPlayback() {
+  // 顺手把"看不见就别动"的三个类也刷一遍 —— 它和"视频该不该播"用的是同一批触发点
+  // （失焦 / 回焦 / 最小化 / 遮罩开合），放一起不会漏。
+  syncPauseClasses();
+
   const v = $('bgVideo');
   if (!v) return;
   const s = DB.settings;
@@ -341,6 +493,26 @@ function probeVideoSize(file) {
    ============================================================ */
 
 const audio = $('audio');
+
+/**
+ * 播放条上那个大按钮的图标，**只由这一个函数决定**。
+ *
+ * 规则只有一条：图标 = "现在到底在不在播"。
+ *   audio.paused === true  → ▶（播放）
+ *   audio.paused === false → ‖（暂停）
+ *
+ * ★ 为什么要有这个函数（v2.0.0 修的 bug）：
+ *   以前在 waiting（缓冲）事件里把按钮换成"转圈"，却没有任何地方负责把它换回来 ——
+ *   play 事件只在"开始播"那一刻触发一次，缓冲结束后触发的是 playing，而项目里根本没有
+ *   playing 监听。于是只要缓冲发生一次（网络音频非常常见），按钮就永远停在转圈。
+ *   现在按 Neo 的要求：**不转圈，直接显示 ‖**。加载中的视觉反馈用"图标不变"来兜底，
+ *   不会出现"卡住"的错觉。
+ */
+function updatePlayBtn() {
+  const b = $('btnPlay');
+  if (!b) return;
+  b.innerHTML = audio.paused ? ic('i-play') : ic('i-pause');
+}
 
 /**
  * 播放模式：四种，用一个按钮循环切换。
@@ -436,7 +608,9 @@ async function playAt(index) {
   $('npCover').style.backgroundSize = 'cover';
   $('btnFav').innerHTML = ic(isFav(track) ? 'i-heart-fill' : 'i-heart');
   $('btnFav').classList.toggle('on', isFav(track));
-  $('btnPlay').innerHTML = ic('i-loading', 'spin');
+  // ★ 换歌不再先转圈：图标由 updatePlayBtn() 按"当前是否在播"决定。
+  //   此刻若上一首还在播就显示 ‖、已停就显示 ▶，都跟真实状态一致。
+  updatePlayBtn();
   $('timeTotal').textContent = fmtTime(track.duration);
 
   // 换歌了：清掉上一首的歌词（自动模式开着的话会顺手取新的）
@@ -1779,11 +1953,10 @@ function syncSettingsUI() {
     $('rngVideoSpeed').value = vv.speed ?? 1;
     $('valVideoSpeed').textContent = (vv.speed ?? 1) + '×';
   }
-  // 两个"省显卡"开关：同样只在背景是视频时才有意义
+  // "窗口不在前台时暂停"：只在背景是视频时才有意义
   const pOpts = $('bgPerfOpts');
   if (pOpts) {
     pOpts.style.display = isVid ? '' : 'none';
-    $('chkPerfLite').checked  = s.bg.perfLite    !== false;
     $('chkPauseBlur').checked = s.bg.pauseOnBlur !== false;
   }
   // "背景模糊"只作用于图片层：背景是视频时置灰并说明原因（见 style.css 的 .field.is-off）
@@ -1802,8 +1975,30 @@ function syncSettingsUI() {
   $('rngBgBlur').value = s.bg.blur ?? 0;
   $('valBgBlur').textContent = $('rngBgBlur').value + 'px';
 
-  $('rngGlassBlur').value = s.glass.blur ?? 18;
+  // ---- 面板毛玻璃三档：两个互斥的平级开关 ----
+  //   只勾「省显卡」= prebake（默认） / 只勾「实时毛玻璃」= live / 两个都不勾 = plain
+  const gm = (s.glass.mode === 'plain' || s.glass.mode === 'live') ? s.glass.mode : 'prebake';
+  const hasBg = !!s.bg.file;
+  const fMode = $('fieldGlassMode');
+  if (fMode) fMode.classList.toggle('is-off', !hasBg);   // 没背景时这一块用不上 → 置灰
+  const cPerf = $('chkGlassPerf');
+  const cLive = $('chkGlassLive');
+  if (cPerf) { cPerf.checked = (gm === 'prebake'); cPerf.disabled = !hasBg; }
+  if (cLive) { cLive.checked = (gm === 'live');    cLive.disabled = !hasBg; }
+  const gWarn = $('glassLiveWarn');
+  if (gWarn) gWarn.classList.toggle('show', gm === 'live' && hasBg);   // 勾了高画质才常驻这行警示
+  const gHint = $('glassModeHint');
+  if (gHint) {
+    gHint.textContent = hasBg
+      ? '两个都不勾 = 面板完全不做模糊（最省，就是网易云插件那种做法）'
+      : '还没有自定义背景：面板背后是纯色，做不做模糊看不出差别，所以这里暂时用不上。';
+  }
+
+  $('rngGlassBlur').value = s.glass.blur ?? 12;
   $('valGlass').textContent = $('rngGlassBlur').value + 'px';
+  // 「毛玻璃强度」在 plain 档没有任何作用 → 置灰
+  const fGB = $('fieldGlassBlur');
+  if (fGB) fGB.classList.toggle('is-off', gm === 'plain');
 
   $('rngGlassAlpha').value = Math.round((s.glass.alpha ?? 0.55) * 100);
   $('valAlpha').textContent = $('rngGlassAlpha').value + '%';
@@ -1906,14 +2101,32 @@ function bindSettings() {
     persistLater();
   });
 
-  // 省显卡两开关
-  $('chkPerfLite').addEventListener('change', (e) => {
-    DB.settings.bg.perfLite = e.target.checked;
-    applyAppearance(); persist();
-  });
+  // 「窗口不在前台时暂停」
   $('chkPauseBlur').addEventListener('change', (e) => {
     DB.settings.bg.pauseOnBlur = e.target.checked;
     updateBgVideoPlayback(); persist();
+  });
+
+  /* ---- 面板毛玻璃：两个**互斥**的平级开关（勾一个自动取消另一个）----
+     只勾「省显卡」= prebake（默认） / 只勾「实时毛玻璃」= live / 两个都不勾 = plain。
+     ★ 允许"两个都不勾"是有意的：否则两个平级开关就退化成"伪装成开关的单选"，
+       而"都不勾"正好对应 BetterNCM / 网易云插件那种最省的做法，是个真实有用的档。 */
+  function setGlassMode(mode) {
+    DB.settings.glass.mode = mode;
+    applyAppearance(); syncSettingsUI(); persist();
+  }
+  $('chkGlassPerf').addEventListener('change', (e) => {
+    if (e.target.checked) setGlassMode('prebake');
+    else setGlassMode($('chkGlassLive').checked ? 'live' : 'plain');
+  });
+  $('chkGlassLive').addEventListener('change', (e) => {
+    if (e.target.checked) {
+      setGlassMode('live');
+      // Neo 定的提醒方式：一条 toast + 开关下面常驻一行警示（不做二次确认弹窗）
+      toast('已切到实时毛玻璃：更通透，但显卡占用会明显变高');
+    } else {
+      setGlassMode($('chkGlassPerf').checked ? 'prebake' : 'plain');
+    }
   });
 
   $('btnClearBg').addEventListener('click', async () => {
@@ -1943,8 +2156,8 @@ function bindSettings() {
   $('btnResetAppearance').addEventListener('click', () => {
     DB.settings.theme = 'pink';
     DB.settings.bg    = { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
-                          perfLite: true, pauseOnBlur: true };
-    DB.settings.glass = { blur: 18, alpha: 0.55 };
+                          pauseOnBlur: true };
+    DB.settings.glass = { blur: 12, alpha: 0.55, mode: 'prebake' };
     api('clearBackground').catch(() => {});
     applyAppearance(); syncSettingsUI(); persist();
     toast('外观已恢复默认');
@@ -2270,11 +2483,13 @@ function bindEvents() {
   bindVolume();
 
   /* ---- 音频事件 ---- */
-  // 播放/暂停/缓冲三个状态，换的是图标本身。
-  // 用 innerHTML 换 <use> 引用的名字，视觉上就是"换了个图标"。
-  audio.addEventListener('play',    () => { $('btnPlay').innerHTML = ic('i-pause'); updateCoverSpin(); pushLyricToDesktop(); });
-  audio.addEventListener('pause',   () => { $('btnPlay').innerHTML = ic('i-play');  updateCoverSpin(); pushLyricToDesktop(); });
-  audio.addEventListener('waiting', () => { $('btnPlay').innerHTML = ic('i-loading', 'spin'); });
+  // ★ 播放按钮的图标只有一个来源：updatePlayBtn()（按 audio.paused 决定 ▶ / ‖）。
+  //   这里**故意不监听 waiting** —— 缓冲时不再换成转圈（那样一旦没人换回来就永远转圈）。
+  //   播放/暂停/缓冲结束(playing)/被清空(emptied)/出错/播完，都只是"重算一次图标"。
+  audio.addEventListener('play',    () => { updatePlayBtn(); updateCoverSpin(); pushLyricToDesktop(); });
+  audio.addEventListener('pause',   () => { updatePlayBtn(); updateCoverSpin(); pushLyricToDesktop(); });
+  audio.addEventListener('playing', () => { updatePlayBtn(); });
+  audio.addEventListener('emptied', () => { updatePlayBtn(); });
 
   audio.addEventListener('timeupdate', () => {
     // 正在拖动时不要抢着刷新画面，否则进度条会被自己拖回去，疯狂抖动
@@ -2299,11 +2514,13 @@ function bindEvents() {
   audio.addEventListener('seeked', () => { syncLyric(true); pushLyricToDesktop(); });
 
   audio.addEventListener('ended', () => {
+    updatePlayBtn();
     if (playMode === 'one') { audio.currentTime = 0; audio.play(); return; }
     next(1);
   });
 
   audio.addEventListener('error', () => {
+    updatePlayBtn();
     // 地址过期是常事（B 站链接有时效），提示一下就好
     if (audio.src) toast('音频加载失败了，可能链接已过期，换一首试试');
   });
@@ -2516,6 +2733,61 @@ function lyricFailText(reason, fallback) {
 }
 
 /**
+ * 歌词页的"空状态"（v2.0.0 的 P2）：没有歌词时，别留一片空白。
+ * @param {'instrumental'|'failed'|'loading'|'idle'} kind
+ *   instrumental = 取到了、但确实没词（纯音乐）
+ *   failed       = 压根没取到（没填 Cookie / 被限流 / 接口变更 / 网络）
+ *   loading      = 正在取（换歌之后马上就有新词，先给个交代）
+ *   idle         = 还没取过（没开"自动加载歌词"，也没点过「词」）
+ *
+ * ★ 以前几条路都是"空"：纯音乐只塞一句很暗的「（没有歌词）」，
+ *   取词失败 / 换歌干脆 innerHTML='' —— 用户看到的就是一片什么都没有。
+ *   现在全部走这里：把歌名（+歌手）摆出来，按原因给不同说明，
+ *   需要的话再给一个按钮（复用已有的 loadLyrics，不另造轮子）。
+ */
+function renderLyricEmpty(kind) {
+  const box = $('lyricBox');
+  if (!box) return;
+  const cur = queue.tracks[queue.index];
+  const title = (cur && cur.title) || '未知曲目';
+  const artist = (cur && cur.author) || '';
+
+  const loading = kind === 'loading';
+  const msg = loading ? '正在取歌词…'
+    : kind === 'failed' ? '这次没取到歌词'
+    : kind === 'idle'   ? '还没取歌词'
+    : '这首是纯音乐，没有歌词';
+  const hint = loading ? '稍等一下，取到就自动显示。'
+    : kind === 'failed'
+      ? '可能是没填 B 站 Cookie、被限流，或者这首本来就没有字幕。可以点下面的「重新获取」再试一次。'
+      : kind === 'idle'
+        ? '点下面的按钮取一次歌词（取词要先在设置里填 B 站 Cookie）。'
+        : '安静地听吧 —— 也可以点「打开视频」去 B 站看看 UP 主有没有配词。';
+  const btnLabel = kind === 'idle' ? '获取歌词' : '重新获取';
+
+  box.classList.add('has-empty');
+  box.innerHTML =
+    '<div class="lyric-empty">' +
+      (cur && cur.cover ? `<div class="le-cover" style="background-image:url('${esc(cur.cover)}')"></div>` : '') +
+      `<div class="le-title">${esc(title)}</div>` +
+      (artist ? `<div class="le-artist">${esc(artist)}</div>` : '') +
+      `<div class="le-msg">${esc(msg)}</div>` +
+      (hint ? `<div class="le-hint">${esc(hint)}</div>` : '') +
+      (loading ? '' : `<button class="le-retry" id="btnLyricRetry">${btnLabel}</button>`) +
+    '</div>';
+
+  const retry = $('btnLyricRetry');
+  if (retry) {
+    retry.addEventListener('click', () => {
+      lyricState.failed = false;   // 解除"自动模式不再重试"的锁，让这次能真的再问一次
+      loadLyrics(true);            // byUser=true：失败会给提示，成功了会弹「歌词已加载」
+    });
+  }
+
+  updateLyricHead();
+}
+
+/**
  * 取歌词并渲染。
  * @param {boolean} byUser true = 用户主动点的（展开大屏 + 失败给提示）
  *                     false = 自动模式触发的（安静点，失败不打扰）
@@ -2568,8 +2840,8 @@ async function loadLyrics(byUser) {
     lyricState.trackKey = key;
     lyricState.failed = true;
     lyricState.index = -1;
-    const box = $('lyricBox');
-    if (box) box.innerHTML = '';
+    // 取词失败也走"空状态"，而不是把歌词区清成一片空白（P2）
+    renderLyricEmpty('failed');
     const warnEl = $('lyricWarn');
     if (warnEl) { warnEl.innerHTML = ''; warnEl.classList.remove('show'); }
     if (byUser) showLyricTip(lyricFailText(err.reason, err.message));
@@ -2591,9 +2863,11 @@ function renderLyricLines(videoTitle) {
   const box = $('lyricBox');
   if (!box) return;
   if (!lyricState.lines.length) {
-    box.innerHTML = '<p class="l">（没有歌词）</p>';
+    // 取到了、但确实没词（纯音乐）—— 也走空状态，别留一片空白（P2）
+    renderLyricEmpty('instrumental');
     return;
   }
+  box.classList.remove('has-empty');   // 有真歌词了，撤掉空状态那套布局
   const rows = lyricState.lines
     .map((l) => '<p class="l">' + esc(l.text) + '</p>')
     .join('');
@@ -2737,6 +3011,9 @@ function toggleLyrics(want) {
 
   const ov = $('lyricOverlay');
   if (ov) ov.classList.toggle('show', show);
+
+  // 歌词页开 / 关，直接影响"哪些动画该停"（L1）—— 立刻重算一次
+  syncPauseClasses();
 
   // 封面是它的开关，得跟着亮/灭，不然点了不知道现在是什么状态
   const cover = $('npCover');
@@ -3123,12 +3400,17 @@ function resetLyricsOnTrackChange() {
   lyricState.index = -1;
   lyricState.trackKey = '';
   lyricState.failed = false;
-  const box = $('lyricBox');
-  if (box) box.innerHTML = '';
   const warn = $('lyricWarn');
   if (warn) { warn.innerHTML = ''; warn.classList.remove('show'); }
-  if (DB.settings.autoLyric) loadLyrics(false);
-  else updateLyricBtn();
+  // ★ 别把歌词区清成一片空白：开着自动取词就显示"正在取歌词…"，
+  //   没开就显示"还没取歌词 + 一个获取按钮"。两种都比空着强。
+  if (DB.settings.autoLyric) {
+    renderLyricEmpty('loading');
+    loadLyrics(false);
+  } else {
+    renderLyricEmpty('idle');
+    updateLyricBtn();
+  }
   pushLyricToDesktop();
 }
 
@@ -3262,6 +3544,8 @@ async function boot() {
   // 4.5) 量出顶部工具栏的真实高度（歌词大屏要贴着它的下沿铺，不能盖住搜索框）
   syncTopbarHeight();
   window.addEventListener('resize', syncTopbarHeight);
+  // 窗口尺寸变化超过 15% 时，prebake 档那张"预先糊好的壁纸图"要重生成（尺寸变了就对不上）
+  window.addEventListener('resize', syncGlassImage);
 
   // 5) 如果上次有在听的歌，把信息显示在底部（不自动播放，免得吓一跳）
   if (DB.lastTrack) {

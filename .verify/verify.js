@@ -200,7 +200,9 @@ else ok(`边框 --line 跟着主色走（${lineDef.trim()}）`);
 
 const tbRuleNow = (css.match(/\.titlebar\s*\{[\s\S]*?\n\}/) || [''])[0];
 if (!/backdrop-filter/.test(tbRuleNow)) err('.titlebar 没有 backdrop-filter —— 顶栏不是磨砂玻璃');
-else if (!/rgba\(\s*var\(\s*--glass-rgb/.test(tbRuleNow)) err('.titlebar 不是半透明玻璃底（太实、会显得暗）');
+// 底色必须是半透明的 --glass-rgb（斜杠语法）。别写回 rgba(var(--glass-rgb), …) ——
+// 那是非法混搭，整条声明会被 Chromium 丢掉，顶栏会变成完全透明。
+else if (!/rgb\(\s*var\(\s*--glass-rgb\s*\)\s*\//.test(tbRuleNow)) err('.titlebar 不是半透明玻璃底（太实、会显得暗）');
 else ok('.titlebar 是半透明磨砂玻璃，且能透出背景主题色');
 
 /* ---- 11) 自绘窗口按钮的 IPC 链路（界面 → preload.send → main.ipcMain.on） ---- */
@@ -1277,8 +1279,8 @@ console.log('\n[39] 动态背景 · 随窗口等比缩放：');
   }
 }
 
-/* ---- 40) 模糊只作用于图片层 + 动态背景时降毛玻璃 ---- */
-console.log('\n[40] 动态背景 · 模糊隔离 + 毛玻璃降级：');
+/* ---- 40) 面板毛玻璃三档（plain / prebake / live）---- */
+console.log('\n[40] 面板毛玻璃 · 三档：');
 {
   const panels = ['titlebar', 'sidebar', 'topbar', 'player'];
 
@@ -1306,32 +1308,67 @@ console.log('\n[40] 动态背景 · 模糊隔离 + 毛玻璃降级：');
   else if (/layer\.style\.filter/.test(appjs)) err('还在往 .bg-layer 上设 filter（应该设到 #bgImage）');
   else ok('模糊由 applyAppearance() 设到 #bgImage 上');
 
-  // perf-lite：4 块常驻面板关掉 backdrop-filter
-  const missPanels = panels.filter((p) => !new RegExp('body\\.perf-lite \\.' + p + '\\b').test(css));
-  if (missPanels.length) err('body.perf-lite 下没有覆盖这些常驻面板：' + missPanels.join(' / '));
-  else ok('body.perf-lite 覆盖了 4 块常驻面板');
+  // 三档：plain / prebake 关掉真 backdrop-filter，live 保留
+  const missPanels = panels.filter((p) =>
+    !new RegExp('body\\.glass-plain \\.' + p + '\\b').test(css) ||
+    !new RegExp('body\\.glass-prebake \\.' + p + '\\b').test(css));
+  if (missPanels.length) err('body.glass-plain / glass-prebake 下没有覆盖这些常驻面板：' + missPanels.join(' / '));
+  else ok('glass-plain / glass-prebake 覆盖了 4 块常驻面板');
 
-  if (!/body\.perf-lite[\s\S]{0,600}?backdrop-filter:\s*none/.test(css))
-    err('perf-lite 下没有把 backdrop-filter 设成 none（用 blur(0px) 仍会把背后画面拷进纹理，省不下来）');
-  else ok('perf-lite 下把 backdrop-filter 设为 none');
+  // 遮罩层也要跟着档位走（S4）
+  const missOverlay = ['modal', 'collect-panel', 'modal-mask'].filter((c) =>
+    !new RegExp('body\\.glass-plain \\.' + c + '\\b').test(css));
+  if (missOverlay.length) err('遮罩层没有跟随档位（只有 live 该保留真模糊）：' + missOverlay.join(' / '));
+  else ok('3 个遮罩层也跟随档位');
 
-  if (!/body\.perf-lite\s*\{\s*--glass-boost:/.test(css))
-    err('perf-lite 没有抬高面板底色（--glass-boost）—— 关掉毛玻璃后观感会变太透');
-  else ok('perf-lite 同时抬高面板底色，观感仍是磨砂');
+  if (!/body\.glass-plain[\s\S]{0,900}?backdrop-filter:\s*none/.test(css))
+    err('glass-plain 下没有把 backdrop-filter 设成 none（用 blur(0px) 仍会把背后画面拷进纹理，省不下来）');
+  else ok('glass-plain / glass-prebake 下把 backdrop-filter 设为 none');
 
-  const noBoost = panels.filter((p) => {
+  if (!/body\.glass-plain,\s*body\.glass-prebake\s*\{\s*--glass-boost:/.test(css))
+    err('关掉真模糊的档没有抬高面板底色（--glass-boost）—— 观感会变太透');
+  else ok('关掉真模糊的档同时抬高面板底色，观感仍是磨砂');
+
+  const noPanelA = panels.filter((p) => {
     const r = new RegExp('(^|\\n)\\.' + p + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
-    return !r || !/--glass-boost/.test(r[2]);
+    return !r || !/--panel-a/.test(r[2]);
   });
-  if (noBoost.length) err('这些面板的底色没算上 --glass-boost：' + noBoost.join(' / '));
-  else ok('4 块面板的底色都算上了 --glass-boost');
+  if (noPanelA.length) err('这些面板的底色没有走 --panel-a（三档共用它）：' + noPanelA.join(' / '));
+  else ok('4 块面板的底色都走 --panel-a');
 
-  if (!/classList\.toggle\('perf-lite'/.test(appjs)) err("applyAppearance() 没有按背景类型切换 body.perf-lite");
-  else ok('applyAppearance() 按 bg.kind 切换 perf-lite（图片不动）');
+  // prebake：面板背景改用"预先糊好的图"
+  const pre = /body\.glass-prebake\.has-imgbg[\s\S]{0,500}?\}/.exec(css);
+  if (!pre) err('没有 body.glass-prebake.has-imgbg 的规则');
+  else {
+    if (!/var\(--glass-img\)/.test(pre[0])) err('prebake 档没有把面板背景接上 --glass-img（会退化成纯半透明）');
+    else ok('prebake 档面板背景接上了 --glass-img（预先糊好的壁纸图）');
+    if (!/fixed/.test(pre[0]))
+      err('prebake 的面板背景没有 background-attachment:fixed —— 四块面板显示的就不是壁纸的"对应那一块"');
+    else ok('prebake 用 background-attachment:fixed 对齐壁纸');
+  }
+
+  // 没有自定义背景时三档都不挂真模糊
+  if (!/body:not\(\.has-bg\) \.titlebar/.test(css))
+    err('没有自定义背景时没有把面板毛玻璃关掉（背后是纯色，糊了没收益）');
+  else ok('没有自定义背景 → 面板一律不挂真模糊');
+
+  // app.js 侧
+  if (!/async function buildGlassImage/.test(appjs)) err('没有生成"预先糊好的图"的函数 buildGlassImage()');
+  else ok('有 buildGlassImage() 生成预先糊好的图');
+  if (!/glassImgState/.test(appjs)) err('预先糊好的图没有"该不该重生成"的状态记录');
+  else ok('预先糊好的图有复用 / 重生成判断');
+  if (!/ctx\.filter/.test(appjs)) err('没有用 canvas 的 ctx.filter 去糊图');
+  else ok('用 canvas 一次性糊好（不是每帧重算）');
+  if (!/crossOrigin/.test(appjs))
+    err('加载背景图时没有 crossOrigin —— 画进 canvas 会污染画布，toDataURL() 会抛错');
+  else ok('加载背景图带 crossOrigin（避免污染画布）');
+  if (!/classList\.toggle\('glass-prebake'/.test(appjs) || !/classList\.toggle\('glass-live'/.test(appjs))
+    err("applyAppearance() 没有按 glass.mode 给 <body> 切类");
+  else ok('applyAppearance() 按 glass.mode 切 body 的类');
 }
 
-/* ---- 41) 动态背景 · "该停就停"的暂停规则 + 改名「动态背景」 ---- */
-console.log('\n[41] 动态背景 · 暂停规则 + 改名：');
+/* ---- 41) 省显卡 · 暂停规则 + 老存档迁移 + 改名「动态背景」 ---- */
+console.log('\n[41] 省显卡 · 暂停规则 + 迁移 + 改名：');
 {
   if (!/winFocused/.test(appjs) || !/addEventListener\('blur'/.test(appjs) || !/addEventListener\('focus'/.test(appjs))
     err('没有窗口失焦 / 回焦的暂停恢复（切到别的软件时窗口还露着，会一直烧显卡）');
@@ -1348,14 +1385,35 @@ console.log('\n[41] 动态背景 · 暂停规则 + 改名：');
   if (!/function updateBgVideoPlayback/.test(appjs)) err('没有统一的"该不该播"总闸 updateBgVideoPlayback()');
   else ok('播放 / 暂停统一由总闸 updateBgVideoPlayback() 判定');
 
-  if (!/DB\.settings\.bg\.perfLite\s*=\s*DB\.settings\.bg\.perfLite\s*!== false/.test(appjs) ||
-      !/DB\.settings\.bg\.pauseOnBlur\s*=\s*DB\.settings\.bg\.pauseOnBlur\s*!== false/.test(appjs))
-    err('migrateSettings() 没给 perfLite / pauseOnBlur 兜底（老存档读出 undefined → 功能会被当成关掉）');
-  else ok('老存档零迁移：perfLite / pauseOnBlur 缺省 = 开');
+  // L1 / S3：把看不见的动画停掉
+  if (!/function syncPauseClasses/.test(appjs)) err('没有统一处理"看不见就别动"的 syncPauseClasses()');
+  else ok('有 syncPauseClasses() 统一处理 L1 / S3');
+  if (!/classList\.toggle\('has-overlay'/.test(appjs) ||
+      !/classList\.toggle\('lyric-open'/.test(appjs) ||
+      !/classList\.toggle\('perf-idle'/.test(appjs))
+    err('has-overlay / lyric-open / perf-idle 三个类没齐');
+  else ok('has-overlay / lyric-open / perf-idle 三个类都在');
 
-  if (!/id="chkPerfLite"/.test(html) || !/id="chkPauseBlur"/.test(html))
-    err('设置面板缺少「降低毛玻璃 / 窗口不在前台时暂停」两个开关');
-  else ok('设置面板有省显卡的两个开关');
+  ['has-overlay', 'lyric-open', 'perf-idle'].forEach((cls) => {
+    if (!new RegExp('body\\.' + cls + '[\\s\\S]{0,500}?animation-play-state:\\s*paused').test(css))
+      err(`body.${cls} 下没有把无限动画设成 paused`);
+    else ok(`body.${cls} 下暂停了无限动画`);
+  });
+
+  // 迁移
+  if (!/DB\.settings\.glass\.mode\s*=/.test(appjs)) err('migrateSettings() 没有给 glass.mode 兜底');
+  else ok('migrateSettings() 给 glass.mode 兜底（缺省 = prebake）');
+  if (!/delete DB\.settings\.bg\.perfLite/.test(appjs)) err('退役的 bg.perfLite 字段没有被清掉');
+  else ok('bg.perfLite 字段已退役');
+
+  if (!/id="chkGlassPerf"/.test(html) || !/id="chkGlassLive"/.test(html))
+    err('设置面板缺少「省显卡 / 实时毛玻璃」两个开关');
+  else ok('设置面板有面板毛玻璃的两个开关');
+  if (/id="chkPerfLite"/.test(html)) err('旧的「降低毛玻璃（省显卡）」开关还在');
+  else ok('旧的 chkPerfLite 开关已删掉');
+
+  if (!/id="glassLiveWarn"/.test(html)) err('没有"实时毛玻璃更费显卡"的常驻警示行');
+  else ok('有常驻警示行（勾高画质才显示）');
 
   if (!/\.field\.is-off/.test(css) || !/id="fieldBgBlur"/.test(html))
     err('背景是视频时"背景模糊"滑杆没有置灰态');
@@ -1363,13 +1421,150 @@ console.log('\n[41] 动态背景 · 暂停规则 + 改名：');
 
   // 用户可见文案统一叫「动态背景」—— 连注释一起清，避免以后又混着写
   const srcFiles = ['src/ui/index.html', 'src/ui/app.js', 'src/ui/style.css', 'src/main.js', 'src/preload.js', 'src/bg-protocol.js'];
-  const bad = srcFiles.filter((f) => read(f).includes('视频背景'));
-  if (bad.length) err('这些文件里还残留「视频背景」字样：' + bad.join(' / '));
+  const bad2 = srcFiles.filter((f) => read(f).includes('视频背景'));
+  if (bad2.length) err('这些文件里还残留「视频背景」字样：' + bad2.join(' / '));
   else ok('源码里已无「视频背景」字样，统一叫「动态背景」');
 
   if (!/动态背景/.test(html)) err('设置面板标题没有改成「动态背景」');
   else ok('设置面板标题为「动态背景」');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 41 大类检查）');
+/* ---- 42) 歌词页 · 透明化（P1） ---- */
+console.log('\n[42] 歌词页 · 透明化：');
+{
+  const m = /(^|\n)\.lyric-overlay\s*\{([\s\S]*?)\}/.exec(css);
+  const rule = m ? m[2] : '';
+  if (!rule) err('找不到 .lyric-overlay 的样式规则');
+  else {
+    if (/backdrop-filter/.test(rule))
+      err('.lyric-overlay 本体还挂着 backdrop-filter —— 那是"一坨黑"和显卡被打满的共同来源（该放到 body.glass-live 下）');
+    else ok('.lyric-overlay 本体不再挂 backdrop-filter（只有 live 档才挂）');
+    const bm = /background:\s*rgba\([^)]*?,\s*([\d.]+)\s*\)/.exec(rule);
+    if (!bm) err('读不到 .lyric-overlay 的背景色（或写法不是 rgba）');
+    else if (parseFloat(bm[1]) > 0.6) err(`.lyric-overlay 的背景还是太不透明（alpha=${bm[1]}），壁纸透不出来`);
+    else ok(`.lyric-overlay 背景 alpha=${bm[1]} ≤ 0.6（壁纸能透出来）`);
+  }
+  if (!/body\.glass-live \.lyric-overlay[\s\S]{0,200}?backdrop-filter:\s*blur\(/.test(css))
+    err('live 档下歌词页没有跟着糊（Neo 定的：高画质档歌词页要一起通透）');
+  else ok('live 档下歌词页跟着糊');
+  if (!/--lyric-blur/.test(css)) err('没有 --lyric-blur（歌词页的模糊半径该比面板更小）');
+  else ok('歌词页用 --lyric-blur，半径比面板更小');
+
+  const lm2 = /\.lyric-box \.l\s*\{([\s\S]*?)\}/.exec(css);
+  if (!lm2 || !/text-shadow/.test(lm2[1])) err('歌词行没有 text-shadow —— 去掉糊背景后文字会读不清');
+  else ok('歌词行有 text-shadow（可读性不靠糊背景）');
+}
+
+/* ---- 43) 歌词页 · 空状态（P2） ---- */
+console.log('\n[43] 歌词页 · 空状态：');
+{
+  if (/box\.innerHTML\s*=\s*''/.test(appjs))
+    err("取词失败时还是 box.innerHTML = ''（一片空白）");
+  else ok('取词失败不再把歌词区清成空白');
+  if (/（没有歌词）/.test(appjs)) err('还在用「（没有歌词）」那种空提示');
+  else ok('不再用「（没有歌词）」占位');
+  if (!/function renderLyricEmpty/.test(appjs)) err('没有 renderLyricEmpty()');
+  else ok('有 renderLyricEmpty() 统一空状态');
+  if (!/renderLyricEmpty\('failed'\)/.test(appjs) || !/renderLyricEmpty\('instrumental'\)/.test(appjs))
+    err('纯音乐 / 取词失败两条路没有都走空状态');
+  else ok('纯音乐 / 取词失败两条路都走空状态');
+  if (!/lyric-empty/.test(appjs) || !/\.lyric-empty/.test(css)) err('空状态的 DOM / 样式不齐');
+  else ok('空状态有 DOM 结构与样式');
+  if (!/btnLyricRetry/.test(appjs)) err('空状态里没有「重新获取」按钮');
+  else ok('空状态里有「重新获取」按钮');
+}
+
+/* ---- 44) 毛玻璃三档 · 数据与设置项 ---- */
+console.log('\n[44] 毛玻璃三档 · 数据与设置项：');
+{
+  if (!/glass:\s*\{\s*blur:\s*12,\s*alpha:\s*0\.55,\s*mode:\s*'prebake'\s*\}/.test(appjs))
+    err("DEFAULT_SETTINGS.glass 不是 { blur:12, alpha:0.55, mode:'prebake' }");
+  else ok("默认设置 = blur 12 / alpha 0.55 / mode 'prebake'");
+  if (!/s\.glass\.mode === 'plain' \|\| s\.glass\.mode === 'live'/.test(appjs))
+    err('没有对 glass.mode 做合法性校验（非法值该退回 prebake）');
+  else ok('glass.mode 有合法性校验');
+  if (/perfLite:/.test(appjs)) err('app.js 里还有 perfLite 的默认值（字段应退役）');
+  else ok('app.js 里不再有 perfLite 默认值');
+  if (!/chkGlassPerf/.test(appjs) || !/chkGlassLive/.test(appjs)) err('两个新开关没有绑定事件');
+  else ok('两个新开关都绑了事件');
+  if (!/function setGlassMode/.test(appjs)) err('没有 setGlassMode() 统一改档');
+  else ok('有 setGlassMode() 统一改档');
+  if (!/s\.glass\.blur\s*\?\?\s*12/.test(appjs))
+    err('applyAppearance() 没有按 12px 的缺省写 --glass-blur');
+  else ok('applyAppearance() 写 --glass-blur（缺省 12px）');
+}
+
+/* ---- 45) 性能 · 每帧重算的路径已拿掉 ---- */
+console.log('\n[45] 性能 · 每帧重算的路径已拿掉：');
+{
+  if (!/body\.has-overlay \.idx \.bars i/.test(css) || !/body\.perf-idle \.np-cover\.spin::before/.test(css))
+    err('has-overlay / perf-idle 没有覆盖到"跳动柱子 + 封面旋转弧线"');
+  else ok('暂停规则覆盖了跳动柱子与封面旋转弧线');
+  if (!/body\.lyric-open \.idx \.bars i/.test(css))
+    err('打开整页歌词时没有暂停内容区的动画');
+  else ok('打开整页歌词时暂停内容区动画');
+  if (!/animation-play-state:\s*paused/.test(css)) err('没有任何"暂停无限动画"的规则');
+  else ok('有"暂停无限动画"的规则');
+
+  if (!/classList\.toggle\('has-imgbg'/.test(appjs)) err('没有 has-imgbg 类（prebake 的面板背景开关）');
+  else ok('有 has-imgbg 类控制 prebake 的面板背景');
+
+  if (/perf-lite/.test(appjs) || /perf-lite/.test(css))
+    err('还残留 perf-lite（旧的省电方式应被 glass.mode 取代）');
+  else ok('旧的 perf-lite 机制已彻底移除，改由 glass.mode 决定');
+
+  if (!/BARS_ICON = `<span/.test(appjs)) err('柱子还是 SVG（SVG 的 transform 动画不走合成器，每帧重光栅化）');
+  else ok('柱子已从 SVG 换成普通元素（走合成器）');
+  if (/\.idx \.bars rect/.test(css)) err('CSS 里还留着 .idx .bars rect（SVG 那套）');
+  else ok('CSS 里的柱子样式已改成普通元素');
+
+  if (!/function updatePlayBtn/.test(appjs)) err('没有唯一的按钮刷新函数 updatePlayBtn()');
+  else ok('有 updatePlayBtn()（图标只由 audio.paused 决定）');
+  if (/addEventListener\(\s*'waiting'[\s\S]{0,160}?i-loading/.test(appjs))
+    err("源码里还有 waiting → i-loading 的绑定（缓冲一次就永远转圈）");
+  else ok('不再有 waiting → 转圈的绑定');
+}
+
+console.log('\n[46] 颜色语法 · 空格三元组只能配斜杠写法：');
+{
+  // 本项目有 4 组"空格分隔的 RGB 三元组"自定义属性：
+  //   --glass-rgb / --accent-rgb / --accent-2-rgb / --sw / --sw2   （形如 16 16 26）
+  // 它们套进 rgba() 会变成 rgba(16 16 26, .55) —— RGB 用空格、alpha 用逗号，
+  // 这种混搭在 Chromium 里非法；而且因为是 var() 替换，报错时机在"computed-value 期"，
+  // 属性会直接取**初始值**（background-color → transparent），不是回退到上一条声明。
+  // 结果就是"整条样式静默失效"：面板没有底色、开关勾上不变色、正在播放那行的粉色渐变没了。
+  // 正确写法只有斜杠：rgb(R G B / A)。（逗号三元组的 --accent-rgb 在 lyric.css 里，
+  // 那是悬浮窗自己的一份变量，配 rgba(r, g, b, a) 是对的，不在本检查范围内。）
+  const triplets = ['glass-rgb', 'accent-rgb', 'accent-2-rgb', 'sw', 'sw2'];
+  const offenders = [];
+  triplets.forEach((name) => {
+    const re = new RegExp('rgba\\(\\s*var\\(--' + name + '\\)\\s*,', 'g');
+    const hit = css.match(re);
+    if (hit) offenders.push(`${name}×${hit.length}`);
+  });
+  if (offenders.length)
+    err(`style.css 里还有非法写法 rgba(var(--…), α)：${offenders.join(' / ')} —— var() 替换后非法，属性会取初始值（透明）`);
+  else ok('5 组空格三元组都没有配 rgba(var(--…), α) 这种非法写法');
+
+  const slash = css.match(/rgb\(\s*var\(--(?:glass|accent|accent-2|sw|sw2)-?r?g?b?\)\s*\//g);
+  if (!slash || slash.length < 10)
+    err(`斜杠写法 rgb(var(--… ) / α) 只有 ${slash ? slash.length : 0} 处，半透明主题色可能整片失效`);
+  else ok(`斜杠写法 rgb(var(--…) / α) 共 ${slash.length} 处`);
+
+  if (!/rgb\(var\(--glass-rgb\) \/ var\(--panel-a\)\)\) center\/cover no-repeat fixed/.test(css))
+    err('prebake 的多层背景里，底色层没写成斜杠语法（会整条落空 → 面板没有预先糊好的图）');
+  else ok('prebake 多层背景的底色层用的是斜杠语法');
+
+  // 开关勾上必须真的变色（曾经因为上面那个坑，勾上反而变成全透明）
+  if (!/input:checked \+ \.switch \{ background: rgb\(var\(--accent-rgb\) \/ 0\.85\)/.test(css))
+    err('开关"开"态的底色没写成斜杠语法 → 勾上会变成全透明（只剩白圆点）');
+  else ok('开关"开"态用的是斜杠语法（勾上会显示主题色底槽）');
+
+  // 反向兜底：全局再扫一遍有没有别的"空格 RGB + 逗号 alpha"混搭漏网
+  const mixed = css.match(/rgba\(\s*\d+\s+\d+\s+\d+\s*,/g);
+  if (mixed) err(`style.css 里还有 ${mixed.length} 处硬编码的 rgba(R G B, A) 混搭写法`);
+  else ok('没有其它硬编码的 rgba(R G B, A) 混搭写法');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 46 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

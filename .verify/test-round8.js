@@ -1,7 +1,9 @@
 /* 第八轮需求的实测（离屏渲染 + 真跑应用代码，不是文本断言）：
      · 动态背景随窗口等比缩放 —— 三种窗口尺寸下量 #bgVideo 盒子，必须等于 .bg-layer 盒子
      · 模糊只作用于图片层 —— .bg-layer 的 filter 必须是 none，.bg-image 才有 blur()
-     · 动态背景时降毛玻璃 —— kind=video 时四块常驻面板 backdrop-filter 必须是 none；图片时不是
+     · 面板毛玻璃 —— v2.0.0 起改为三档（plain / prebake / live），
+       本文件只做冒烟：默认 prebake 下四块面板没有真 backdrop-filter、live 下恢复；
+       三档的完整断言在 test-round9.js
      · "该停就停" —— 窗口失焦暂停 / 回焦恢复 / 打开遮罩暂停
      · 改名 —— 界面文案统一是「动态背景」，不再出现「视频背景」
      · 图片背景不受影响 —— 图片层有背景图，视频层隐藏且暂停
@@ -157,44 +159,55 @@ app.whenReady().then(async () => {
   if (/blur\(8px\)/.test(blur.img)) ok('.bg-image 承担了模糊（图片背景的模糊滑杆仍然有效）');
   else bad('.bg-image 的模糊不对：' + blur.img);
 
-  /* ================= 3) 动态背景时降毛玻璃 ================= */
-  say('\n[3] 动态背景时自动降毛玻璃：');
+  /* ================= 3) 面板毛玻璃（v2.0.0 起改为三档，细节见 test-round9.js） ================= */
+  say('\n[3] 面板毛玻璃三档（默认 prebake）：');
   const glassOf = () => evalJS(`(() => {
     const sel = ['.titlebar', '.sidebar', '.topbar', '.player'];
     const out = {};
     sel.forEach((s) => { const el = document.querySelector(s);
       out[s] = el ? getComputedStyle(el).backdropFilter : 'MISSING'; });
-    return { lite: document.body.classList.contains('perf-lite'), filters: out,
+    return { mode: DB.settings.glass.mode, filters: out,
              boost: getComputedStyle(document.body).getPropertyValue('--glass-boost').trim() };
   })()`);
 
-  const gv = await glassOf();
-  say(`  kind=video：body.perf-lite=${gv.lite}，--glass-boost=${gv.boost}，四面板 backdrop-filter=${JSON.stringify(gv.filters)}`);
-  if (gv.lite) ok('背景是视频时给 <body> 打上了 perf-lite');
-  else bad('背景是视频时没有打 perf-lite');
-  const notNone = Object.keys(gv.filters).filter((k) => gv.filters[k] !== 'none');
-  if (notNone.length === 0) ok('四块常驻面板的 backdrop-filter 全是 none（不再对会动的画面每帧重算）');
-  else bad('这些面板还开着毛玻璃：' + notNone.join(' / ') + ' → ' + JSON.stringify(gv.filters));
-  if (parseFloat(gv.boost) > 0) ok('perf-lite 同时抬高了面板底色（--glass-boost=' + gv.boost + '）');
-  else bad('perf-lite 没有抬高面板底色：' + gv.boost);
+  await evalJS(`(() => { DB.settings.bg.file = '${TEST_IMAGE}'; DB.settings.bg.kind = 'image';
+    DB.settings.glass.mode = 'prebake'; applyAppearance(); syncSettingsUI(); return true; })()`);
+  await sleep(700);
+  const gp = await glassOf();
+  say(`  图片背景 + prebake：mode=${gp.mode}，四面板 backdrop-filter=${JSON.stringify(gp.filters)}，--glass-boost=${gp.boost}`);
+  if (gp.mode === 'prebake') ok('默认档是 prebake（用预先糊好的图，成本≈0）');
+  else bad('默认档不是 prebake：' + gp.mode);
+  const notNone = Object.keys(gp.filters).filter((k) => gp.filters[k] !== 'none');
+  if (notNone.length === 0) ok('prebake 档四块常驻面板都没有真 backdrop-filter（不再每帧重算）');
+  else bad('这些面板还开着毛玻璃：' + notNone.join(' / ') + ' → ' + JSON.stringify(gp.filters));
+  if (parseFloat(gp.boost) > 0) ok('关掉真模糊的档同时抬高了面板底色（--glass-boost=' + gp.boost + '）');
+  else bad('没有抬高面板底色：' + gp.boost);
 
-  await evalJS(`(() => { DB.settings.bg.kind = 'image'; applyAppearance(); return true; })()`);
-  await sleep(250);
-  const gi = await glassOf();
-  say(`  kind=image：body.perf-lite=${gi.lite}，四面板 backdrop-filter=${JSON.stringify(gi.filters)}`);
-  if (!gi.lite) ok('背景是图片时不打 perf-lite（图片糊一次就缓存住了，毛玻璃几乎不花钱）');
-  else bad('背景是图片时不该打 perf-lite');
-  const allBlur = Object.keys(gi.filters).filter((k) => /blur/.test(gi.filters[k]));
-  if (allBlur.length === 4) ok('四块面板的毛玻璃全部恢复（图片背景观感不变）');
-  else bad('图片背景下面板毛玻璃没恢复：' + JSON.stringify(gi.filters));
+  await evalJS(`(() => { DB.settings.glass.mode = 'live'; applyAppearance(); syncSettingsUI(); return true; })()`);
+  await sleep(400);
+  const gl = await glassOf();
+  say(`  live 档：四面板 backdrop-filter=${JSON.stringify(gl.filters)}`);
+  const allBlur = Object.keys(gl.filters).filter((k) => /blur/.test(gl.filters[k]));
+  if (allBlur.length === 4) ok('live 档四块面板恢复真毛玻璃（与 v1.9.0 观感一致，作回归基准）');
+  else bad('live 档面板毛玻璃没恢复：' + JSON.stringify(gl.filters));
 
-  // 两个"省显卡"开关在界面上真的渲染出来了吗（别只是数据对、控件没画出来）
+  // 新开关在界面上真的渲染出来了吗（别只是数据对、控件没画出来）
   await evalJS(`(() => { DB.settings.bg.kind = 'video'; DB.settings.bg.file = '${TEST_VIDEO}';
-    DB.settings.bg.perfLite = true; DB.settings.bg.pauseOnBlur = true;
+    DB.settings.glass.mode = 'prebake'; DB.settings.bg.pauseOnBlur = true;
     applyAppearance(); syncSettingsUI(); return true; })()`);
-  await sleep(250);
+  await sleep(300);
+  // ★ 开关底色带 transition: background 0.2s。离屏窗口**不产生帧**，过渡会"卡在切换前的旧值"上，
+  //   于是 getComputedStyle 读到的是勾选**之前**的颜色 —— 看起来就像勾选状态反了。
+  //   取样前先把过渡/动画掐掉并强制一次重排，读到的才是真正的目标值。
+  await evalJS(`(() => {
+    const s = document.createElement('style');
+    s.id = '__noAnimForSampling';
+    s.textContent = '* { transition: none !important; animation: none !important; }';
+    document.head.appendChild(s);
+    void document.body.offsetHeight;   // 强制重排，让"无过渡"立刻生效
+    return true; })()`);
   const sw = await evalJS(`(() => {
-    const ids = ['chkVideoMuted', 'chkVideoLoop', 'chkPerfLite', 'chkPauseBlur'];
+    const ids = ['chkVideoMuted', 'chkVideoLoop', 'chkGlassPerf', 'chkGlassLive', 'chkPauseBlur'];
     const out = {};
     ids.forEach((id) => {
       const i = document.getElementById(id);
@@ -203,15 +216,19 @@ app.whenReady().then(async () => {
     });
     return out;
   })()`);
-  say(`  四个开关：${JSON.stringify(sw)}`);
+  await evalJS(`(() => { const s = document.getElementById('__noAnimForSampling'); if (s) s.remove(); return true; })()`);
+  say(`  五个开关：${JSON.stringify(sw)}`);
   const missingSw = Object.keys(sw).filter((k) => sw[k] === 'MISSING' || sw[k].track === 'NO-SWITCH-SPAN');
   if (missingSw.length) bad('这些开关没渲染出来：' + missingSw.join(' / '));
-  else ok('四个开关都在界面上渲染出来了');
-  const onTracks = Object.keys(sw).map((k) => sw[k].track);
-  if (sw.chkPerfLite && sw.chkPerfLite.checked === true && sw.chkPauseBlur && sw.chkPauseBlur.checked === true) ok('两个省显卡开关默认都是开');
-  else bad('两个省显卡开关默认值不对：' + JSON.stringify(sw));
-  if (new Set(onTracks).size === 1) ok('两个新开关的"开"态配色和老开关一致（同一套样式）');
-  else bad('新开关配色和老开关不一致：' + JSON.stringify(onTracks));
+  else ok('五个开关都在界面上渲染出来了');
+  // 只看"勾着的"开关：未勾的开关底色是透明的，拿它比颜色没有意义
+  const onTracks = Object.keys(sw).filter((k) => sw[k] && sw[k].checked).map((k) => sw[k].track);
+  if (sw.chkGlassPerf && sw.chkGlassPerf.checked === true && sw.chkPauseBlur && sw.chkPauseBlur.checked === true)
+    ok('默认档下「省显卡」与「窗口不在前台时暂停」都是开');
+  else bad('默认开关值不对：' + JSON.stringify(sw));
+  if (new Set(onTracks).size === 1 && /^rgba?\(/.test(onTracks[0]) && !/rgba\(0, 0, 0, 0\)/.test(onTracks[0]))
+    ok('新开关的"开"态配色和老开关一致，且真的是主题色（' + onTracks[0] + '）');
+  else bad('新开关配色和老开关不一致（勾上的应该是同一个主题色）：' + JSON.stringify(onTracks));
 
   /* ================= 4) "该停就停" ================= */
   say('\n[4] 该停就停：失焦 / 回焦 / 打开遮罩：');

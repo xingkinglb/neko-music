@@ -500,18 +500,10 @@
           <input type="range" id="rngVideoSpeed" min="0.5" max="2" step="0.25" value="1" />
         </div>
 
-        <!-- 省显卡两开关：同样只在背景是视频时显示。
-             毛玻璃（backdrop-filter）压在会动的画面上时每一帧都要重算，
-             关掉它收益最大；窗口不在前台时暂停则让"切走就不烧显卡"。 -->
+        <!-- 动态背景（视频）专属：窗口不在前台时暂停。
+             毛玻璃那一档已经独立成下面的「面板毛玻璃」，不再和这里绑在一起。 -->
         <div class="field" id="bgPerfOpts" style="display:none">
           <label class="switch-row">
-            <span class="switch-label">降低毛玻璃（省显卡）</span>
-            <input type="checkbox" id="chkPerfLite" checked />
-            <span class="switch"></span>
-          </label>
-          <div class="field-hint">动态背景时关掉四块面板的实时模糊，显卡占用明显下降；面板会略"实"一点。</div>
-
-          <label class="switch-row" style="margin-top:12px">
             <span class="switch-label">窗口不在前台时暂停</span>
             <input type="checkbox" id="chkPauseBlur" checked />
             <span class="switch"></span>
@@ -531,9 +523,46 @@
           <div class="field-hint" id="bgBlurHint">不喜欢太花哨的背景，可以糊掉它</div>
         </div>
 
-        <div class="field">
-          <div class="field-label">毛玻璃强度 <b id="valGlass">18px</b></div>
-          <input type="range" id="rngGlassBlur" min="0" max="40" value="18" />
+        <!-- ========== 面板毛玻璃（v2.0.0）==========
+             两个**互斥**的平级开关，组合出三档（勾一个会自动取消另一个）：
+               两个都不勾        = 纯半透明（完全不模糊，最省；就是网易云插件那种做法）
+               只勾「省显卡」    = 用预先糊好的静态壁纸图（默认，观感几乎一样、成本≈0）
+               只勾「实时毛玻璃」= 真 backdrop-filter（最通透，但每帧重算、明显更费显卡）
+
+             为什么要有这一块：backdrop-filter 的含义是"把我背后的画面实时糊一遍"，
+             只要合成器还在产帧就得每帧重跑一次 —— 这才是显卡被打满的真凶。
+             Neo 的要求是"两种做法都保留、默认走省显卡那条，但要提醒切过去会更费"。 -->
+        <div class="field" id="fieldGlassMode">
+          <div class="field-label">面板毛玻璃</div>
+
+          <label class="switch-row">
+            <span class="switch-label">省显卡（推荐）</span>
+            <input type="checkbox" id="chkGlassPerf" checked />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">用一张预先糊好的背景图代替实时模糊：观感几乎一样，显卡占用大幅下降。</div>
+
+          <label class="switch-row" style="margin-top:12px">
+            <span class="switch-label">实时毛玻璃（高画质）</span>
+            <input type="checkbox" id="chkGlassLive" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">背后画面实时模糊，最通透 —— 但每一帧都要重算，显卡占用明显更高。</div>
+
+          <!-- 勾了「实时毛玻璃」才出现的**常驻**警示（不是闪一下就没）。
+               图标走 SVG 图标库，不用 ⚠ 那种字符 —— 在 Windows 上会被 Segoe UI Emoji 抢去渲染成彩色方块。 -->
+          <div class="glass-warn" id="glassLiveWarn">
+            <svg class="ic"><use href="#i-info"/></svg>
+            <span>实时毛玻璃在笔记本上更费电、风扇会更响</span>
+          </div>
+
+          <div class="field-hint" id="glassModeHint">两个都不勾 = 面板完全不做模糊（最省，就是网易云插件那种做法）</div>
+        </div>
+
+        <div class="field" id="fieldGlassBlur">
+          <div class="field-label">毛玻璃强度 <b id="valGlass">12px</b></div>
+          <input type="range" id="rngGlassBlur" min="0" max="40" value="12" />
+          <div class="field-hint">「省显卡」档决定预先糊多少、「实时毛玻璃」档决定实时模糊半径。</div>
         </div>
 
         <div class="field">

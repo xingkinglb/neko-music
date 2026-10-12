@@ -16,8 +16,14 @@
   --muted-2:   #6b6b83;   /* 更暗的辅助色（由 #5c5c72 / #4c4c63 / #6b6b83 合并而来） */
   --track-bg:  #26263a;   /* 封面/缩略图没图时的占位底色 */
   /* 主色写成 "R G B" 三元组（空格分隔，不是逗号）。
-     这样后面才能写 rgba(var(--accent-rgb), 0.18) —— 半透明的主色也能跟着主题变。
-     只写 #ff6fa5 的话，那些半透明粉色就得全部写死，换主题会换不干净。 */
+     这样后面才能写 rgb(var(--accent-rgb) / 0.18) —— 半透明的主色也能跟着主题变。
+     只写 #ff6fa5 的话，那些半透明粉色就得全部写死，换主题会换不干净。
+     ★★ 必须用斜杠写法 rgb(R G B / A)。写成 rgba(var(--accent-rgb), 0.18) 的话，
+        var() 替换后会变成 rgba(255 111 165, 0.18) —— "RGB 用空格、alpha 用逗号"这种混搭非法，
+        按 CSS 规范算"computed-value 期无效"，属性直接取**初始值**（背景色 → transparent），
+        而不是回退到上一条声明。这个坑让全站所有"半透明主题色"静默失效了很久：
+        开关勾上不变色、正在播放那行的粉色渐变没了、卡片悬停边框不亮…… 全中招。
+        --glass-rgb 也是同一个规矩（见下面 prebake 那段注释）。 */
   --accent-rgb:   255 111 165;   /* 粉 */
   --accent-2-rgb: 160 107 255;   /* 紫 */
   --accent:   rgb(var(--accent-rgb));
@@ -29,11 +35,21 @@
   --bg-dim:   0.55;    /* 压暗：0 = 原图，1 = 全黑。太亮会盖住文字 */
   --bg-blur:  0px;     /* 背景自身的额外模糊（跟毛玻璃是两回事） */
 
-  /* ---- 毛玻璃 ---- */
-  --glass-blur:  18px;  /* 模糊半径，越大越糊 */
+  /* ---- 毛玻璃 ----
+     v2.0.0 起面板毛玻璃分三档（见下面 body.glass-plain / glass-prebake / glass-live）：
+       live    真 backdrop-filter —— 每帧重算，最贵，观感最通透
+       prebake 用 JS 预先 canvas 糊好的静态壁纸图当背景 —— 默认，成本≈0
+       plain   只压半透明底色、完全不模糊 —— 最省（就是 BetterNCM / 网易云插件那种做法） */
+  --glass-blur:  12px;  /* 实时模糊半径（live 档用；prebake 档拿它当"预先糊多少"）。越大越糊、也越贵 */
   --glass-alpha: 0.55;  /* 不透明度：越小越透，能看到更多背景 */
-  --glass-boost: 0;     /* 额外加深量：动态背景时由 body.perf-lite 抬高，补偿"关掉毛玻璃"带来的观感变化 */
-  --glass-rgb:   16 16 26;  /* 玻璃本身带的底色（接近纯黑，保证白字可读） */
+  --glass-boost: 0;     /* 额外加深量：关掉真模糊的档（prebake / plain）由 <body> 抬高，补偿观感 */
+  --glass-rgb:   16 16 26;  /* 玻璃本身带的底色（接近纯黑，保证白字可读）。
+                               注意它是"空格分隔"的 RGB 三分量，用的时候必须配斜杠语法：
+                               写 rgb(var(--glass-rgb) / 0.55) ✅
+                               写 rgba(var(--glass-rgb), 0.55) ❌ —— 展开成 rgba(16 16 26, .55)，
+                               RGB 空格 + alpha 逗号的混搭在 Chromium 里非法，整条声明会被丢掉 */
+  --glass-img:   none;  /* prebake 档专用的"预先糊好的壁纸图"，由 app.js 生成 data:URL 填进来 */
+  --lyric-blur:  14px;  /* 整页歌词在 live 档下的模糊半径（它是整块内容区，比面板更该降） */
 
   /* ---- 顶部自绘标题栏 ---- */
   /* 标题栏的高度。系统按钮已经不要了（见 main.js 的 titleBarStyle: 'hidden'），
@@ -174,20 +190,69 @@ ul { list-style: none; }
 }
 .bg-layer #bgVideo.on { display: block; }
 
-/* 动态背景（视频）时的"省显卡"档：把 4 块常驻面板的毛玻璃整个关掉。
-   毛玻璃（backdrop-filter）的含义是"把我背后的画面实时糊一遍"——
-   背后是静态图片时糊一次就缓存住了，几乎不花钱；
-   背后是视频时每一帧都要重新采样 + 重新模糊这 4 块大面积区域，60fps 下 ≈ 每秒 240 次。
-   这里用 none 而不是 blur(0px)：blur(0px) 仍会把背后画面拷进纹理，省不下来。
-   同时把面板底色加深一点（--glass-boost），观感上仍是"磨砂面板"，不至于变透明。
-   由 applyAppearance() 在 settings.bg.kind === 'video' 时给 <body> 加这个类。 */
-body.perf-lite { --glass-boost: 0.12; }
-body.perf-lite .titlebar,
-body.perf-lite .sidebar,
-body.perf-lite .topbar,
-body.perf-lite .player {
+/* ============================================================
+   面板毛玻璃三档（v2.0.0）
+   ------------------------------------------------------------
+   背景知识：backdrop-filter 的含义是"把我背后的画面实时糊一遍"。
+   只要合成器还在产帧，它就要**每帧重跑一次** —— 这才是显卡被打满的真凶
+   （关键不在"糊的是静态图还是视频"，而在"合成器为什么一直在产帧"）。
+
+   三档由 settings.glass.mode 决定，applyAppearance() 会给 <body> 打对应类：
+     · glass-live    保留真 backdrop-filter（= 以前的 Neko Music，观感最通透、最贵）
+     · glass-prebake 用 JS 预先 canvas 糊好的静态壁纸图当面板背景（默认，成本≈0）
+     · glass-plain   只压半透明底色、完全不模糊（最省，等于 BetterNCM 的做法）
+
+   ★ 关掉真模糊必须写 none，不能写 blur(0px)：
+     后者仍会把背后画面拷进纹理，一点都省不下来。 */
+body.glass-plain .titlebar,
+body.glass-prebake .titlebar,
+body.glass-plain .sidebar,
+body.glass-prebake .sidebar,
+body.glass-plain .topbar,
+body.glass-prebake .topbar,
+body.glass-plain .player,
+body.glass-prebake .player,
+body.glass-plain .modal,
+body.glass-prebake .modal,
+body.glass-plain .collect-panel,
+body.glass-prebake .collect-panel,
+body.glass-plain .modal-mask,
+body.glass-prebake .modal-mask {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+/* 没有自定义背景时，面板背后就是一层纯色 —— 糊它没有任何视觉收益。
+   所以三档（含 live）一律不挂真模糊，顺手把开关也置灰（见 syncSettingsUI）。 */
+body:not(.has-bg) .titlebar,
+body:not(.has-bg) .sidebar,
+body:not(.has-bg) .topbar,
+body:not(.has-bg) .player {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 关掉真模糊的档位，底色抬高一点，观感仍是"磨砂面板"而不是"变透明" */
+body.glass-plain,
+body.glass-prebake { --glass-boost: 0.12; }
+
+/* prebake 档：面板背景换成"预先糊好的壁纸图"（--glass-img，由 app.js 生成 data:URL）。
+   两层背景：上面一层是半透明底色（写成 linear-gradient 只为能当"一层"用），
+   下面一层才是糊好的壁纸 —— 于是看起来就是"面板背后的壁纸被糊了"。
+   background-attachment: fixed 让四块面板各自显示壁纸的"对应那一块"，位置对得上。
+   ★ 只有"有图片背景"时才有意义：没有自定义背景、或背景是视频时，app.js 都不会填 --glass-img
+     （也不会打 has-imgbg），这一整块自然落空，面板退回纯半透明。
+   ★★ 颜色一律写 rgb(R G B / A)（斜杠），不能写 rgba(R G B, A)。
+      --glass-rgb 是"空格分隔"的 16 16 26，套进 rgba() 就成了 rgba(16 16 26, .55)——
+      RGB 用空格、alpha 用逗号，这种混搭在 Chromium 里是非法的，整条声明会被直接丢掉
+      （背景、背景色、linear-gradient 里都一样）。斜杠写法才是 CSS Color 4 的正规语法。 */
+body.glass-prebake.has-imgbg .titlebar,
+body.glass-prebake.has-imgbg .sidebar,
+body.glass-prebake.has-imgbg .topbar,
+body.glass-prebake.has-imgbg .player {
+  background:
+    linear-gradient(rgb(var(--glass-rgb) / var(--panel-a)), rgb(var(--glass-rgb) / var(--panel-a))) center/cover no-repeat fixed,
+    var(--glass-img) center/cover no-repeat fixed;
 }
 
 /* ---------- 整体布局 ---------- */
@@ -221,18 +286,22 @@ body.perf-lite .player {
      否则它们会点不动（真要放，就得给那个元素单独写 -webkit-app-region: no-drag）。 */
   -webkit-app-region: drag;
 
+  /* 面板底色：--panel-a 是本面板的"不透明度档位"，
+     三档共用它（prebake 档的多层背景也要拿它当上面那层底色）。 */
+  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) - 0.05);
+
   /* 和其它面板一样走"半透明磨砂"，而不是一条实心深色（那样顶栏又暗又闷）。
      右上角那三个窗口按钮（最小化/最大化/关闭）是我们自己用 HTML 画的（见 .win-controls），
      它们也用半透明 + 悬停染主题色，所以和这一条磨砂底天然一体、一起跟随主题色。
      顶部正好是背景主题光晕最强的地方，于是这条顶栏会透出淡淡的主题色。 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) - 0.05));
+  background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-bottom: 1px solid var(--line);
 }
 /* 标题栏里的品牌小圆点，比侧边栏时代小一点，免得压住文字 */
 .titlebar .brand-dot {
   width: 9px; height: 9px;
-  box-shadow: 0 0 10px rgba(var(--accent-rgb), 0.65);
+  box-shadow: 0 0 10px rgb(var(--accent-rgb) / 0.65);
 }
 .titlebar .brand-text { font-size: 13.5px; letter-spacing: 0.4px; }
 
@@ -253,8 +322,8 @@ body.perf-lite .player {
   transition: background 0.14s, color 0.14s;
 }
 .win-btn .ic { width: 15px; height: 15px; }
-.win-btn:hover { background: rgba(var(--accent-rgb), 0.22); color: #fff; }
-.win-btn:active { background: rgba(var(--accent-rgb), 0.34); }
+.win-btn:hover { background: rgb(var(--accent-rgb) / 0.22); color: #fff; }
+.win-btn:active { background: rgb(var(--accent-rgb) / 0.34); }
 .win-btn.close:hover { background: #e81123; color: #fff; }
 .win-btn.close:active { background: #c50f1f; }
 
@@ -265,7 +334,8 @@ body.perf-lite .player {
   grid-area: sidebar;
   /* 毛玻璃：先按 --glass-alpha 压一层半透明底色，再把背后的画面糊掉。
      侧边栏字最多，所以故意比别处实一点（+0.16）保证可读。 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) + 0.16));
+  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) + 0.16);
+  background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-right: 1px solid var(--line);
   display: flex;
@@ -278,7 +348,7 @@ body.perf-lite .player {
 .brand-dot {
   width: 11px; height: 11px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 0 12px rgba(var(--accent-rgb), 0.6);
+  box-shadow: 0 0 12px rgb(var(--accent-rgb) / 0.6);
 }
 /* 品牌文字：用渐变当"墨水"填进字形里 */
 .brand-text {
@@ -299,7 +369,7 @@ body.perf-lite .player {
 }
 .nav-item:hover { background: var(--panel); color: var(--text); }
 .nav-item.active {
-  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.18), rgba(var(--accent-2-rgb), 0.18));
+  background: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.18), rgb(var(--accent-2-rgb) / 0.18));
   color: var(--text); font-weight: 600;
 }
 .nav-item .ico { width: 18px; }
@@ -352,8 +422,8 @@ body.perf-lite .player {
   overflow: hidden;
   /* 两团氛围光晕。颜色跟着主题变，强度由 --glow 控制 */
   background:
-    radial-gradient(900px 420px at 12% -8%, rgba(var(--accent-rgb),   calc(0.10 * var(--glow))), transparent 60%),
-    radial-gradient(760px 380px at 92% 4%,  rgba(var(--accent-2-rgb), calc(0.10 * var(--glow))), transparent 62%);
+    radial-gradient(900px 420px at 12% -8%, rgb(var(--accent-rgb) /   calc(0.10 * var(--glow))), transparent 60%),
+    radial-gradient(760px 380px at 92% 4%,  rgb(var(--accent-2-rgb) / calc(0.10 * var(--glow))), transparent 62%);
 }
 
 /* 顶部工具条 */
@@ -362,7 +432,8 @@ body.perf-lite .player {
   padding: 16px 22px;
   border-bottom: 1px solid var(--line);
   /* 比侧边栏更透（-0.12），让背景多露一点 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) - 0.12));
+  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) - 0.12);
+  background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
 }
 .search-box, .link-box {
@@ -377,7 +448,7 @@ body.perf-lite .player {
 .search-box { flex: 1; }
 .link-box { flex: 1.25; }
 .search-box:focus-within, .link-box:focus-within {
-  border-color: rgba(var(--accent-rgb), 0.55);
+  border-color: rgb(var(--accent-rgb) / 0.55);
   background: var(--panel-2);
 }
 .search-box .ico { color: var(--muted); }
@@ -417,7 +488,7 @@ body.perf-lite .player {
   transition: all 0.16s;
 }
 .ghost-btn .ic { width: 14px; height: 14px; }
-.ghost-btn:hover { background: var(--panel-2); color: #fff; border-color: rgba(var(--accent-rgb), 0.45); }
+.ghost-btn:hover { background: var(--panel-2); color: #fff; border-color: rgb(var(--accent-rgb) / 0.45); }
 
 /* ---------- 歌曲列表 ---------- */
 .track-list { display: flex; flex-direction: column; gap: 4px; }
@@ -431,7 +502,7 @@ body.perf-lite .player {
   cursor: pointer; transition: background 0.15s;
 }
 .track:hover { background: var(--panel); }
-.track.playing { background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.16), rgba(var(--accent-2-rgb), 0.13)); }
+.track.playing { background: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.16), rgb(var(--accent-2-rgb) / 0.13)); }
 
 .track .idx {
   display: flex; align-items: center; justify-content: center;
@@ -440,19 +511,49 @@ body.perf-lite .player {
 }
 .track.playing .idx { color: var(--accent); }
 
-/* "正在播放"的那一行，序号位置换成三根上下跳动的柱子 */
-.idx .bars { width: 15px; height: 15px; }
-.idx .bars rect {
-  fill: currentColor;
-  transform-box: fill-box;    /* 让缩放基准是"每根柱子自己"，而不是整个画布 */
+/* "正在播放"的那一行，序号位置换成三根上下跳动的柱子。
+   ★ v2.0.0（L2）：从 SVG 的 <rect> 换成普通 <span>/<i>。
+     原因：Chromium 里 SVG 的 transform 动画**不走合成器**，是每帧重新光栅化（贵）；
+     普通元素 + transform 才走合成器，每帧只移动图层、不重绘。观感一模一样，成本降一个量级。 */
+.idx .bars {
+  display: inline-flex; align-items: center; justify-content: center; gap: 2px;
+  width: 15px; height: 15px;
+}
+.idx .bars i {
+  display: block; width: 3px; border-radius: 1.5px;
+  background: currentColor;
   transform-origin: center;   /* 从中间往两头缩，才像在跳而不是在沉 */
   animation: barPulse 1s ease-in-out infinite;
 }
-.idx .bars rect:nth-child(2) { animation-delay: 0.18s; }
-.idx .bars rect:nth-child(3) { animation-delay: 0.36s; }
+/* 三根柱子高低错开（40% / 92% / 55%），像一根根声浪 */
+.idx .bars i:nth-child(1) { height: 40%; }
+.idx .bars i:nth-child(2) { height: 92%; animation-delay: 0.18s; }
+.idx .bars i:nth-child(3) { height: 55%; animation-delay: 0.36s; }
 @keyframes barPulse {
   0%, 100% { transform: scaleY(0.4); }
   50%      { transform: scaleY(1); }
+}
+
+/* ============================================================
+   省显卡：把"看不见的动画"停掉（v2.0.0 的 L1 / S3）
+   ------------------------------------------------------------
+   backdrop-filter 之所以贵，是因为"合成器一直在产帧"，而产帧的源头是**动画**。
+   所以只要会动的东西被盖住、用户看不见，就应该暂停它 —— 这是纯赚的优化：
+     · body.has-overlay —— 有模态遮罩盖住整块界面（设置 / 选集 / 队列 / 弹窗）
+     · body.lyric-open  —— 整页歌词开着（只盖住内容区，播放条仍看得见）
+     · body.perf-idle   —— 窗口失焦 / 最小化 / 切后台（什么都看不见）
+
+   ★ 整页歌词开着时**故意不停**封面的旋转弧线：它在播放条里、用户还看得见，
+     停掉会让人以为"没在播"。而模态遮罩是盖住整块界面的，连它一起停。 */
+body.has-overlay .idx .bars i,
+body.has-overlay .np-cover.spin::before,
+body.has-overlay .spinner,
+body.lyric-open .idx .bars i,
+body.lyric-open .spinner,
+body.perf-idle .idx .bars i,
+body.perf-idle .np-cover.spin::before,
+body.perf-idle .spinner {
+  animation-play-state: paused;
 }
 .track .cover {
   width: 56px; height: 36px; border-radius: 7px;
@@ -477,7 +578,7 @@ body.perf-lite .player {
   white-space: nowrap; transition: all 0.15s;
 }
 .op-btn:hover { background: var(--accent); color: #fff; }
-.op-btn.liked { background: rgba(var(--accent-rgb), 0.2); color: var(--accent); }
+.op-btn.liked { background: rgb(var(--accent-rgb) / 0.2); color: var(--accent); }
 
 /* 行内操作改用图标（♡ 收藏 / ＋ 加歌单 / ⓘ 详情 / 🗑 移除）：
    比"收藏 / ＋歌单"这种文字短、又不占宽度，一排看着更整齐。
@@ -490,7 +591,7 @@ body.perf-lite .player {
 }
 .op-ic .ic { width: 15px; height: 15px; }
 .op-ic:hover { background: var(--accent); color: #fff; }
-.op-ic.on { background: rgba(var(--accent-rgb), 0.22); color: var(--accent); }
+.op-ic.on { background: rgb(var(--accent-rgb) / 0.22); color: var(--accent); }
 .op-ic.on .ic { fill: currentColor; }
 
 /* 通用悬停提示：给元素加 data-tip="文字"，鼠标移上去就浮出来。
@@ -522,7 +623,7 @@ body.perf-lite .player {
   border-radius: var(--radius); padding: 11px;
   cursor: pointer; transition: transform 0.18s, background 0.18s, border-color 0.18s;
 }
-.card:hover { transform: translateY(-3px); background: var(--panel-2); border-color: rgba(var(--accent-rgb), 0.4); }
+.card:hover { transform: translateY(-3px); background: var(--panel-2); border-color: rgb(var(--accent-rgb) / 0.4); }
 .card .thumb {
   width: 100%; aspect-ratio: 16/10; border-radius: 10px;
   background: var(--track-bg) center/cover no-repeat; margin-bottom: 9px;
@@ -565,7 +666,8 @@ body.perf-lite .player {
   grid-area: player;
   /* 以前写的是 rgba(20,20,30,0.94) —— 太实心了，加上去那一 backdrop-filter 根本没有东西可糊，
      等于白写。现在换成统一的可调透明度，背景一换它就能真正透出下面的图。 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) + 0.1));
+  --panel-a: calc(var(--glass-alpha) + var(--glass-boost) + 0.1);
+  background: rgb(var(--glass-rgb) / var(--panel-a));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-top: 1px solid var(--line);
   display: grid;
@@ -610,7 +712,7 @@ body.perf-lite .player {
   border-radius: 50%;
   border: 2px solid transparent;
   border-top-color: var(--accent);
-  border-right-color: rgba(var(--accent-rgb), 0.4);
+  border-right-color: rgb(var(--accent-rgb) / 0.4);
   animation: coverSpin 3.2s linear infinite;
   pointer-events: none;
 }
@@ -656,7 +758,7 @@ body.perf-lite .player {
   width: 42px; height: 42px; border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #fff;
-  box-shadow: 0 3px 14px rgba(var(--accent-rgb), 0.35);
+  box-shadow: 0 3px 14px rgb(var(--accent-rgb) / 0.35);
 }
 .ctrl-btn.big:hover { transform: scale(1.06); }
 .ctrl-btn.on { color: var(--accent); }
@@ -692,7 +794,7 @@ body.perf-lite .player {
   position: absolute; left: 0; top: 50%;
   width: 10px; height: 10px; border-radius: 50%;
   background: #fff; transform: translate(-50%, -50%);
-  box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.7);
+  box-shadow: 0 0 8px rgb(var(--accent-rgb) / 0.7);
   opacity: 0; transition: opacity 0.15s, transform 0.15s;
 }
 .progress:hover .progress-knob { opacity: 1; }
@@ -755,7 +857,7 @@ body.perf-lite .player {
   width: 14px; height: 14px; border-radius: 50%;
   background: #fff; border: 2px solid var(--accent);
   transform: translate(-50%, 50%);
-  box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.55);
+  box-shadow: 0 0 6px rgb(var(--accent-rgb) / 0.55);
 }
 
 /* 滑杆通用样式：设置面板里的各种调节杆共用（播放条的音量已改成自绘竖向滑杆） */
@@ -768,7 +870,7 @@ body.perf-lite .player {
 .field input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
   width: 11px; height: 11px; border-radius: 50%;
-  background: var(--accent); box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.6);
+  background: var(--accent); box-shadow: 0 0 6px rgb(var(--accent-rgb) / 0.6);
 }
 
 /* ============================================================
@@ -783,7 +885,7 @@ body.perf-lite .player {
   transition: background 0.14s, color 0.14s;
 }
 .lyric-btn .ic { width: 14px; height: 14px; }
-.lyric-btn:hover { background: rgba(var(--accent-rgb), 0.2); color: var(--text); }
+.lyric-btn:hover { background: rgb(var(--accent-rgb) / 0.2); color: var(--text); }
 /* 三个状态：加载中(转圈禁用) / 已加载(高亮) / 没字幕(灰掉但仍可点) */
 .lyric-btn.loading { color: var(--muted-2); pointer-events: none; }
 .lyric-btn.loading .ic { animation: neko-spin 0.9s linear infinite; }
@@ -799,8 +901,8 @@ body.perf-lite .player {
   transition: background 0.14s, color 0.14s;
 }
 .ico-btn .ic { width: 15px; height: 15px; }
-.ico-btn:hover { background: rgba(var(--accent-rgb), 0.2); color: var(--text); }
-.ico-btn:active { background: rgba(var(--accent-rgb), 0.32); }
+.ico-btn:hover { background: rgb(var(--accent-rgb) / 0.2); color: var(--text); }
+.ico-btn:active { background: rgb(var(--accent-rgb) / 0.32); }
 .ico-btn.disabled { color: var(--muted-2); pointer-events: none; }
 
 /* 没有字幕之类的提示：在按钮上方淡入 → 停留 → 淡出消散（JS 加/移 .show） */
@@ -836,14 +938,23 @@ body.perf-lite .player {
   right: 0;
   bottom: var(--player-h);
   z-index: 30;
-  background: rgba(14, 14, 22, 0.88);  /* 磨砂玻璃，和整体风格一致 */
-  backdrop-filter: blur(26px) saturate(140%);
-  -webkit-backdrop-filter: blur(26px) saturate(140%);
+  /* ★ v2.0.0（P1）：从 88% 不透明降到 34%。
+     以前那层 88% 的黑把壁纸整个盖住 —— 明明是"透明背景"，看着却是一坨黑；
+     而且它背后的 backdrop-filter 根本没东西可糊（背后已经被自己压掉了），纯属白花钱。
+     现在只留一层很淡的底，让壁纸透出来；文字可读性交给下面 .lyric-box .l 的文字投影。 */
+  background: rgba(8, 8, 14, 0.34);
   opacity: 0; pointer-events: none;
   transition: opacity 0.22s ease;
   overflow: hidden;
 }
 .lyric-overlay.show { opacity: 1; pointer-events: auto; }
+
+/* live 档：整页歌词也跟着糊（Neo 定的：高画质档要一起通透）。
+   其余两档**一律不挂 backdrop-filter** —— 它正是"一坨黑"和显卡被打满的共同来源。 */
+body.glass-live .lyric-overlay {
+  backdrop-filter: blur(var(--lyric-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--lyric-blur)) saturate(140%);
+}
 
 /* 歌词容器：整块可滚动，自动滚到当前句 */
 /* 整页歌词顶上的信息条：歌名 + 歌手 + 「桌面歌词」开关 */
@@ -874,8 +985,8 @@ body.perf-lite .player {
   transition: background 0.14s, color 0.14s;
   pointer-events: auto;   /* 信息条整条不接鼠标，这个按钮要单独放行 */
 }
-.lyric-head-btn:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
-.lyric-head-btn.on { color: var(--accent); background: rgba(var(--accent-rgb), 0.18); }
+.lyric-head-btn:hover { background: rgb(var(--accent-rgb) / 0.22); color: var(--text); }
+.lyric-head-btn.on { color: var(--accent); background: rgb(var(--accent-rgb) / 0.18); }
 .lyric-head-btn .ic { width: 14px; height: 14px; }
 
 .lyric-box {
@@ -913,6 +1024,9 @@ body.perf-lite .player {
   font-size: 16px; line-height: 1.5;
   color: var(--muted-2);
   padding: 9px 0;
+  /* ★ v2.0.0（P1）：不再靠"糊背景"保证可读性（那是每帧开销），
+     改成给文字自己加一层投影 —— 一次性开销，壁纸再花也不影响认字。 */
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   transition: color 0.2s, transform 0.2s, opacity 0.2s;
 }
 /* 当前这一句：高亮 + 放大 */
@@ -920,7 +1034,7 @@ body.perf-lite .player {
   color: var(--text);
   font-size: 19px;
   font-weight: 500;
-  text-shadow: 0 0 18px rgba(var(--accent-rgb), 0.4);
+  text-shadow: 0 0 18px rgb(var(--accent-rgb) / 0.4);
 }
 /* 上下相邻两句稍微近一点，营造聚焦感 */
 .lyric-box .l.on + .l, .l.near { color: var(--muted); }
@@ -929,8 +1043,45 @@ body.perf-lite .player {
   content: ""; position: absolute; left: 0; right: 0;
   height: 82px; pointer-events: none; z-index: 1;
 }
-.lyric-overlay::before { top: 0;    background: linear-gradient(to bottom, rgba(14,14,22,0.95), transparent); }
-.lyric-overlay::after  { bottom: 0; background: linear-gradient(to top,    rgba(14,14,22,0.95), transparent); }
+.lyric-overlay::before { top: 0;    background: linear-gradient(to bottom, rgba(8,8,14,0.55), transparent); }
+.lyric-overlay::after  { bottom: 0; background: linear-gradient(to top,    rgba(8,8,14,0.55), transparent); }
+
+/* 没有歌词时的"空状态"（v2.0.0 的 P2）：把歌名摆出来，别留一片空白。
+   —— 两种情况都会走到这里：纯音乐（取到了但没词）、取词失败（网络/风控/接口变更）。
+   旧版前者只有一句很暗的「（没有歌词）」，后者干脆 innerHTML='' 全空。 */
+.lyric-empty {
+  min-height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 40px 20px; text-align: center;
+}
+/* 空状态里不需要上下各半屏的留白撑高度（那两个伪元素只为"歌词居中"服务） */
+.lyric-box.has-empty::before, .lyric-box.has-empty::after { display: none; }
+.lyric-empty .le-cover {
+  width: 108px; height: 108px; border-radius: 14px; margin-bottom: 8px;
+  background: var(--track-bg) center/cover no-repeat;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+}
+.lyric-empty .le-title {
+  font-size: 22px; font-weight: 700; color: var(--text);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  max-width: 80%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lyric-empty .le-artist { font-size: 13.5px; color: var(--muted); }
+.lyric-empty .le-msg { margin-top: 16px; font-size: 15px; color: var(--text-2); text-shadow: 0 1px 3px rgba(0,0,0,0.7); }
+.lyric-empty .le-hint {
+  font-size: 12.5px; color: var(--muted-2); max-width: 460px; line-height: 1.8;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+.lyric-empty .le-retry {
+  margin-top: 20px; height: 34px; padding: 0 22px; border-radius: 999px;
+  font-size: 13px; font-weight: 600; color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  box-shadow: 0 4px 16px rgb(var(--accent-rgb) / 0.35);
+  transition: opacity 0.16s, transform 0.16s;
+}
+.lyric-empty .le-retry:hover { opacity: 0.9; }
+.lyric-empty .le-retry:active { transform: scale(0.97); }
 
 /* 歌词来源对不上时的警告条。
    刻意放在 .lyric-box 外面：syncLyric 按 box.children 的下标对应每一句歌词，
@@ -956,7 +1107,7 @@ body.perf-lite .player {
   background: rgba(255,255,255,0.06);
   z-index: 4;   /* 必须高过信息条（它 z-index: 3），否则又被盖住 */
 }
-.lyric-close:hover { background: rgba(var(--accent-rgb), 0.22); color: var(--text); }
+.lyric-close:hover { background: rgb(var(--accent-rgb) / 0.22); color: var(--text); }
 
 /* ============================================================
    设置面板里的开关与下拉框（歌词页在用）
@@ -994,9 +1145,27 @@ body.perf-lite .player {
   background: #fff; opacity: 0.85;
   transition: transform 0.2s, opacity 0.2s;
 }
-.switch-row input:checked + .switch { background: rgba(var(--accent-rgb), 0.85); }
+.switch-row input:checked + .switch { background: rgb(var(--accent-rgb) / 0.85); }
 .switch-row input:checked + .switch::after { transform: translateX(18px); opacity: 1; }
 .switch-row input:focus-visible + .switch { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* 整块"用不上"时的置灰（v2.0.0 用在"没有自定义背景时的面板毛玻璃"上）：
+   变淡 + 不接鼠标。开关的 checkbox 本身是 display:none，真正可点的是 label，
+   所以这里要把整行 switch-row 的鼠标事件也掐掉。 */
+.field.is-off .switch-row { pointer-events: none; }
+
+/* 「实时毛玻璃（高画质）」勾上之后**常驻**显示的一行警示（不是闪一下就没）。
+   由 syncSettingsUI() 按当前档位切 .show。 */
+.glass-warn {
+  display: none;
+  margin-top: 10px; padding: 8px 12px;
+  font-size: 11.5px; line-height: 1.6; color: #ffd9a0;
+  background: rgba(120, 78, 20, 0.35);
+  border: 1px solid rgba(255, 190, 120, 0.3);
+  border-radius: 9px;
+}
+.glass-warn.show { display: flex; align-items: center; gap: 7px; }
+.glass-warn .ic { width: 14px; height: 14px; flex: none; }
 
 /* ============================================================
    轻提示气泡
@@ -1032,7 +1201,7 @@ body.perf-lite .player {
 .modal {
   width: 540px; max-width: 92vw; max-height: 84vh;
   display: flex; flex-direction: column;
-  background: rgba(var(--glass-rgb), 0.94);
+  background: rgb(var(--glass-rgb) / 0.94);
   backdrop-filter: blur(30px) saturate(150%);
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -1064,7 +1233,7 @@ body.perf-lite .player {
 }
 .tab:hover { background: var(--panel); color: var(--text-2); }
 .tab.active {
-  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.22), rgba(var(--accent-2-rgb), 0.18));
+  background: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.22), rgb(var(--accent-2-rgb) / 0.18));
   color: var(--text);
 }
 
@@ -1090,7 +1259,7 @@ body.perf-lite .player {
   border-radius: 10px; padding: 11px 13px;
   color: var(--text); font-family: inherit; font-size: 12.5px; line-height: 1.6;
 }
-.field textarea:focus { border-color: rgba(var(--accent-rgb), 0.55); }
+.field textarea:focus { border-color: rgb(var(--accent-rgb) / 0.55); }
 .btn-row { display: flex; gap: 9px; }
 
 /* 主题色块 */
@@ -1105,13 +1274,13 @@ body.perf-lite .player {
 .swatch i {
   width: 26px; height: 26px; border-radius: 50%; display: block;
   background: linear-gradient(135deg, rgb(var(--sw)), rgb(var(--sw2)));
-  box-shadow: 0 0 10px rgba(var(--sw), 0.5);
+  box-shadow: 0 0 10px rgb(var(--sw) / 0.5);
 }
 .swatch:hover { background: var(--panel-2); color: var(--text-2); }
 .swatch.on {
   border-color: rgb(var(--sw));
   color: var(--text);
-  background: linear-gradient(135deg, rgba(var(--sw), 0.16), rgba(var(--sw2), 0.12));
+  background: linear-gradient(135deg, rgb(var(--sw) / 0.16), rgb(var(--sw2) / 0.12));
 }
 /* 每个色块的预览颜色（跟上面的主题变量保持一致） */
 .swatch[data-theme="pink"]   { --sw: 255 111 165; --sw2: 160 107 255; }
@@ -1140,7 +1309,7 @@ body.perf-lite .player {
   font-size: 13.5px; color: var(--text);
   transition: border-color 0.16s;
 }
-.prompt-input:focus { border-color: rgba(var(--accent-rgb), 0.55); outline: none; }
+.prompt-input:focus { border-color: rgb(var(--accent-rgb) / 0.55); outline: none; }
 
 /* 选歌单：每个歌单一行，右边显示已存首数 */
 .pl-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
@@ -1159,7 +1328,7 @@ body.perf-lite .player {
   transition: background 0.15s;
 }
 .pl-new .ic { width: 14px; height: 14px; }
-.pl-new:hover { background: rgba(var(--accent-rgb), 0.12); }
+.pl-new:hover { background: rgb(var(--accent-rgb) / 0.12); }
 .pl-empty { font-size: 12.5px; color: var(--muted); padding: 6px 4px; }
 
 /* ============================================================
@@ -1180,7 +1349,7 @@ body.perf-lite .player {
 .collect-panel {
   width: 400px; max-width: 92vw; height: 100%;
   display: flex; flex-direction: column;
-  background: rgba(var(--glass-rgb), 0.96);
+  background: rgb(var(--glass-rgb) / 0.96);
   backdrop-filter: blur(26px) saturate(150%);
   border-left: 1px solid var(--line);
   box-shadow: -18px 0 60px rgba(0, 0, 0, 0.55);
@@ -1211,7 +1380,7 @@ body.perf-lite .player {
   border-radius: 9px; padding: 7px 11px;
   color: var(--text); font-family: inherit; font-size: 12.5px;
 }
-.collect-search:focus { border-color: rgba(var(--accent-rgb), 0.55); outline: none; }
+.collect-search:focus { border-color: rgb(var(--accent-rgb) / 0.55); outline: none; }
 
 .collect-body { flex: 1; overflow-y: auto; padding: 8px; }
 .collect-row {
@@ -1231,7 +1400,7 @@ body.perf-lite .player {
 .collect-row .cops { display: flex; gap: 6px; opacity: 0; transition: opacity 0.14s; }
 .collect-row:hover .cops { opacity: 1; }
 .collect-row.on {
-  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.16), rgba(var(--accent-2-rgb), 0.13));
+  background: linear-gradient(135deg, rgb(var(--accent-rgb) / 0.16), rgb(var(--accent-2-rgb) / 0.13));
 }
 .collect-row .cn { font-size: 12px; color: var(--muted); text-align: center; font-variant-numeric: tabular-nums; }
 .collect-row.on .cn { color: var(--accent); }
