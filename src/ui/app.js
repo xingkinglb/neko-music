@@ -211,11 +211,47 @@ const DEFAULT_SETTINGS = {
   // ★ 缺省 'ask'：托盘图标是这一轮新加的，第一次关窗问一下最不容易出误会
   //   （用户以为关掉了、其实还在后台跑，或者反过来，两种都会挨骂）。
   close: { action: 'ask' },
+  // v2.3.0：自定义快捷键。★ 只存"和默认不一样的那几条"（空对象 = 全用默认），
+  // 所以老存档零迁移：没有这一项就是全默认，行为和以前一模一样。
+  keys: {},
 };
 
 // 关窗行为的三种取值。★ 必须和主进程 src/app-menus.js 的 CLOSE_ACTIONS 一致
 // （verify.js 会拿两边对一下，防止以后改一边忘了另一边）。
 const CLOSE_ACTIONS = ['ask', 'quit', 'tray'];
+
+/* ============================================================
+   快捷键（v2.3.0）—— 一张表当唯一准绳
+   ============================================================
+   以前这 11 条是"一个功能一行 if"，写死在全局 keydown 里：
+   加一条要改三处（if / 界面 / 存档），迟早漏一处。
+   现在"加一条快捷键"= 在这张表里加一行，界面、存档、按键匹配全自动。
+
+   ★ id 会存进存档（settings.keys[id]），所以**改 id = 老存档丢键位**，别随便动。
+   ★ def 必须是"规范化之后"的写法（见 normalizeKeyName）：
+       字母一律小写、空格写 Space、方向键写 ArrowLeft / ArrowRight / ArrowUp / ArrowDown。
+     否则"存进去的是 Ctrl+d、默认写的是 Ctrl+D"，永远匹配不上。
+   ★ Esc **故意不进表**：它是所有面板的逃生键，绑走了面板就关不掉。 */
+const KEY_ACTIONS = [
+  { id: 'togglePlay',       name: '播放 / 暂停', def: 'Space',           hint: '播放条中间那个按钮' },
+  { id: 'prevTrack',        name: '上一首',     def: 'Ctrl+ArrowLeft',  hint: '' },
+  { id: 'nextTrack',        name: '下一首',     def: 'Ctrl+ArrowRight', hint: '' },
+  { id: 'seekBack',         name: '快退 5 秒',  def: 'ArrowLeft',       hint: '' },
+  { id: 'seekFwd',          name: '快进 5 秒',  def: 'ArrowRight',      hint: '' },
+  { id: 'volUp',            name: '音量 +5',    def: 'ArrowUp',         hint: '' },
+  { id: 'volDown',          name: '音量 −5',    def: 'ArrowDown',       hint: '' },
+  { id: 'toggleLyric',      name: '整页歌词',   def: 'Ctrl+d',          hint: '等于点播放条最左边那张封面' },
+  { id: 'toggleDeskLyric',  name: '桌面歌词',   def: 'Ctrl+l',          hint: '等于点播放条上的「词」按钮' },
+  { id: 'miniMode',         name: 'mini 模式',  def: 'Ctrl+m',          hint: '在完整模式和 mini 小窗之间切换' },
+  { id: 'openSettings',     name: '打开设置',   def: 'Ctrl+,',          hint: '' },
+  { id: 'fullscreen',       name: '全屏',       def: 'F11',             hint: '' },
+];
+
+/** 键位显示用的"人话"：Space → 空格、ArrowLeft → ← …（存档里存的还是 ArrowLeft 这种） */
+const KEY_PRETTY = {
+  Space: '空格', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓',
+  Escape: 'Esc', Enter: '回车', Tab: 'Tab', Backspace: '退格',
+};
 
 /** 这是一个合法的播放模式吗（以 PLAY_MODES 为唯一准绳，避免两处清单对不上） */
 function isPlayModeId(v) {
@@ -247,6 +283,9 @@ function migrateSettings() {
     close: {
       action: CLOSE_ACTIONS.includes(old.close && old.close.action) ? old.close.action : DEFAULT_SETTINGS.close.action,
     },
+    // v2.3.0：自定义键位。★ 只认识"字符串"，别的（手改坏了的存档）一律丢掉回到默认，
+    // 免得一个 null 让 keyOf() 后面的比较全乱套。
+    keys: sanitizeKeys(old.keys),
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -1578,7 +1617,8 @@ function applyMiniUI(on, expanded) {
 
   const bm = $('btnMini');
   if (bm) {
-    bm.title = mini.on ? '退出 mini 模式（Ctrl+M）' : 'mini 模式（Ctrl+M）';
+    // v2.3.0：键位改成从表里现拼（改了键位提示就跟着变）
+    bm.title = (mini.on ? '退出 mini 模式' : 'mini 模式') + keyHint('miniMode');
     bm.setAttribute('aria-label', bm.title);
   }
   // mini 模式下 ☰ 不再拉右侧抽屉，改成"就地展开 / 收起队列列表"，
@@ -2491,6 +2531,274 @@ async function deletePlaylist(id) {
 }
 
 /* ============================================================
+   第 4.7.5 部分：快捷键（v2.3.0）—— 表驱动
+   ============================================================
+   这一节管三件事：
+     1. 键位怎么存、怎么比（sanitizeKeys / normalizeKeyName / keyFromEvent / keyOf）
+     2. 按下去做什么（runKeyAction）
+     3. 界面上那一页怎么画、怎么改（renderKeyList / 录制 / 冲突 / 恢复默认）
+   三件事**全部**从 KEY_ACTIONS 那张表来，所以加一条快捷键 = 表里加一行。 */
+
+/** 存档里读出来的 keys 洗干净：只留"认识的动作 id + 字符串值"，其余全丢。
+ *  存档被人手改坏（比如 keys 写成 [] 或 null）也不会让后面的比较崩掉。 */
+function sanitizeKeys(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  KEY_ACTIONS.forEach((a) => {
+    const v = raw[a.id];
+    if (typeof v === 'string' && v) out[a.id] = v;
+  });
+  return out;
+}
+
+/** 把 KeyboardEvent.key 规范化：' ' → 'Space'、单字母统一小写、'Esc' → 'Escape'。
+ *  ★ 单字母必须统一大小写：按住 Shift 时 e.key 是大写 'D'，不按住是小写 'd'，
+ *    不统一的话"Ctrl+D"和"Ctrl+Shift+D"会打架。 */
+function normalizeKeyName(k) {
+  if (!k) return '';
+  if (k === ' ' || k === 'Spacebar') return 'Space';
+  if (k === 'Esc') return 'Escape';
+  if (k.length === 1) return k.toLowerCase();
+  return k;
+}
+
+/** 一次按键 → 'Ctrl+Shift+p' 这种字符串；认不出来（只按了修饰键）返回 null。
+ *  ★★ 修饰键**参与比较**：'Ctrl+ArrowLeft' 和 'ArrowLeft' 是两个完全不同的键。
+ *     以前那套是"一个 if 一条"，靠**代码顺序**让 Ctrl+← 先命中；
+ *     改成表驱动之后顺序由表决定，所以必须比得**完全一致**，
+ *     否则按一次 Ctrl+← 会同时触发"上一首"和"快退 5 秒"。 */
+function keyFromEvent(e) {
+  const k = normalizeKeyName(e.key || '');
+  if (!k) return null;
+  if (k === 'Control' || k === 'Shift' || k === 'Alt' || k === 'Meta') return null;  // 光按修饰键不算
+  const parts = [];
+  if (e.ctrlKey || e.metaKey) parts.push('Ctrl');   // macOS 上 Cmd 也算 Ctrl（和以前一致）
+  if (e.altKey)   parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  parts.push(k);
+  return parts.join('+');
+}
+
+/** 某个动作当前绑的是哪个键：改过就用改过的，没改就用默认的。
+ *  'none' 是个特殊值 = "这条不绑键"（keyFromEvent 永远产生不出它，所以永远匹配不上）。 */
+function keyOf(id) {
+  const custom = DB.settings && DB.settings.keys;
+  if (custom && typeof custom[id] === 'string' && custom[id]) return custom[id];
+  const a = KEY_ACTIONS.find((x) => x.id === id);
+  return a ? a.def : '';
+}
+
+/** 键位 → 给人看的样子：'Ctrl+Shift+p' → 'Ctrl + Shift + P' */
+function keyLabel(combo) {
+  if (!combo || combo === 'none') return '未设置';
+  return combo.split('+').map((p) => {
+    if (KEY_PRETTY[p]) return KEY_PRETTY[p];
+    return p.length === 1 ? p.toUpperCase() : p;
+  }).join(' + ');
+}
+
+/** 提示里那半截：'（Ctrl + D）'。
+ *  ★ 界面上凡是写键位的地方都用它 —— 这样改完键位提示立刻就对，
+ *    不会出现"提示说 Ctrl+D、按下去没反应"。 */
+function keyHint(id) {
+  const k = keyOf(id);
+  return (!k || k === 'none') ? '' : '（' + keyLabel(k) + '）';
+}
+
+/** 按下去做什么 —— 就是把以前那 11 段 if 里的动作体原样搬进来。
+ *  ★ 以后加快捷键：在 KEY_ACTIONS 加一行 + 在这里加一个 case，两处缺一不可。 */
+function runKeyAction(id) {
+  switch (id) {
+    case 'togglePlay':
+      if (!audio.src) { toast('先选一首歌吧'); return; }
+      if (audio.paused) safePlay(); else audio.pause();
+      return;
+    case 'prevTrack': next(-1); return;
+    case 'nextTrack': next(1); return;
+    case 'seekBack':
+      if (audio.src) audio.currentTime = Math.max(0, audio.currentTime - 5);
+      return;
+    case 'seekFwd':
+      if (audio.src) audio.currentTime = Math.min(totalDuration() || 1e9, audio.currentTime + 5);
+      return;
+    case 'volUp': bumpVolume(5); return;
+    case 'volDown': bumpVolume(-5); return;
+    case 'toggleLyric': toggleLyrics(); return;
+    case 'toggleDeskLyric': toggleDesktopLyric(); return;
+    case 'miniMode': setMini(!mini.on, false); return;   // 进来一律是"收起态"，不带上次的展开状态
+    case 'openSettings': openSettings(); return;
+    case 'fullscreen': window.neko.setFullScreen(true); return;
+    default: return;
+  }
+}
+
+/** 音量 ±5（上下方向键）—— 抽出来是因为表里两条（volUp / volDown）都要用 */
+function bumpVolume(delta) {
+  const cur = Math.round((audio.volume || 0) * 100);
+  const v = Math.max(0, Math.min(100, cur + delta));
+  applyVolume(v, true);
+  toast('音量 ' + v + '%');
+}
+
+/* ---- 界面那一页 ---- */
+let recordingKeyId = null;    // 正在录制键位的动作 id（null = 没在录）
+let keyClashPending = null;   // 冲突弹窗里待处理的那个"抢夺"请求
+
+/** 把「快捷键」页的列表画出来（全从 KEY_ACTIONS 来，不写死在 HTML 里） */
+function renderKeyList() {
+  const box = $('keyList');
+  if (!box) return;
+  const custom = DB.settings.keys || {};
+  box.innerHTML = KEY_ACTIONS.map((a) => {
+    const rec = recordingKeyId === a.id;
+    return `<div class="key-row">
+      <div class="key-name">${a.name}${a.hint ? `<small>${a.hint}</small>` : ''}</div>
+      <button class="key-box${rec ? ' recording' : ''}" data-key-box="${a.id}"
+        title="点一下，然后直接按你想用的键">${rec ? '按下新键…' : keyLabel(keyOf(a.id))}</button>
+      <button class="key-reset" data-key-reset="${a.id}" title="这一条恢复默认"
+        ${custom[a.id] ? '' : 'disabled'}>↺</button>
+    </div>`;
+  }).join('');
+}
+
+function startRecordKey(id) {
+  recordingKeyId = id;
+  renderKeyList();
+}
+function stopRecordKey() {
+  recordingKeyId = null;
+  renderKeyList();
+}
+
+/** 正在录制时按下的那一下 —— 这是"新键位"，不是"执行功能" */
+function captureRecordedKey(e) {
+  const id = recordingKeyId;
+  if (!id) return;
+  e.preventDefault();
+  // 录制中的按键只属于这个录制流程。阻止后续 document 监听器（特别是"Esc 关设置 / 关歌词"）
+  // 把同一个 Esc 再当作第二个动作处理。
+  e.stopImmediatePropagation();
+  if (e.key === 'Escape') {
+    // 冲突提示正开着时 Esc 也视作取消：收起提示并丢掉待确认的抢键请求。
+    keyClashPending = null;
+    const clashMask = $('keyClashMask');
+    if (clashMask) clashMask.classList.remove('show');
+    stopRecordKey();
+    return;                                           // Esc = 取消录制，不把它当成键位
+  }
+  const key = keyFromEvent(e);
+  if (!key) return;                                       // 只按了 Ctrl / Alt → 继续等
+  const clash = KEY_ACTIONS.find((a) => a.id !== id && keyOf(a.id) === key);
+  if (clash) { askKeyClash(id, key, clash); return; }     // 撞车了 → 先问，不静默改
+  applyKey(id, key);
+}
+
+/** 把某个动作绑到新键位上 */
+function applyKey(id, key) {
+  if (!DB.settings.keys) DB.settings.keys = {};
+  const a = KEY_ACTIONS.find((x) => x.id === id);
+  if (a && key === a.def) delete DB.settings.keys[id];    // 改回默认 → 存档里不留痕
+  else DB.settings.keys[id] = key;
+  recordingKeyId = null;
+  renderKeyList();
+  refreshKeyHints();
+  persist();
+  toast(key === 'none' ? '已取消这一条的快捷键' : '已改成 ' + keyLabel(key));
+}
+
+/** 冲突：这个键已经被别的动作用了。★ 不静默改 —— 弹出来让用户决定 */
+function askKeyClash(id, key, owner) {
+  keyClashPending = { id, key, ownerId: owner.id };
+  const t = $('keyClashText');
+  if (t) t.textContent = `${keyLabel(key)} 现在是「${owner.name}」在用。要把它让出来吗？让出来之后「${owner.name}」就没有快捷键了，你可以再给它设一个。`;
+  $('keyClashMask').classList.add('show');
+}
+
+/** 旧的那条"让出来"：先回到默认；如果它的默认键**正好就是**这个键，那就只能让它空着
+ *  （否则两条同时指着同一个键，谁生效全看表里的先后顺序 —— 那种 bug 极难查）。 */
+function yieldKey(ownerId, key) {
+  if (!DB.settings.keys) DB.settings.keys = {};
+  delete DB.settings.keys[ownerId];
+  if (keyOf(ownerId) === key) DB.settings.keys[ownerId] = 'none';
+}
+
+function resetOneKey(id) {
+  if (DB.settings.keys) delete DB.settings.keys[id];
+  recordingKeyId = null;
+  renderKeyList();
+  refreshKeyHints();
+  persist();
+  toast('已恢复默认');
+}
+
+function resetAllKeys() {
+  DB.settings.keys = {};
+  recordingKeyId = null;
+  renderKeyList();
+  refreshKeyHints();
+  persist();
+  toast('全部快捷键已恢复默认');
+}
+
+/** 界面上那几处写着键位的提示（播放条封面 / 「词」按钮 / mini 按钮），
+ *  全部改成"现拼"，这样改完键位立刻就对。 */
+function refreshKeyHints() {
+  const cover = $('npCover');
+  if (cover) cover.title = '查看歌词' + keyHint('toggleLyric');
+  const bl = $('btnLyric');
+  if (bl) bl.title = '歌词' + keyHint('toggleDeskLyric');
+  const bm = $('btnMini');
+  if (bm) bm.title = (mini.on ? '退出 mini 模式' : 'mini 模式') + keyHint('miniMode');
+  const br = $('btnRestoreFull');
+  if (br) br.title = '回到完整模式' + keyHint('miniMode');
+}
+
+function bindKeyList() {
+  const box = $('keyList');
+  if (!box) return;
+
+  box.addEventListener('click', (e) => {
+    const rst = e.target.closest('[data-key-reset]');
+    if (rst && !rst.disabled) { resetOneKey(rst.dataset.keyReset); return; }
+    const kb = e.target.closest('[data-key-box]');
+    if (kb) startRecordKey(kb.dataset.keyBox);
+  });
+
+  $('btnResetKeys').addEventListener('click', resetAllKeys);
+
+  // 点键位框以外的地方 = 取消录制（点另一个框 = 换一个录，不算取消）。
+  // ★★ 必须挂在**捕获阶段**（第三个参数 true），不能挂在冒泡阶段：
+  //    点键位框的那一下，本页的 click 处理会先跑 → startRecordKey() 里
+  //    renderKeyList() 把列表整个重建 → 原来那个按钮**从 DOM 上被摘下来**。
+  //    这时候冒泡阶段才轮到 document 的监听器，它 closest('.key-list')
+  //    顺着"已断链"的节点往上找爹 → 找不到 → 误判成"点在外面" → 把刚开的录制立刻取消。
+  //    （离屏实测第 [3] 组抓出来的：表现为"怎么点都进不了录制态"。）
+  //    捕获阶段在 target 处理之前跑，那时候 e.target 还挂在树上，判断才可靠。
+  document.addEventListener('click', (e) => {
+    if (!recordingKeyId) return;
+    if (e.target.closest('.key-list')) return;
+    if (e.target.closest('#keyClashMask')) return;
+    stopRecordKey();
+  }, true);
+
+  // 冲突弹窗的两个按钮
+  const take = $('keyClashTake'), cancel = $('keyClashCancel');
+  if (take) take.addEventListener('click', () => {
+    const p = keyClashPending;
+    keyClashPending = null;
+    $('keyClashMask').classList.remove('show');
+    if (!p) return;
+    yieldKey(p.ownerId, p.key);
+    applyKey(p.id, p.key);
+  });
+  if (cancel) cancel.addEventListener('click', () => {
+    keyClashPending = null;
+    $('keyClashMask').classList.remove('show');
+    stopRecordKey();
+  });
+}
+
+/* ============================================================
    第 4.8 部分：设置面板（外观 + B 站 Cookie）
    ============================================================ */
 
@@ -2587,6 +2895,9 @@ function syncSettingsUI() {
 
   // v2.2.0：窗口页的「关闭主窗口时」三选一
   syncCloseActionUI();
+
+  // v2.3.0：快捷键页的列表（每次打开面板都重画一遍，改过的键位才会在框里显示出来）
+  renderKeyList();
 }
 
 /**
@@ -2613,6 +2924,9 @@ function bindSettings() {
     if (e.target.id === 'modalMask') closeSettings();
   });
   document.addEventListener('keydown', (e) => {
+    // v2.3.0：录制中按 Esc 是"取消录制"，不应把整个设置面板也关掉。
+    // 全局录制监听会在捕获阶段先截住；这里留一道保险，免得将来监听顺序被改乱。
+    if (recordingKeyId) return;
     if (e.key === 'Escape') closeSettings();
   });
 
@@ -2625,6 +2939,9 @@ function bindSettings() {
       p.classList.toggle('active', p.dataset.pane === tab.dataset.tab);
     });
   });
+
+  /* ---- 快捷键页（v2.3.0） ---- */
+  bindKeyList();
 
   /* ---- 主题色块 ---- */
   $('themeGrid').addEventListener('click', (e) => {
@@ -3143,83 +3460,23 @@ function bindEvents() {
   }
 
   document.addEventListener('keydown', (e) => {
-    //输入框 / 滑杆里，一律不抢键盘（除了 Esc，那是关面板 universally 要的）
+    // 输入框 / 滑杆里，一律不抢键盘（除了 Esc，那是关面板 universally 要的）
     if (isTypingTarget(e.target) && e.key !== 'Escape') return;
 
-    const ctrl = e.ctrlKey || e.metaKey;   // macOS 上 Cmd 也认
+    // v2.3.0：正在录制键位？那这一下是"新键位"，不是"执行功能"
+    if (recordingKeyId) { captureRecordedKey(e); return; }
 
-    // F11 全屏
-    if (e.key === 'F11') {
-      e.preventDefault();
-      window.neko.setFullScreen(true);
-      return;
-    }
-
-    // Esc：关歌词大屏 / 关设置面板（在bindSettings 和歌词模块里各自监听，
-    //这里只负责放行，不要preventDefault，否则会连输入框里的 Esc 一起吞掉）
-    if (e.key === 'Escape') return;
-
-    // Ctrl + L：开 / 关桌面歌词（等价于点「词」按钮）
-    if (ctrl && (e.key === 'l' || e.key === 'L')) {
-      e.preventDefault();
-      toggleDesktopLyric();
-      return;
-    }
-
-    // Ctrl + D：开 / 关整页歌词（等价于点播放条最左边那张封面）
-    if (ctrl && (e.key === 'd' || e.key === 'D')) {
-      e.preventDefault();
-      toggleLyrics();
-      return;
-    }
-
-    // Ctrl + M：进 / 出 mini 模式（v2.1.0）。进来时一律是"收起态"，不带着上次的展开状态。
-    if (ctrl && (e.key === 'm' || e.key === 'M')) {
-      e.preventDefault();
-      setMini(!mini.on, false);
-      return;
-    }
-
-    // 空格：播放 / 暂停
-    if (e.code === 'Space' || e.key === ' ') {
-      e.preventDefault();   // 防止页面被空格滚下去
-      if (!audio.src) { toast('先选一首歌吧'); return; }
-      audio.paused ? safePlay() : audio.pause();
-      return;
-    }
-
-    // Ctrl + 左右方向：上一首 / 下一首
-    if (ctrl && e.key === 'ArrowLeft')  { e.preventDefault(); next(-1); return; }
-    if (ctrl && e.key === 'ArrowRight') { e.preventDefault(); next(1);  return; }
-
-    // 上下方向：音量 ±5（先挡住浏览器滚动）
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      const v = Math.min(100, Math.round((audio.volume || 0) * 100) + 5);
-      applyVolume(v, true);
-      toast('音量 ' + v + '%');
-      return;
-    }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      const v = Math.max(0, Math.round((audio.volume || 0) * 100) - 5);
-      applyVolume(v, true);
-      toast('音量 ' + v + '%');
-      return;
-    }
-
-    // 左右方向：快退 / 快进 5 秒
-    if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      if (audio.src) audio.currentTime = Math.max(0, audio.currentTime - 5);
-      return;
-    }
-    if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      if (audio.src) audio.currentTime = Math.min(totalDuration() || 1e9, audio.currentTime + 5);
-      return;
-    }
-  });
+    // v2.3.0：改成表驱动 —— 不再一条条 if，改成"查表"。
+    //   Esc 压根不在表里，所以走到这里会"查不到 → 什么都不做"，
+    //   也就是**不会** preventDefault —— 和以前那句 `if (e.key === 'Escape') return;` 完全等价，
+    //   各个面板自己的 Esc 监听照旧能收到。
+    const key = keyFromEvent(e);
+    if (!key) return;                                   // 只按了修饰键
+    const hit = KEY_ACTIONS.find((a) => keyOf(a.id) === key);
+    if (!hit) return;                                   // 没绑这个键
+    e.preventDefault();   // 空格 / 方向键会滚页面，Ctrl+D 之类浏览器也有默认行为 → 一律挡掉
+    runKeyAction(hit.id);
+  }, true);  // 捕获阶段：录制时先于各面板的 Esc 监听截住按键
 
   /* ---- 歌词 ---- */
   bindLyrics();
@@ -3605,8 +3862,9 @@ function updateLyricBtn() {
   btn.classList.toggle('loading', lyricState.loading);
   btn.classList.toggle('on', desktopOn && !lyricState.loading);
   btn.classList.toggle('none', !desktopOn && !lyricState.loading && lyricState.failed);
+  // v2.3.0：键位改成从表里现拼（改了键位提示就跟着变）
   btn.title = lyricState.loading ? '正在取歌词…'
-    : (desktopOn ? '关闭桌面歌词（Ctrl+L）' : '桌面歌词（Ctrl+L）');
+    : (desktopOn ? '关闭桌面歌词' : '桌面歌词') + keyHint('toggleDeskLyric');
 }
 
 /**
@@ -3627,7 +3885,7 @@ function toggleLyrics(want) {
   const cover = $('npCover');
   if (cover) {
     cover.classList.toggle('open', show);
-    cover.title = show ? '收起歌词（Ctrl+D）' : '查看歌词（Ctrl+D）';
+    cover.title = (show ? '收起歌词' : '查看歌词') + keyHint('toggleLyric');
     cover.setAttribute('aria-label', show ? '收起歌词' : '查看歌词');
   }
 
@@ -4143,6 +4401,12 @@ async function boot() {
   // 2) 补好外观设置，并把它刷到界面上（主题、背景、毛玻璃）
   migrateSettings();
   applyAppearance();
+
+  // 2.1) v2.3.0：键位补洞 + 把界面上那几处提示（封面 / 「词」/ mini）拼成当前键位。
+  //   migrateSettings 已经补过了，这里再补一次是防"DB.settings 被别处整体换掉"；
+  //   提示必须在这里刷一次，否则开机时 title 里还是光秃秃的"查看歌词"。
+  DB.settings.keys = sanitizeKeys(DB.settings.keys);
+  refreshKeyHints();
 
   // 2.2) 播放模式：恢复上次选的那个（老存档没有 → 列表循环），并把按钮图标刷成对应形状
   setPlayMode(DB.settings.playMode, false);

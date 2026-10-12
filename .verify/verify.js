@@ -32,6 +32,15 @@ const storemigrate = stripLine(stripBlock(read('src/store-migrate.js')));
 const mainCode = stripLine(stripBlock(read('src/main.js')));
 const gitignore = read('.gitignore');
 
+/* ---- v2.3.0：KEY_ACTIONS 那张表（快捷键的唯一准绳）----
+   以前断言是直接找 `ctrl && (e.key === 'd' ...)` 这种字面量；
+   改成表驱动之后字面量没了，所以改成"从表里把默认键读出来对"。 */
+const keyTableSrc = (appjs.match(/const KEY_ACTIONS = \[([\s\S]*?)\n\];/) || [])[1] || '';
+function keyDefOf(id) {
+  const m = keyTableSrc.match(new RegExp("id:\\s*'" + id + "'[\\s\\S]{0,160}?def:\\s*'([^']*)'"));
+  return m ? m[1] : '';
+}
+
 let fail = 0;
 const err = (m) => { console.log('  ✗ ' + m); fail++; };
 const ok = (m) => console.log('  ✓ ' + m);
@@ -666,8 +675,8 @@ else if (!/\$\('npCover'\)/.test(appjs) || !/cover\.addEventListener\('click'/.t
   err('#npCover 没有点击处理（点了没反应）');
 }
 else ok('播放条封面可点击进入整页歌词');
-if (!/ctrl && \(e\.key === 'd' \|\| e\.key === 'D'\)/.test(appjs)) err('没有 Ctrl+D 切换整页歌词');
-else ok('Ctrl+D 可开关整页歌词');
+if (keyDefOf('toggleLyric') !== 'Ctrl+d') err('KEY_ACTIONS 里没有「整页歌词 = Ctrl+D」这一条');
+else ok('Ctrl+D 可开关整页歌词（现在从 KEY_ACTIONS 表来）');
 if (!/closest\('\.l'\)/.test(appjs)) err('整页歌词不支持"点某句跳到那一句"');
 else ok('整页歌词点某句可跳到那一句的时间');
 
@@ -1824,11 +1833,12 @@ console.log('\n[48] mini 模式 · 同一个窗口换布局（v2.1.0）：');
     err('mini 模式下 #btnQueue 仍然直接开右侧抽屉 —— 小窗里塞不下，应该是就地展开列表');
   else ok('mini 下 ☰ 改成"就地展开/收起队列列表"');
 
-  // Ctrl+M
-  if (!/ctrl\s*&&\s*\(e\.key === 'm' \|\| e\.key === 'M'\)/.test(appjs))
-    err('没有 Ctrl+M 快捷键');
-  else if (!/setMini\(!mini\.on, false\)/.test(appjs)) err('Ctrl+M 没有调用 setMini 切换');
-  else ok('Ctrl+M 能进 / 出 mini 模式');
+  // Ctrl+M（v2.3.0 起从 KEY_ACTIONS 表来，所以改成读表）
+  if (keyDefOf('miniMode') !== 'Ctrl+m')
+    err('KEY_ACTIONS 里没有「mini 模式 = Ctrl+M」这一条');
+  else if (!/case 'miniMode':[\s\S]{0,120}?setMini\(!mini\.on, false\)/.test(appjs))
+    err('miniMode 这个动作没有调用 setMini 切换');
+  else ok('Ctrl+M 能进 / 出 mini 模式（现在从 KEY_ACTIONS 表来）');
 
   // 封面在 mini 下不再进歌词页
   if (!/function bindLyrics[\s\S]*?if \(mini\.on\) return;/.test(appjs))
@@ -2251,5 +2261,131 @@ console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
   } else ok('补封面有去重（同一个 bvid 只补一次）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 50 大类检查）');
+/* ============================================================
+   [51] v2.3.0 快捷键设置页 —— 表驱动 + 存档 + 录制 + 冲突
+   ============================================================ */
+{
+  console.log('\n[51] 快捷键（v2.3.0）：');
+
+  /* ---- ① 那张表本身 ---- */
+  if (!keyTableSrc) {
+    err('app.js 里找不到 KEY_ACTIONS 这张表');
+  } else {
+    const rows = [...keyTableSrc.matchAll(/id:\s*'([^']+)',\s*name:\s*'[^']*',\s*def:\s*'([^']+)'/g)];
+    if (rows.length < 11) err(`KEY_ACTIONS 只有 ${rows.length} 条（以前写死在代码里的是 11 条，不能变少）`);
+    else ok(`KEY_ACTIONS 有 ${rows.length} 条动作（界面列哪几行、按下去做什么，全看它）`);
+
+    // 以前那 10 条 + mini 模式，一条都不能丢（老用户的肌肉记忆）
+    const must = ['togglePlay', 'prevTrack', 'nextTrack', 'seekBack', 'seekFwd',
+                  'volUp', 'volDown', 'toggleLyric', 'toggleDeskLyric', 'miniMode', 'fullscreen'];
+    const lost = must.filter((id) => !rows.some((r) => r[1] === id));
+    if (lost.length) err('这些动作从表里丢了（以前有）：' + lost.join(' / '));
+    else ok('以前那 11 条快捷键一条都没丢');
+
+    // ★ Esc 绝不能进表：它是所有面板的逃生键，绑走了面板就关不掉
+    if (rows.some((r) => r[1] === 'escape' || r[2] === 'Escape')) {
+      err('★ Esc 被放进了 KEY_ACTIONS —— 它是所有面板的逃生键，绑走之后面板就关不掉了');
+    } else ok('Esc 没有进键位表（它永远是"取消 / 关面板"）');
+
+    // def 必须是"规范化"写法，否则存进去的 'Ctrl+d' 和表里的 'Ctrl+D' 永远对不上
+    const badDef = rows.filter((r) => /[A-Z]/.test(r[2].split('+').pop()) && r[2].split('+').pop().length === 1);
+    if (badDef.length) err('默认键里的字母必须小写（要和 normalizeKeyName 的输出一致）：' + badDef.map((r) => r[1] + '=' + r[2]).join(' / '));
+    else ok('默认键用的是规范化写法（字母小写 / 空格写 Space）');
+  }
+
+  /* ---- ② 存档：老存档零迁移 ---- */
+  if (!/keys:\s*\{\}/.test(appjs)) err('DEFAULT_SETTINGS 里没有 keys（老存档读进来会是 undefined）');
+  else ok('DEFAULT_SETTINGS.keys 存在（缺省 = 全用默认键）');
+
+  if (!/keys:\s*sanitizeKeys\(old\.keys\)/.test(appjs)) {
+    err('migrateSettings 没有补 settings.keys —— 老存档读进来键位是 undefined');
+  } else ok('migrateSettings 会把 settings.keys 补上并洗干净');
+
+  if (!/function sanitizeKeys/.test(appjs)) err('没有 sanitizeKeys（存档被手改坏会崩）');
+  else ok('sanitizeKeys 会把存档里不认识的键位丢掉（不会崩）');
+
+  /* ---- ③ 匹配：修饰键必须"完全一致"（★ 这一轮最大的坑） ---- */
+  if (!/function keyFromEvent/.test(appjs)) err('没有 keyFromEvent（按键 → 字符串）');
+  else {
+    const kf = (appjs.match(/function keyFromEvent\(e\)\s*\{([\s\S]*?)\n\}/) || [])[1] || '';
+    if (!/ctrlKey/.test(kf) || !/altKey/.test(kf) || !/shiftKey/.test(kf)) {
+      err('★ keyFromEvent 没有把三个修饰键都拼进字符串 —— ' +
+          '以前靠"代码顺序"让 Ctrl+← 先命中，改成表驱动后必须比得完全一致，' +
+          '否则按一次 Ctrl+← 会同时触发"上一首"和"快退 5 秒"');
+    } else ok('keyFromEvent 把 Ctrl / Alt / Shift 都拼进比对串（修饰键完全一致才算命中）');
+
+    if (!/Control'\s*\|\|\s*k === 'Shift'\s*\|\|\s*k === 'Alt'/.test(kf)) {
+      err('keyFromEvent 没有挡掉"只按修饰键"（只按 Ctrl 会被当成键位）');
+    } else ok('只按修饰键不算一次按键（继续等）');
+  }
+
+  if (!/const hit = KEY_ACTIONS\.find\(\(a\) => keyOf\(a\.id\) === key\)/.test(appjs)) {
+    err('全局 keydown 没有改成"查表命中"（还是一条条 if？）');
+  } else ok('全局 keydown 改成查表命中（加一条快捷键 = 表里加一行）');
+
+  if (!/if \(recordingKeyId\) \{ captureRecordedKey\(e\); return; \}/.test(appjs)) {
+    err('录制键位时没有先拦下这一下 —— 会把"新键位"当成"执行功能"');
+  } else ok('录制中按下的键会被吃掉（不会顺手执行功能）');
+
+  if (!/document\.addEventListener\('keydown',[\s\S]{0,900}?if \(recordingKeyId\) \{ captureRecordedKey\(e\); return; \}[\s\S]{0,400}?\}, true\)/.test(appjs)) {
+    err('录制监听没有在捕获阶段先接键 —— Esc 可能先被其它面板当成"关闭"处理');
+  } else ok('录制键盘监听在捕获阶段运行（录制 Esc 不会被面板抢先处理）');
+
+  /* ---- ④ 界面那一页 ---- */
+  if (!/data-tab="keys"/.test(html)) err('设置面板没有「快捷键」标签');
+  else ok('设置面板有「快捷键」标签');
+
+  if (!/data-pane="keys"/.test(html)) err('设置面板没有「快捷键」那一页');
+  else ok('设置面板有「快捷键」那一页');
+
+  ['keyList', 'btnResetKeys', 'keyClashMask', 'keyClashText', 'keyClashTake', 'keyClashCancel']
+    .forEach((id) => { if (!htmlIds.has(id)) err(`index.html 少了 #${id}`); });
+  if (['keyList', 'btnResetKeys', 'keyClashMask', 'keyClashTake', 'keyClashCancel'].every((id) => htmlIds.has(id)))
+    ok('快捷键页需要的元素都在（列表 / 全部恢复默认 / 冲突弹窗）');
+
+  if (!/function renderKeyList/.test(appjs)) err('没有 renderKeyList（列表画不出来）');
+  else if (!/KEY_ACTIONS\.map/.test(appjs)) err('renderKeyList 不是从 KEY_ACTIONS 生成的（会两处清单对不上）');
+  else ok('列表由 KEY_ACTIONS 生成（不写死在 HTML 里，永远对得上）');
+
+  /* ---- ⑤ 录制 / 冲突 / 恢复默认 ---- */
+  if (!/if \(e\.key === 'Escape'\) \{[\s\S]{0,260}?stopRecordKey\(\);\s*return;/.test(appjs)) {
+    err('录制时按 Esc 没有取消 —— Esc 会被当成键位绑上去（然后所有面板都关不掉）');
+  } else ok('录制时按 Esc = 取消（Esc 永远绑不走）');
+
+  if (!/const clash = KEY_ACTIONS\.find\(\(a\) => a\.id !== id && keyOf\(a\.id\) === key\)/.test(appjs)) {
+    err('改键位时没有查冲突 —— 两个功能会绑到同一个键上，谁生效全看顺序');
+  } else ok('改键位前会查冲突（不静默改）');
+
+  if (!/function yieldKey/.test(appjs)) {
+    err('没有 yieldKey —— "让出来"之后两条可能还指着同一个键');
+  } else ok('冲突后旧那条会"让出来"（不会两条同时指着同一个键）');
+
+  if (!/function resetAllKeys/.test(appjs)) err('没有「全部恢复默认」');
+  else ok('有单条恢复（↺）和「全部恢复默认」');
+
+  /* ---- ⑥ 界面上写死的提示必须跟着键位走 ---- */
+  if (/Ctrl\+D|Ctrl\+L|Ctrl\+M/.test(html)) {
+    err('★ index.html 里还硬写着 Ctrl+D / Ctrl+L / Ctrl+M —— 键位一改提示就对不上');
+  } else ok('index.html 里没有硬写的键位（提示全由 JS 现拼）');
+
+  if (!/function refreshKeyHints/.test(appjs)) err('没有 refreshKeyHints（提示不会跟着改）');
+  else ok('有 refreshKeyHints（改完键位提示立刻就对）');
+
+  if (!/cover\.title = \(show \? '收起歌词' : '查看歌词'\) \+ keyHint\('toggleLyric'\)/.test(appjs)) {
+    err('播放条封面的提示还是写死的 —— 改了键位提示会对不上');
+  } else ok('封面 / 「词」/ mini 三个提示都从键位表现拼');
+
+  /* ---- ⑦ CSS ---- */
+  ['.key-list', '.key-row', '.key-box', '.key-box.recording', '.key-reset'].forEach((sel) => {
+    if (!new RegExp(sel.replace(/[.]/g, '\\.') + '\\s*\\{').test(css)) err(`style.css 少了 ${sel} 的样式`);
+  });
+  ok('快捷键页的样式都在（列表 / 行 / 键位框 / 录制态 / 恢复按钮）');
+
+  /* ---- ⑧ 必须有离屏实测 ---- */
+  if (!fs.existsSync(path.join(ROOT, '.verify', 'test-keys.js'))) {
+    err('少了 .verify/test-keys.js —— 快捷键这种"按下去有没有反应"必须真按一次');
+  } else ok('有 .verify/test-keys.js（离屏真派发键盘事件验证）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 51 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

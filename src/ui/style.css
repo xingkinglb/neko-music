@@ -1284,6 +1284,63 @@ body.glass-live .lyric-overlay {
 .field textarea:focus { border-color: rgb(var(--accent-rgb) / 0.55); }
 .btn-row { display: flex; gap: 9px; }
 
+/* ============ 快捷键页（v2.3.0）============
+   一行一个动作：左边是名字，中间是键位框（点它就能改），右边是"这一条恢复默认"。
+   键位框做成按钮而不是文字：一是能点，二是键盘 Tab 也能走到，改键不用非得用鼠标。 */
+.key-list {
+  margin-top: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.key-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.key-row:last-child { border-bottom: none; }
+.key-row:hover { background: var(--panel); }
+
+.key-name {
+  flex: 1; min-width: 0;
+  font-size: 12.5px; color: var(--text-2);
+  display: flex; flex-direction: column; gap: 2px;
+}
+/* 说明小字（比如"等于点播放条最左边那张封面"）—— 没有就不显示 */
+.key-name small { font-size: 11px; color: var(--muted-2); line-height: 1.5; }
+
+.key-box {
+  flex: none;
+  min-width: 128px; padding: 7px 12px;
+  border-radius: 9px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text); font-size: 12px; font-family: inherit;
+  text-align: center;
+  transition: background 0.16s, border-color 0.16s, color 0.16s;
+}
+.key-box:hover { border-color: rgb(var(--accent-rgb) / 0.6); color: var(--text); }
+/* 录制中：高亮 + 呼吸，让人一眼看出"现在按的键会被吃掉" */
+.key-box.recording {
+  border-color: rgb(var(--accent-rgb) / 0.9);
+  color: var(--accent);
+  background: rgb(var(--accent-rgb) / 0.14);
+  animation: key-rec 1.1s ease-in-out infinite;
+}
+@keyframes key-rec {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0.42); }
+  50%      { box-shadow: 0 0 0 5px rgb(var(--accent-rgb) / 0); }
+}
+
+.key-reset {
+  flex: none;
+  width: 26px; height: 26px; border-radius: 8px;
+  color: var(--muted); font-size: 14px; line-height: 1;
+  transition: background 0.16s, color 0.16s;
+}
+.key-reset:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+/* 没改过就置灰：省得用户以为"我按了怎么没反应" */
+.key-reset:disabled { opacity: 0.28; cursor: default; }
+
 /* 主题色块 */
 .theme-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
 .swatch {

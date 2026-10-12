@@ -241,7 +241,7 @@
     <span class="brand-text">Neko Music</span>
     <div class="win-controls">
       <!-- mini 模式：把窗口缩成一条小窗（在"最小化"左边，和网易云 / QQ 音乐的位置一致） -->
-      <button class="win-btn" id="btnMini" title="mini 模式（Ctrl+M）" aria-label="mini 模式"><svg class="ic"><use href="#i-win-mini"/></svg></button>
+      <button class="win-btn" id="btnMini" title="mini 模式" aria-label="mini 模式"><svg class="ic"><use href="#i-win-mini"/></svg></button>
       <button class="win-btn" id="winMin" title="最小化" aria-label="最小化"><svg class="ic"><use href="#i-win-min"/></svg></button>
       <button class="win-btn" id="winMax" title="最大化" aria-label="最大化"><svg class="ic"><use href="#i-win-max"/></svg></button>
       <button class="win-btn close" id="winClose" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
@@ -309,7 +309,7 @@
         点一下就展开整页歌词滚动页（和网易云 / QQ 音乐点封面进歌词页是一个意思）。
         播放状态由中间的播放 / 暂停按钮表示，封面不再添加旋转效果。
       -->
-      <button class="np-cover" id="npCover" title="查看歌词（Ctrl+D）" aria-label="查看歌词"></button>
+      <button class="np-cover" id="npCover" title="查看歌词" aria-label="查看歌词"></button>
       <div class="np-meta">
         <div class="np-title" id="npTitle">还没有播放</div>
         <div class="np-sub" id="npSub">去搜索一首歌吧</div>
@@ -348,7 +348,7 @@
           用 .show 触发淡出动画（JS 延时移除），不会一直挂在屏幕上。
       -->
       <div class="lyric-wrap">
-        <button class="lyric-btn" id="btnLyric" title="歌词（Ctrl+L）"><svg class="ic"><use href="#i-lyric"/></svg><span>词</span></button>
+        <button class="lyric-btn" id="btnLyric" title="歌词"><svg class="ic"><use href="#i-lyric"/></svg><span>词</span></button>
         <div class="lyric-tip" id="lyricTip"></div>
       </div>
       <!-- 用默认浏览器打开当前这首的 B 站页面。字幕不对时最直接的核对办法 -->
@@ -383,7 +383,7 @@
          这里故意让最角上是"回到完整模式"，免得手一抖就把程序关掉。 -->
     <div class="mini-actions" id="miniActions">
       <button class="win-btn close" id="miniClose" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
-      <button class="win-btn" id="btnRestoreFull" title="回到完整模式（Ctrl+M）" aria-label="回到完整模式"><svg class="ic"><use href="#i-win-expand"/></svg></button>
+      <button class="win-btn" id="btnRestoreFull" title="回到完整模式" aria-label="回到完整模式"><svg class="ic"><use href="#i-win-expand"/></svg></button>
     </div>
   </footer>
 
@@ -483,6 +483,7 @@
       <button class="tab" data-tab="lyric">歌词</button>
       <button class="tab" data-tab="bilibili">B 站</button>
       <button class="tab" data-tab="window">窗口</button>
+      <button class="tab" data-tab="keys">快捷键</button>
     </div>
 
     <div class="modal-body">
@@ -766,6 +767,29 @@
         </div>
       </div>
 
+      <!-- ========== 快捷键（v2.3.0） ==========
+           以前这 10 条快捷键**写死在代码里**，界面上一句都没提，也改不了。
+           现在搬到这里：点一下键位框 → 直接按新键就改好了。
+           ★ 列表由 app.js 从 KEY_ACTIONS 那张表生成，不写死在这里
+             （写死就得在 JS 里再对一遍名字，迟早对不上）。 -->
+      <div class="pane" data-pane="keys">
+
+        <div class="field">
+          <div class="field-label">快捷键</div>
+          <div class="field-hint">
+            点右边的键位框，然后<b>直接按下你想用的键</b>就改好了。<br />
+            改的时候按 <b>Esc</b> 取消；点框外面也算取消。<br />
+            带修饰键的组合（<b>Ctrl / Alt / Shift</b>）和功能键（<b>F1~F12</b>）都可以；
+            单独的字母、数字也能绑，但不建议 —— 不打字的时候太容易误触。
+          </div>
+          <div class="key-list" id="keyList"></div>
+        </div>
+
+        <div class="btn-row">
+          <button class="ghost-btn" id="btnResetKeys">全部恢复默认</button>
+        </div>
+      </div>
+
     </div>
 
     <div class="modal-foot">
@@ -836,6 +860,27 @@
     </div>
     <div class="modal-foot">
       <button class="ghost-btn" id="closeCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!--
+  ============ 键位冲突（v2.3.0）============
+  把某个键改到"已经被别的动作用了"的键上时弹这个。
+  为什么不静默改掉：两个功能绑同一个键，谁生效全看清单里的先后顺序 ——
+  用户会发现"我明明改好了却没反应"，而这种 bug 极难查。所以一定问一句。
+-->
+<div class="modal-mask" id="keyClashMask">
+  <div class="modal close-modal">
+    <div class="modal-head">
+      <span class="modal-title">这个键已经被用了</span>
+    </div>
+    <div class="close-body">
+      <p class="close-ask" id="keyClashText"></p>
+    </div>
+    <div class="modal-foot">
+      <button class="primary-btn" id="keyClashTake">让出来</button>
+      <button class="ghost-btn" id="keyClashCancel">取消</button>
     </div>
   </div>
 </div>

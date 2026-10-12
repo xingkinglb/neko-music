@@ -1,6 +1,6 @@
 /*
   ============================================================
-   check-icons.js —— 图标体检（v2.2.1 新增）
+   check-icons.js —— 图标体检（v2.2.1 新增，v2.3.0 扩到四档托盘）
   ============================================================
    为什么需要它：v2.2.0 出过一次"预览图全对、真图标全坏"的事故 ——
    `.verify/make-icons.js` 里生成菜单图标的 paint 函数形参写错，
@@ -164,15 +164,15 @@ for (const name of THUMB) {
   }
 }
 
-say('\n[3] 托盘 .ico（多分辨率容器，里面是两张内嵌 PNG）：');
+say('\n[3] 托盘 .ico（多分辨率容器，里面是 16 / 32 / 48 / 256 四张内嵌 PNG）：');
 {
   const f = path.join(ASSETS, 'tray.ico');
   if (!fs.existsSync(f)) err('缺文件 tray.ico');
   else {
     const buf = fs.readFileSync(f);
     const count = buf.readUInt16LE(4);
-    if (count < 2) err(`tray.ico 只塞了 ${count} 档，应该是 2 档（16 + 32）`);
-    else ok(`tray.ico 共 ${count} 档`);
+    if (count < 4) err(`tray.ico 只塞了 ${count} 档，v2.3.0 应该是 4 档（16 + 32 + 48 + 256）`);
+    else ok(`tray.ico 共 ${count} 档（16 / 32 / 48 + 安装包用 256）`);
     let off = 6;
     for (let i = 0; i < count; i++) {
       const sz = buf.readUInt32LE(off + 8);
