@@ -1545,7 +1545,7 @@ console.log('\n[44] 毛玻璃三档 · 数据与设置项：');
 }
 
 /* ---- 45) 性能 · 每帧重算的路径已拿掉 ---- */
-console.log('\n[45] 性能 · 每帧重算的路径已拿掉：');
+console.log('\n[45] 性能 · 每帧重算的路径已拿掉 ｜ 播放请求的健壮性：');
 {
   if (!/body\.has-overlay \.idx \.bars i/.test(css) || !/body\.perf-idle \.idx \.bars i/.test(css))
     err('has-overlay / perf-idle 没有暂停内容区跳动柱子');
@@ -1576,6 +1576,42 @@ console.log('\n[45] 性能 · 每帧重算的路径已拿掉：');
   if (/addEventListener\(\s*'waiting'[\s\S]{0,160}?i-loading/.test(appjs))
     err("源码里还有 waiting → i-loading 的绑定（缓冲一次就永远转圈）");
   else ok('不再有 waiting → 转圈的绑定');
+
+  /* ---- v2.0.4：播放请求的健壮性 ----
+     playAt() 里有两段 await（补 cid / 取音频地址），期间用户又点了另一首时，
+     后一次会把 audio.src 换掉，前一次还挂着的 audio.play() 就被浏览器打断并抛
+     AbortError（"interrupted by a new load request"）。那**不是**取地址失败：
+     旧代码会弹「播放失败」、还会 900ms 后自动跳下一首（莫名跳歌）。 */
+  if (!/let playSeq = 0;/.test(appjs)) err('没有 playSeq：两次 playAt 会叠在一起跑，旧的请求回来还会抢播放器');
+  else ok('有 playSeq（每次切歌领一个序号，旧的请求回来直接放弃）');
+
+  if (!/function isPlayInterrupted\(/.test(appjs)) err('没有 isPlayInterrupted：分不出"被新加载打断"和"真失败"');
+  else if (!/AbortError/.test(appjs) || !/interrupted by a new load request/.test(appjs))
+    err('isPlayInterrupted 没有认 AbortError / "interrupted by a new load request"');
+  else ok('isPlayInterrupted 认得出"被新的加载请求打断"（AbortError）');
+
+  // playAt 里三处"过期就放弃"的闸门（补 cid 后 / 取地址后 / play 后）
+  const playAtBody = (() => {
+    const m = /async function playAt\(index\)\s*\{([\s\S]*?)\n\}/.exec(appjs);
+    return m ? m[1] : '';
+  })();
+  const gates = (playAtBody.match(/if \(seq !== playSeq\) return;/g) || []).length;
+  if (!playAtBody) err('抠不出 playAt 的函数体（v2.0.4 的闸门没法验）');
+  else if (gates < 3) err(`playAt 里的"过期就放弃"闸门只有 ${gates} 处（应当 ≥3：补 cid 后 / 取地址后 / play 后）`);
+  else ok(`playAt 里有 ${gates} 处"过期就放弃"的闸门（旧的播放请求不会再来抢播放器）`);
+
+  if (!/if \(isPlayInterrupted\(playErr\)\) return;/.test(playAtBody))
+    err('playAt 把"被打断"当成真失败了（会弹「播放失败」+ 莫名跳歌）');
+  else ok('playAt 把"被打断"静默忽略，不再误报、不再误跳');
+
+  if (!/if \(seq === playSeq\) next\(1\);/.test(playAtBody))
+    err('自动跳下一首没有序号闸门（过期的失败也会带着跳歌）');
+  else ok('自动跳下一首只在"还是当前这一次播放"时才跳');
+
+  if (!/function safePlay\(/.test(appjs)) err('没有 safePlay：播放条按钮那些不 await 的 play() 会留下未处理的 promise 拒绝');
+  else if (/audio\.paused \? audio\.play\(\) : audio\.pause\(\);/.test(appjs))
+    err('还有"不 await 且不接错"的 audio.play()（被打断时会变成未处理的 promise 拒绝）');
+  else ok('播放条按钮统一走 safePlay()，被打断不会变成未处理的 promise 拒绝');
 }
 
 console.log('\n[46] 颜色语法 · 空格三元组只能配斜杠写法：');

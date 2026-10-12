@@ -105,6 +105,34 @@ let DB = {
 // 当前播放队列
 let queue = { tracks: [], index: -1, name: '' };
 
+/* ★ v2.0.4：给每次"切歌"发一个序号。
+   为什么需要它：playAt() 里有两段 await（补 cid、取音频地址），期间用户完全可能
+   又点了另一首 —— 两个 playAt 会**叠在一起**跑。后一个一旦把 audio.src 换掉，
+   前一个还挂着的 audio.play() 就会被浏览器打断并抛
+   "The play() request was interrupted by a new load request"。
+   那既不是"取地址失败"，也不该弹提示、更不该自动跳下一首。
+   有了序号，旧的请求回来时一看序号变了就直接放弃，一声不吭。 */
+let playSeq = 0;
+
+/** 这个播放错误是不是"被新的播放请求打断了"（不是真失败，静默忽略） */
+function isPlayInterrupted(err) {
+  if (!err) return false;
+  if (err.name === 'AbortError') return true;
+  return /interrupted by a new load request|interrupted by a call to pause|The play\(\) request was interrupted/i
+    .test(String(err.message || err));
+}
+
+/** 播放条那几个按钮直接调 audio.play() 时用这个包一层。
+ *  原因：play() 返回的是一个 promise，如果此刻正好有"上一次还没走完的播放请求"，
+ *  它会以 AbortError 拒绝 —— 没人接就变成一条"未处理的 promise 拒绝"，控制台一片红。
+ *  这里只把"被打断"吞掉（那是正常操作，不是故障），其它错误照旧打日志。 */
+function safePlay() {
+  const p = audio.play();
+  if (p && typeof p.catch === 'function') {
+    p.catch((e) => { if (!isPlayInterrupted(e)) console.error('播放出错', e); });
+  }
+}
+
 // 界面当前所处的页面，比如 'discovery' / 'search' / 'favorites' / 'history' / 'playlist:xxx'
 // ★ 启动默认落在「发现」（一打开就有推荐，不用先看空搜索页）。
 let currentView = 'discovery';
@@ -609,6 +637,9 @@ async function ensureCid(track) {
  */
 async function playAt(index) {
   if (index < 0 || index >= queue.tracks.length) return;
+  // 领一个序号：本次播放的唯一身份。中途用户换了歌（又调了一次 playAt），
+  // 序号就会变，本次剩下的 await 回来时一律直接放弃（见 playSeq 的注释）。
+  const seq = ++playSeq;
   queue.index = index;
   const track = queue.tracks[index];
 
@@ -634,14 +665,27 @@ async function playAt(index) {
   try {
     // 如果这首歌还不知道自己的 cid（搜索来的），先查一次补上
     await ensureCid(track);
+    if (seq !== playSeq) return;   // 期间已经切到别的歌了 → 放弃（别再动 audio.src）
 
     // 关键一步：向主进程要音频地址。
     // B 站的真实地址带防盗链，主进程已经帮我们包装成 bili:// 内部地址。
     const info = await api('audioUrl', track.bvid, track.cid);
+    if (seq !== playSeq) return;   // 同上：回来晚了就别再抢播放器
+
     audio.src = info.url;
     audio.volume = (DB.settings.volume ?? 80) / 100;
 
-    await audio.play();
+    try {
+      await audio.play();
+    } catch (playErr) {
+      // ★ "The play() request was interrupted by a new load request" 这类错误：
+      //   是**用户换了歌**造成的（新的加载把上一次还没走完的 play() 打断了），
+      //   不是"取音频地址失败"。旧版本会把它当失败弹提示、还会自动跳下一首 ——
+      //   于是你明明已经听到歌在唱，却冒出一句吓人的"播放失败"，还可能莫名跳歌。
+      if (isPlayInterrupted(playErr)) return;
+      throw playErr;
+    }
+    if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
 
     // 记入历史（同样的歌不重复记录，把它提到最前面）
     DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
@@ -650,9 +694,13 @@ async function playAt(index) {
 
     renderAll();   // 刷新列表里的"正在播放"高亮
   } catch (err) {
+    // 被换歌打断 / 已经是过期的那一次请求 → 静默放弃，不提示也不跳歌
+    if (seq !== playSeq || isPlayInterrupted(err)) return;
     toast('播放失败：' + err.message);
-    // 自动跳下一首，避免卡死在这一首
-    if (queue.tracks.length > 1) setTimeout(() => next(1), 900);
+    // 自动跳下一首，避免卡死在这一首（同样只在"还是当前这一次播放"时才跳）
+    if (queue.tracks.length > 1) {
+      setTimeout(() => { if (seq === playSeq) next(1); }, 900);
+    }
   }
 }
 
@@ -2436,7 +2484,7 @@ function bindEvents() {
   /* ---- 播放条：播放/暂停、上下首、播放模式 ---- */
   $('btnPlay').addEventListener('click', () => {
     if (!audio.src) { toast('先选一首歌吧'); return; }
-    audio.paused ? audio.play() : audio.pause();
+    audio.paused ? safePlay() : audio.pause();
   });
   $('btnPrev').addEventListener('click', () => prevTrack());
   $('btnNext').addEventListener('click', () => next(1));
@@ -2539,7 +2587,7 @@ function bindEvents() {
 
   audio.addEventListener('ended', () => {
     updatePlayBtn();
-    if (playMode === 'one') { audio.currentTime = 0; audio.play(); return; }
+    if (playMode === 'one') { audio.currentTime = 0; safePlay(); return; }
     next(1);
   });
 
@@ -2594,7 +2642,7 @@ function bindEvents() {
     if (e.code === 'Space' || e.key === ' ') {
       e.preventDefault();   // 防止页面被空格滚下去
       if (!audio.src) { toast('先选一首歌吧'); return; }
-      audio.paused ? audio.play() : audio.pause();
+      audio.paused ? safePlay() : audio.pause();
       return;
     }
 
@@ -3385,7 +3433,7 @@ function bindDesktopLyric() {
     else if (cmd === 'next') next(1);
     else if (cmd === 'toggle') {
       if (!audio.src) { toast('先选一首歌吧'); return; }
-      audio.paused ? audio.play() : audio.pause();
+      audio.paused ? safePlay() : audio.pause();
     } else if (cmd === 'close') {
       closeDesktopLyric();          // 里面会顺手把设置页的开关也刷成"关"
       toast('已关闭桌面歌词');
