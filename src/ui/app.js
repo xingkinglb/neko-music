@@ -810,21 +810,34 @@ function isCollectPart(track) {
 
 /**
  * 这一行算不算"正在播放"。
- * 合集展开后队列里躺的是它的一集一集，所以不能只比 cid：
- * 正在播这个合集的第 5 集时，外面那一整行也要保持高亮（否则界面上没有任何一行是亮的）。
+ *
+ * 算的只有两种情况：
+ *   ① 它就是当前这一首（sameTrack）。
+ *   ② 它是"合集 / 分P 的入口行"—— 一行代表整支视频，正在播它里面任意一集时保持高亮。
+ *      需要这一条，是因为摊开后队列里躺的是"一集一集"，和入口行不是同一个对象，
+ *      否则你在发现页点开一条合集，界面上会没有任何一行是亮的。
+ *
+ * ★ v2.0.3 修的 bug：② 以前写的是"只要 bvid 一样就算在播"，
+ *   而分P视频的**每一集共用同一个 bvid**（靠 cid 区分）—— 于是"最近播放"里
+ *   这一支视频里播过的每一集全都显示成"正在播放"，看起来像播放器坏了。
+ *   现在加一条闸门：**这一行自己就是某合集里的一集**时（有 cid、且能在摊开的
+ *   曲目表里找到自己），它是一首独立的歌 —— 只有它自己正在播才算在播。
  */
 function rowIsPlaying(track) {
   const cur = queue.tracks[queue.index];
   if (!cur || !track) return false;
   if (sameTrack(track, cur)) return true;
   if (!track.bvid || !cur.bvid) return false;
-  // 同一支视频的不同分P：正在播其中一集时，相关的行也算"在播"
+
+  // 闸门：它自己是合集里的一集 → 各自独立，不跟着"同一支视频的其它集"一起亮。
+  // （入口行没有 cid，所以永远不会被这一条挡住，② 的原有行为完整保留。）
+  if (isCollectPart(track)) return false;
+
+  // 同一支视频（分P）：正在播其中一集时，外面那条入口行保持高亮
   if (track.bvid === cur.bvid) return true;
-  // 合集行 ↔ 它的某一集：合集的每一集自带 bvid，只能拿摊开的曲目表来认
+  // UP 合集：每一集自带 bvid，只能拿摊开的曲目表来认
   const parts = DB.collectParts[track.bvid];
-  if (parts && parts.some((e) => sameTrack(e, cur))) return true;
-  const curParts = DB.collectParts[cur.bvid];
-  return !!(curParts && curParts.some((e) => sameTrack(e, track)));
+  return !!(parts && parts.some((e) => sameTrack(e, cur)));
 }
 
 /** 这个合集到底有多少集（优先用查过一次的结果，其次用本地缓存） */

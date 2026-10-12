@@ -1108,6 +1108,22 @@ console.log('\n[33] 合集摊平进播放序列（顺序/随机/循环都算上�
   else if (!/const playing = rowIsPlaying\(track\)/.test(appjs)) err('trackRow 没有用 rowIsPlaying');
   else ok('正在播合集的第 N 集时，外面那一行保持高亮');
 
+  /* ---- v2.0.3：上面那条规则以前写得太宽，把"同一支视频里的其它集"也一起点亮了 ----
+     分P视频的每一集**共用同一个 bvid**（靠 cid 区分），所以"只比 bvid"会让
+     "最近播放"里播过的每一集全部显示成"正在播放"。闸门必须落在 rowIsPlaying 函数体**里面**
+     ——（`if (isCollectPart(track)) return false;` 在 maybeCollection 里也有一份，
+     全文搜会假通过，所以这里先把函数体抠出来再查。） */
+  const ripBody = (() => {
+    const m = /function rowIsPlaying\(track\)\s*\{([\s\S]*?)\n\}/.exec(appjs);
+    return m ? m[1] : '';
+  })();
+  if (!ripBody) err('抠不出 rowIsPlaying 的函数体（v2.0.3 的闸门没法验）');
+  else if (!/if \(isCollectPart\(track\)\) return false;/.test(ripBody))
+    err('rowIsPlaying 缺 v2.0.3 的闸门：分P 的每一集共用 bvid，"最近播放"里播过的每一集都会点亮');
+  else if (/DB\.collectParts\[cur\.bvid\]/.test(ripBody))
+    err('rowIsPlaying 里还留着"拿正在播那首的曲目表反查"那条 —— 会把同合集的其它集一起点亮');
+  else ok('"合集里的一集"自己不再跟着亮（v2.0.3：修掉"最近播放整列高亮"）');
+
   // 缓存：展开过一次就不再等网络；存的是剥掉封面的曲目表
   if (!/DB\.collectParts\[track\.bvid\] = entries\.map\(\(e\) => \(\{/.test(appjs))
     err('摊平结果没有缓存到本地（每次播放都要等网络）');
