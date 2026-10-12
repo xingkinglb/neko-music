@@ -3,9 +3,10 @@ dist/
 .tmp/
 .workbuddy/
 
-# 自检脚本跑出来的一次性产物：预览图与测试报告（看一眼就行，不进仓库）
+# 自检脚本跑出来的一次性产物：预览图、测试报告、运行日志（看一眼就行，不进仓库）
 .verify/shot-*.png
 .verify/*-report.txt
+.verify/*.log
 
 # 本机专用同步工具（作者自己的工作流，不适合放进公开仓库）
 同步到GitHub.bat

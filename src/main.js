@@ -87,7 +87,7 @@ protocol.registerSchemesAsPrivileged([
     privileges: {
       standard: true,        // 按标准 URL 规则解析（bg://local/xxx.png）
       supportFetchAPI: true,
-      stream: true,          // 为将来支持"视频背景"预留
+      stream: true,          // 让 <video> 能边下边播（动态背景靠它 + Range 请求）
       secure: true,
       corsEnabled: true,
     },

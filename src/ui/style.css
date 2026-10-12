@@ -32,6 +32,7 @@
   /* ---- 毛玻璃 ---- */
   --glass-blur:  18px;  /* 模糊半径，越大越糊 */
   --glass-alpha: 0.55;  /* 不透明度：越小越透，能看到更多背景 */
+  --glass-boost: 0;     /* 额外加深量：动态背景时由 body.perf-lite 抬高，补偿"关掉毛玻璃"带来的观感变化 */
   --glass-rgb:   16 16 26;  /* 玻璃本身带的底色（接近纯黑，保证白字可读） */
 
   /* ---- 顶部自绘标题栏 ---- */
@@ -114,6 +115,18 @@ ul { list-style: none; }
   pointer-events: none;      /* 纯装饰，绝不能挡住鼠标 */
 
   background-color: var(--bg);
+  /* ★ 这里故意不挂 filter。
+     以前 filter:blur() 挂在这一层，而动态背景的 <video> 是它的子元素 ——
+     等于"每解码一帧就把整层（含视频）重糊一遍"，是显卡被打满的元凶之一。
+     现在模糊下沉到只画图片的 .bg-image 上，视频完全不参与模糊。 */
+}
+/* 图片背景：铺满 + 等比裁切 + 模糊，都只作用在这一层上。
+   它是 .bg-layer 里专管图片的子元素，和 <video id="bgVideo"> 是兄弟关系 ——
+   同一时刻只会显示其中一个（由 applyAppearance() 按 settings.bg.kind 决定）。 */
+.bg-layer .bg-image {
+  position: absolute;
+  inset: 0;
+  z-index: -1;               /* 垫在"主题光晕 / 黑纱"两个伪元素下面，跟动态背景（视频）的位置一致 */
   background-image: var(--bg-image);
   background-size: cover;
   background-position: center;
@@ -140,18 +153,42 @@ ul { list-style: none; }
     pointer-events: none;
   }
 
-/* 视频背景：铺满整层、等比裁切（object-fit:cover），默认藏起来。
+/* 动态背景（视频）：铺满整层、等比裁切（object-fit:cover），默认藏起来。
    只有 settings.bg.kind === 'video' 时才由 applyAppearance() 加上 .on 显示。
    z-index:-1 让它垫在"主题光晕 / 黑纱"这两个伪元素下面 ——
-   于是压暗（--bg-dim）和模糊（--bg-blur）对它同样生效，跟图片背景表现一致。 */
+   于是压暗（--bg-dim）对它同样生效，跟图片背景表现一致。 */
 .bg-layer #bgVideo {
   position: absolute;
   inset: 0;
+  /* ★ 这两行是"不随窗口缩放"的修复点，别删。
+     <video> 是"替换元素"，对绝对定位的替换元素来说，width/height 为 auto 时
+     浏览器取的是它的内在尺寸（= 视频真实分辨率），inset:0 里的 right/bottom 会被直接忽略。
+     结果就是视频盒子恒等于素材分辨率（1920×1080 的素材就是 1920×1080），
+     锚在左上角不随窗口变 —— 窗口小就只露左上角一块，全屏时正好盖住才"看起来正常"。
+     显式写上 100% 才会真正拉伸到父层大小，再交给 object-fit:cover 等比裁切。 */
+  width: 100%;
+  height: 100%;
   object-fit: cover;
   z-index: -1;
   display: none;
 }
 .bg-layer #bgVideo.on { display: block; }
+
+/* 动态背景（视频）时的"省显卡"档：把 4 块常驻面板的毛玻璃整个关掉。
+   毛玻璃（backdrop-filter）的含义是"把我背后的画面实时糊一遍"——
+   背后是静态图片时糊一次就缓存住了，几乎不花钱；
+   背后是视频时每一帧都要重新采样 + 重新模糊这 4 块大面积区域，60fps 下 ≈ 每秒 240 次。
+   这里用 none 而不是 blur(0px)：blur(0px) 仍会把背后画面拷进纹理，省不下来。
+   同时把面板底色加深一点（--glass-boost），观感上仍是"磨砂面板"，不至于变透明。
+   由 applyAppearance() 在 settings.bg.kind === 'video' 时给 <body> 加这个类。 */
+body.perf-lite { --glass-boost: 0.12; }
+body.perf-lite .titlebar,
+body.perf-lite .sidebar,
+body.perf-lite .topbar,
+body.perf-lite .player {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 
 /* ---------- 整体布局 ---------- */
 .app {
@@ -188,7 +225,7 @@ ul { list-style: none; }
      右上角那三个窗口按钮（最小化/最大化/关闭）是我们自己用 HTML 画的（见 .win-controls），
      它们也用半透明 + 悬停染主题色，所以和这一条磨砂底天然一体、一起跟随主题色。
      顶部正好是背景主题光晕最强的地方，于是这条顶栏会透出淡淡的主题色。 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) - 0.05));
+  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) - 0.05));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-bottom: 1px solid var(--line);
 }
@@ -228,7 +265,7 @@ ul { list-style: none; }
   grid-area: sidebar;
   /* 毛玻璃：先按 --glass-alpha 压一层半透明底色，再把背后的画面糊掉。
      侧边栏字最多，所以故意比别处实一点（+0.16）保证可读。 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + 0.16));
+  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) + 0.16));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-right: 1px solid var(--line);
   display: flex;
@@ -325,7 +362,7 @@ ul { list-style: none; }
   padding: 16px 22px;
   border-bottom: 1px solid var(--line);
   /* 比侧边栏更透（-0.12），让背景多露一点 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) - 0.12));
+  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) - 0.12));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
 }
 .search-box, .link-box {
@@ -528,7 +565,7 @@ ul { list-style: none; }
   grid-area: player;
   /* 以前写的是 rgba(20,20,30,0.94) —— 太实心了，加上去那一 backdrop-filter 根本没有东西可糊，
      等于白写。现在换成统一的可调透明度，背景一换它就能真正透出下面的图。 */
-  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + 0.1));
+  background: rgba(var(--glass-rgb), calc(var(--glass-alpha) + var(--glass-boost) + 0.1));
   backdrop-filter: blur(var(--glass-blur)) saturate(140%);
   border-top: 1px solid var(--line);
   display: grid;
@@ -1043,6 +1080,10 @@ ul { list-style: none; }
 .field-label b { color: var(--text); font-weight: 600; }
 .field-hint { font-size: 11.5px; color: var(--muted-2); margin-top: 8px; line-height: 1.7; }
 .field input[type="range"] { width: 100%; }
+/* 整块"不适用"时的置灰态（目前只用在"背景是动态视频时的背景模糊滑杆"上）：
+   滑杆和文字一起变淡、滑杆不可拖。原因由 .field-hint 的文字说明。 */
+.field.is-off { opacity: 0.42; }
+.field.is-off input[type="range"] { pointer-events: none; }
 .field textarea {
   width: 100%; resize: vertical;
   background: var(--panel); border: 1px solid var(--line);

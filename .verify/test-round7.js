@@ -103,11 +103,13 @@ app.whenReady().then(async () => {
   const boot = async () => {
     await win.loadFile(path.join(ROOT, 'src', 'ui', 'index.html'));
     await sleep(1100);
-    // 掐掉音频：沙箱没声卡，audio.play() 必然失败（环境产物）
+    // 掐掉音频：沙箱没声卡，audio.play() 必然失败（环境产物）。
+    // src 的 getter 给一个合法 URL（不是空串）—— 给空串会让 Electron 内部的
+    // 媒体代码 new URL('') 抛 "Invalid URL"，在报告里变成一条误导性的"页面报错"。
     await win.webContents.executeJavaScript(`(() => {
       const a = document.getElementById('audio');
       a.play = () => Promise.resolve();
-      Object.defineProperty(a, 'src', { configurable: true, get: () => '', set: () => {} });
+      Object.defineProperty(a, 'src', { configurable: true, get: () => 'https://example.invalid/a.m4s', set: () => {} });
       return true;
     })()`);
     await sleep(150);
@@ -234,9 +236,17 @@ app.whenReady().then(async () => {
   else bad('kind / file 没更新：' + vs.kind + ' / ' + vs.file);
   if (vs.muted === true && vs.loop === true && vs.rate === 1) ok('静音 / 循环 / 速度都按默认值刷上去了');
   else bad('视频属性不对：' + JSON.stringify(vs));
-  if (vs.play >= 1) ok('确实调用了 video.play()（开始播放）');
-  else bad('没有调用 play()');
-  if (/视频背景/.test(vs.hint) && vs.optsShown) ok('设置面板提示"视频背景"并展开视频专属开关');
+  // ★ 第八轮改了行为：遮罩（含设置面板）盖在界面上时，动态背景要暂停 ——
+  //   遮罩自己还压着毛玻璃，不暂停就是白烧显卡。所以"选完立刻 play"这条老断言不再成立，
+  //   改成：面板开着时先不播 → 关掉面板后必须自动开始播。
+  if (vs.play === 0) ok('设置面板开着时先不播（第八轮新增：遮罩打开就暂停，省显卡）');
+  else bad('设置面板开着时不该播，实际 play() 调了 ' + vs.play + ' 次');
+  await evalJS(`document.getElementById('btnCloseModal').click(); true`);
+  await sleep(450);
+  const afterClose = await evalJS('({ play: window.__playCalls })');
+  if (afterClose.play >= 1) ok(`关掉设置面板后自动开始播（play() 共 ${afterClose.play} 次）`);
+  else bad('关掉设置面板后没有开始播');
+  if (/动态背景/.test(vs.hint) && vs.optsShown) ok('设置面板提示"动态背景"并展开专属开关');
   else bad('设置面板没同步：' + vs.hint + ' / ' + vs.optsShown);
   if (vs.picks === 'video') ok("点了「选择视频」→ IPC 收到 kind='video'");
   else bad('IPC 收到的 kind 不对：' + vs.picks);

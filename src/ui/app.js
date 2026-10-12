@@ -96,7 +96,8 @@ let DB = {
   settings: {
     theme: 'pink',
     volume: 80,
-    bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 } },
+    bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
+             perfLite: true, pauseOnBlur: true },
     glass: { blur: 18, alpha: 0.55 },
     autoLyric: false,
   },
@@ -149,7 +150,8 @@ function persistLater() {
 const DEFAULT_SETTINGS = {
   theme: 'pink',
   volume: 80,
-  bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 } },
+  bg:    { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
+           perfLite: true, pauseOnBlur: true },
   glass: { blur: 18, alpha: 0.55 },
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
@@ -187,6 +189,9 @@ function migrateSettings() {
     loop:  bgv.loop  !== false,   // 默认循环
     speed: (typeof bgv.speed === 'number' && bgv.speed >= 0.5 && bgv.speed <= 2) ? bgv.speed : 1,
   };
+  // 动态背景的两个"省显卡"开关（老存档没有 → 默认开）
+  DB.settings.bg.perfLite    = DB.settings.bg.perfLite    !== false;
+  DB.settings.bg.pauseOnBlur = DB.settings.bg.pauseOnBlur !== false;
 
   // 桌面歌词的设置：老存档没有，就给一套默认值；有就逐项夹到合法范围，
   // 防止存档被手改过之后字号变成 999、不透明度变成 -3 这种离谱值。
@@ -222,7 +227,7 @@ function applyAppearance() {
   root.style.setProperty('--glass-blur',  (s.glass.blur  ?? 18) + 'px');
   root.style.setProperty('--glass-alpha', String(s.glass.alpha ?? 0.55));
 
-  // 3) 背景：图片走 CSS 背景（--bg-image），视频走 <video id="bgVideo">；同一时刻只用一种
+  // 3) 背景：图片走 .bg-image 的 CSS 背景（--bg-image），视频走 <video id="bgVideo">；同一时刻只用一种
   const layer = $('bgLayer');
   if (layer) {
     const has = !!s.bg.file;
@@ -234,9 +239,16 @@ function applyAppearance() {
     // blur(0px) 会让多余的图层一直占着显卡，直接用 none 更省
     const b = Number(s.bg.blur) || 0;
     layer.style.setProperty('--bg-blur', b > 0 ? b + 'px' : '0px');
-    layer.style.filter = b > 0 ? `blur(${b}px)` : 'none';
+    // ★ 模糊只挂到"只管图片"的 .bg-image 上，绝不再挂到含视频的整层上 ——
+    //   挂整层的话每解码一帧都要把视频一起重糊，是显卡被打满的元凶之一。
+    const img = $('bgImage');
+    if (img) img.style.filter = b > 0 ? `blur(${b}px)` : 'none';
 
-    // 视频背景：显示/隐藏 + 把静音/循环/速度刷上去
+    // 动态背景（视频）时给 <body> 打 perf-lite，把四块常驻面板的毛玻璃整个关掉 —— 省显卡收益最大的一步。
+    // 背景是图片时不动（静态图糊一次就缓存住了，毛玻璃几乎不花钱）。
+    document.body.classList.toggle('perf-lite', !!(isVideo && s.bg.perfLite !== false));
+
+    // 视频：显示/隐藏 + 把静音/循环/速度刷上去；播不播统一交给"该停就停"总闸判定
     const v = $('bgVideo');
     if (v) {
       if (isVideo) {
@@ -247,20 +259,81 @@ function applyAppearance() {
         v.loop  = vv.loop  !== false;
         v.playbackRate = (typeof vv.speed === 'number' && vv.speed > 0) ? vv.speed : 1;
         v.classList.add('on');
-        // 静音视频一般能自动播；万一被拦，忽略即可（用户点一下界面就会开始）
-        const p = v.play();
-        if (p && p.catch) p.catch(() => {});
       } else {
         v.classList.remove('on');
-        try { v.pause(); } catch (e) { /* 还没设过 src 时忽略 */ }
       }
     }
+    updateBgVideoPlayback();
 
     document.body.classList.toggle('has-bg', has);
   }
 
   // 4) 主题换了，桌面歌词悬浮窗的"当前句"颜色也要跟着换
   pushLyricStyle();
+}
+
+/* ---------- 动态背景的"该停就停"总闸 ----------
+   毛玻璃（backdrop-filter）压在会动的画面上时，每一帧都要重新采样 + 重新模糊，
+   显卡就是这么被吃掉的。所以只要视频"没人看得见"或"不该动"，就果断停掉。
+
+   汇总所有"现在不该播"的理由，任一成立就暂停，全不成立才恢复播放：
+     1) 当前根本不是动态背景（图片 / 无背景）
+     2) 窗口被最小化 / 切到后台（document.hidden）
+     3) 窗口失焦（切到别的软件，窗口还露着）—— 可在设置里关掉
+     4) 有遮罩盖在界面上（设置面板 / 合集面板 / 队列抽屉 / 输入框弹窗）
+   任何一个"理由"发生变化时，调用它重算一次即可。 */
+let winFocused = true;   // 窗口是否在前台（由 blur / focus 事件维护）
+
+/** 界面上是否正盖着某个遮罩（这些遮罩都靠加 .show 类来显示） */
+function bgOverlayOpen() {
+  return ['modalMask', 'collectMask', 'queueMask', 'promptMask'].some((id) => {
+    const el = $(id);
+    return !!(el && el.classList.contains('show'));
+  });
+}
+
+function updateBgVideoPlayback() {
+  const v = $('bgVideo');
+  if (!v) return;
+  const s = DB.settings;
+  const isVideo = s.bg.kind === 'video' && !!s.bg.file;
+  const shouldPause =
+    !isVideo ||
+    document.hidden ||
+    (s.bg.pauseOnBlur !== false && !winFocused) ||
+    bgOverlayOpen();
+
+  if (shouldPause) {
+    try { v.pause(); } catch (e) { /* 还没设过 src 时忽略 */ }
+    return;
+  }
+  // 静音视频一般能自动播；万一被拦（比如系统策略），忽略即可 —— 用户点一下界面就会开始
+  const p = v.play();
+  if (p && p.catch) p.catch(() => {});
+}
+
+/**
+ * 读一下这段视频的分辨率，太大就提示用户换更省的素材。
+ * 只做提示，**不做自动转码** —— 那要打包 ffmpeg，安装包会大几十 MB，不划算。
+ * 读不到（解码器缺失 / 超时）就返回 null，静默放过，绝不挡流程。
+ */
+function probeVideoSize(file) {
+  return new Promise((resolve) => {
+    const probe = document.createElement('video');
+    probe.preload = 'metadata';
+    probe.muted = true;
+    let done = false;
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      probe.removeAttribute('src');
+      resolve(res);
+    };
+    probe.addEventListener('loadedmetadata', () => finish({ w: probe.videoWidth, h: probe.videoHeight }));
+    probe.addEventListener('error', () => finish(null));
+    setTimeout(() => finish(null), 4000);   // 兜底：别让提示卡住界面
+    probe.src = `bg://local/${file}`;
+  });
 }
 
 /* ============================================================
@@ -1691,19 +1764,36 @@ function syncSettingsUI() {
     b.classList.toggle('on', b.dataset.theme === s.theme);
   });
 
-  // 背景提示 + 视频专属开关（只在背景是视频时显示）
+  // 背景提示 + 动态背景专属开关（只在背景是视频时显示）
   const bgKind = s.bg.kind === 'video' ? 'video' : 'image';
+  const isVid = !!s.bg.file && bgKind === 'video';
   $('bgHint').textContent = s.bg.file
-    ? (bgKind === 'video' ? '当前：自定义视频背景 ✓' : '当前：自定义图片背景 ✓')
+    ? (isVid ? '当前：自定义动态背景 ✓' : '当前：自定义图片背景 ✓')
     : '当前：默认深色背景';
   const vOpts = $('bgVideoOpts');
   if (vOpts) {
-    vOpts.style.display = (s.bg.file && bgKind === 'video') ? '' : 'none';
+    vOpts.style.display = isVid ? '' : 'none';
     const vv = s.bg.video || {};
     $('chkVideoMuted').checked = vv.muted !== false;
     $('chkVideoLoop').checked  = vv.loop  !== false;
     $('rngVideoSpeed').value = vv.speed ?? 1;
     $('valVideoSpeed').textContent = (vv.speed ?? 1) + '×';
+  }
+  // 两个"省显卡"开关：同样只在背景是视频时才有意义
+  const pOpts = $('bgPerfOpts');
+  if (pOpts) {
+    pOpts.style.display = isVid ? '' : 'none';
+    $('chkPerfLite').checked  = s.bg.perfLite    !== false;
+    $('chkPauseBlur').checked = s.bg.pauseOnBlur !== false;
+  }
+  // "背景模糊"只作用于图片层：背景是视频时置灰并说明原因（见 style.css 的 .field.is-off）
+  const fBlur = $('fieldBgBlur');
+  if (fBlur) fBlur.classList.toggle('is-off', isVid);
+  const bHint = $('bgBlurHint');
+  if (bHint) {
+    bHint.textContent = isVid
+      ? '动态背景（视频）不走这一项 —— 模糊只作用于图片背景，视频不参与模糊，否则每帧重糊会拖垮显卡。'
+      : '不喜欢太花哨的背景，可以糊掉它';
   }
 
   $('rngDim').value = Math.round((s.bg.dim ?? 0.55) * 100);
@@ -1787,13 +1877,19 @@ function bindSettings() {
       DB.settings.bg.file = res.file;
       DB.settings.bg.kind = 'video';
       applyAppearance(); syncSettingsUI(); persist();
-      toast('视频背景已换 ✓');
+      // 分辨率太大就提个醒（不做自动转码，引导用户自己压到 720p/1080p）
+      const size = await probeVideoSize(res.file);
+      if (size && size.w > 1920) {
+        toast(`动态背景已换 ✓ 素材 ${size.w}×${size.h} 偏大，建议压到 720p/1080p 更省显卡`);
+      } else {
+        toast('动态背景已换 ✓');
+      }
     } catch (err) {
       toast('选视频失败：' + err.message);
     }
   });
 
-  // 视频专属：静音 / 循环 / 播放速度
+  // 动态背景专属：静音 / 循环 / 播放速度
   $('chkVideoMuted').addEventListener('change', (e) => {
     DB.settings.bg.video.muted = e.target.checked;
     applyAppearance(); persist();
@@ -1808,6 +1904,16 @@ function bindSettings() {
     DB.settings.bg.video.speed = v;
     applyAppearance();
     persistLater();
+  });
+
+  // 省显卡两开关
+  $('chkPerfLite').addEventListener('change', (e) => {
+    DB.settings.bg.perfLite = e.target.checked;
+    applyAppearance(); persist();
+  });
+  $('chkPauseBlur').addEventListener('change', (e) => {
+    DB.settings.bg.pauseOnBlur = e.target.checked;
+    updateBgVideoPlayback(); persist();
   });
 
   $('btnClearBg').addEventListener('click', async () => {
@@ -1836,22 +1942,27 @@ function bindSettings() {
   /* ---- 恢复默认外观 ---- */
   $('btnResetAppearance').addEventListener('click', () => {
     DB.settings.theme = 'pink';
-    DB.settings.bg    = { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 } };
+    DB.settings.bg    = { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
+                          perfLite: true, pauseOnBlur: true };
     DB.settings.glass = { blur: 18, alpha: 0.55 };
     api('clearBackground').catch(() => {});
     applyAppearance(); syncSettingsUI(); persist();
     toast('外观已恢复默认');
   });
 
-  /* ---- 背景视频省电：窗口被最小化 / 切到后台时暂停，回前台再接着播 ---- */
-  document.addEventListener('visibilitychange', () => {
-    const v = $('bgVideo');
-    if (!v) return;
-    if (document.hidden) { v.pause(); return; }
-    if (DB.settings.bg.kind === 'video' && DB.settings.bg.file) {
-      const p = v.play();
-      if (p && p.catch) p.catch(() => {});
-    }
+  /* ---- 动态背景省电：把"该停就停"的几条规则接上总闸 ----
+     ① 最小化 / 切到后台（visibilitychange）
+     ② 窗口失焦 / 回前台（blur / focus）
+     ③ 任意遮罩开合（设置面板 / 合集面板 / 队列抽屉 / 输入框弹窗）
+     前两条直接调总闸；第三条用 MutationObserver 盯着那 4 个遮罩的 class 变化，
+     这样不用去改每一个 open/close 函数，将来新增遮罩也只要往 bgOverlayOpen() 里加个 id。 */
+  document.addEventListener('visibilitychange', updateBgVideoPlayback);
+  window.addEventListener('blur',  () => { winFocused = false; updateBgVideoPlayback(); });
+  window.addEventListener('focus', () => { winFocused = true;  updateBgVideoPlayback(); });
+  ['modalMask', 'collectMask', 'queueMask', 'promptMask'].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    new MutationObserver(updateBgVideoPlayback).observe(el, { attributes: true, attributeFilter: ['class'] });
   });
 
   /* ---- 保存 Cookie ---- */

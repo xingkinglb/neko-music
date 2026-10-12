@@ -199,10 +199,13 @@
   它是 body 的第一个孩子，压在 .app 下面（z-index 0 vs 1）。
   inset 故意写成 -24px（比窗口大一圈），是为了藏住模糊时边缘露出的白边。
   注意：它只有 pointer-events:none，永远不会挡住鼠标点击。
-  里面有两种壁纸：--bg-image（图片，走 CSS 背景）和 <video id="bgVideo">（视频，走元素）。
+  里面有两种壁纸：<div class="bg-image" id="bgImage">（图片，走 CSS 背景）
+  和 <video id="bgVideo">（视频，走元素）。
   同一时刻只用其中一种，由 applyAppearance() 按 settings.bg.kind 决定显示哪个。
+  两者是兄弟节点：模糊只挂在 .bg-image 上，视频不参与模糊（否则每帧重糊整层，白烧显卡）。
 -->
 <div class="bg-layer" id="bgLayer">
+  <div class="bg-image" id="bgImage"></div>
   <video id="bgVideo" muted loop playsinline></video>
 </div>
 
@@ -469,7 +472,7 @@
         </div>
 
         <div class="field">
-          <div class="field-label">背景（图片 / 视频）</div>
+          <div class="field-label">动态背景（图片 / 视频）</div>
           <div class="btn-row">
             <button class="ghost-btn" id="btnPickBg">选择图片</button>
             <button class="ghost-btn" id="btnPickBgVideo">选择视频</button>
@@ -478,7 +481,7 @@
           <div class="field-hint" id="bgHint">当前：默认深色背景</div>
         </div>
 
-        <!-- 视频背景专属开关：只在背景是视频时显示（见 syncSettingsUI） -->
+        <!-- 动态背景（视频）专属开关：只在背景是视频时显示（见 syncSettingsUI） -->
         <div class="field" id="bgVideoOpts" style="display:none">
           <label class="switch-row">
             <span class="switch-label">视频静音</span>
@@ -497,16 +500,35 @@
           <input type="range" id="rngVideoSpeed" min="0.5" max="2" step="0.25" value="1" />
         </div>
 
+        <!-- 省显卡两开关：同样只在背景是视频时显示。
+             毛玻璃（backdrop-filter）压在会动的画面上时每一帧都要重算，
+             关掉它收益最大；窗口不在前台时暂停则让"切走就不烧显卡"。 -->
+        <div class="field" id="bgPerfOpts" style="display:none">
+          <label class="switch-row">
+            <span class="switch-label">降低毛玻璃（省显卡）</span>
+            <input type="checkbox" id="chkPerfLite" checked />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">动态背景时关掉四块面板的实时模糊，显卡占用明显下降；面板会略"实"一点。</div>
+
+          <label class="switch-row" style="margin-top:12px">
+            <span class="switch-label">窗口不在前台时暂停</span>
+            <input type="checkbox" id="chkPauseBlur" checked />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">切到别的软件、或打开设置面板时，背景视频会暂停，回来自动接着播。</div>
+        </div>
+
         <div class="field">
           <div class="field-label">背景压暗 <b id="valDim">55%</b></div>
           <input type="range" id="rngDim" min="0" max="90" value="55" />
           <div class="field-hint">数值越大背景越暗，文字越清楚</div>
         </div>
 
-        <div class="field">
+        <div class="field" id="fieldBgBlur">
           <div class="field-label">背景模糊 <b id="valBgBlur">0px</b></div>
           <input type="range" id="rngBgBlur" min="0" max="24" value="0" />
-          <div class="field-hint">不喜欢太花哨的背景，可以糊掉它</div>
+          <div class="field-hint" id="bgBlurHint">不喜欢太花哨的背景，可以糊掉它</div>
         </div>
 
         <div class="field">

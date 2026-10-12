@@ -19,7 +19,7 @@ const BG_MIME = {
   // 图片
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.webp': 'image/webp', '.gif': 'image/gif', '.bmp': 'image/bmp',
-  // 视频（视频背景）：这三种容器 Chromium 内核能稳解
+  // 视频（动态背景）：这三种容器 Chromium 内核能稳解
   '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
 };
 

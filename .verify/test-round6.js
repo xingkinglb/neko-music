@@ -82,7 +82,7 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(`(() => {
       const a = document.getElementById('audio');
       a.play = () => Promise.resolve();
-      Object.defineProperty(a, 'src', { configurable: true, get: () => '', set: () => {} });
+      Object.defineProperty(a, 'src', { configurable: true, get: () => 'https://example.invalid/a.m4s', set: () => {} });
       return true;
     })()`);
     await sleep(120);

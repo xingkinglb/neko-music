@@ -1178,8 +1178,8 @@ console.log('\n[36] 启动默认「发现」+ 侧栏高亮同步：');
   } else ok('只剩顶部搜索框 1 处切到搜索结果页，其它回退都改指「发现」');
 }
 
-/* ---- 37) 视频背景（主进程）：bg:// 流式 + Range + 视频类型 + CSP ---- */
-console.log('\n[37] 视频背景 · 主进程通道：');
+/* ---- 37) 动态背景（主进程）：bg:// 流式 + Range + 视频类型 + CSP ---- */
+console.log('\n[37] 动态背景 · 主进程通道：');
 {
   // 协议实现抽在 bg-protocol.js 里（main.js 负责传目录并注册）
   if (!/registerBgProtocol\(BG_DIR\)/.test(mainjs) || !/require\('\.\/bg-protocol'\)/.test(mainjs))
@@ -1215,8 +1215,8 @@ console.log('\n[37] 视频背景 · 主进程通道：');
   else ok('CSP media-src 放行了 bg:（视频能加载）');
 }
 
-/* ---- 38) 视频背景（渲染层）：video 元素 + 显示分支 + 存档兜底 + 设置交互 ---- */
-console.log('\n[38] 视频背景 · 渲染层：');
+/* ---- 38) 动态背景（渲染层）：video 元素 + 显示分支 + 存档兜底 + 设置交互 ---- */
+console.log('\n[38] 动态背景 · 渲染层：');
 {
   if (!/id="bgVideo"/.test(html)) err('index.html 背景层里没有 <video id="bgVideo">');
   else ok('背景层里有 <video id="bgVideo">');
@@ -1260,5 +1260,116 @@ console.log('\n[38] 视频背景 · 渲染层：');
   else ok('换图片 / 换视频时 kind 同步切换');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 38 大类检查）');
+/* ---- 39) 动态背景随窗口缩放（<video> 是替换元素，inset:0 拉不满，必须显式写 100%） ---- */
+console.log('\n[39] 动态背景 · 随窗口等比缩放：');
+{
+  const m = /\.bg-layer #bgVideo\s*\{([\s\S]*?)\}/.exec(css);
+  const rule = m ? m[1] : '';
+  if (!rule) err('找不到 .bg-layer #bgVideo 的样式规则');
+  else {
+    if (!/width:\s*100%/.test(rule))
+      err('#bgVideo 没写 width:100% —— <video> 是替换元素，inset:0 拉不满，盒子会恒等于素材分辨率（窗口小就只露左上角一块）');
+    else ok('#bgVideo 显式写了 width:100%');
+    if (!/height:\s*100%/.test(rule)) err('#bgVideo 没写 height:100%');
+    else ok('#bgVideo 显式写了 height:100%');
+    if (!/object-fit:\s*cover/.test(rule)) err('#bgVideo 没有 object-fit:cover（会拉伸变形）');
+    else ok('#bgVideo 用 object-fit:cover 等比裁切');
+  }
+}
+
+/* ---- 40) 模糊只作用于图片层 + 动态背景时降毛玻璃 ---- */
+console.log('\n[40] 动态背景 · 模糊隔离 + 毛玻璃降级：');
+{
+  const panels = ['titlebar', 'sidebar', 'topbar', 'player'];
+
+  // .bg-layer 本体不许再挂 filter —— 挂了就等于"每解码一帧把整层（含视频）重糊一遍"
+  const lm = /(^|\n)\.bg-layer\s*\{([\s\S]*?)\}/.exec(css);
+  const layerRule = lm ? lm[2] : '';
+  if (!layerRule) err('找不到 .bg-layer 的样式规则');
+  else if (/(^|[^-\w])filter\s*:/.test(layerRule))
+    err('.bg-layer 上还挂着 filter —— 会连视频一起每帧重糊，显卡白烧');
+  else ok('.bg-layer 上不再挂 filter（视频不参与模糊）');
+
+  // 图片的模糊下沉到 .bg-image
+  const im = /(^|\n)\.bg-layer \.bg-image\s*\{([\s\S]*?)\}/.exec(css);
+  const imgRule = im ? im[2] : '';
+  if (!imgRule) err('没有 .bg-layer .bg-image 规则（图片背景的模糊应该挂在它身上）');
+  else if (!/filter:\s*blur\(var\(--bg-blur\)\)/.test(imgRule))
+    err('.bg-image 没有 filter:blur(var(--bg-blur))（图片背景的模糊滑杆会失效）');
+  else ok('.bg-image 承载图片背景的模糊');
+
+  if (!/id="bgImage"/.test(html)) err('index.html 背景层里没有独立的图片层 <div class="bg-image" id="bgImage">');
+  else ok('背景层里图片 / 视频是两个兄弟节点');
+
+  // app.js 的 filter 要挪到 #bgImage 上
+  if (!/\$\('bgImage'\)/.test(appjs)) err("applyAppearance() 没有把模糊设到 #bgImage 上");
+  else if (/layer\.style\.filter/.test(appjs)) err('还在往 .bg-layer 上设 filter（应该设到 #bgImage）');
+  else ok('模糊由 applyAppearance() 设到 #bgImage 上');
+
+  // perf-lite：4 块常驻面板关掉 backdrop-filter
+  const missPanels = panels.filter((p) => !new RegExp('body\\.perf-lite \\.' + p + '\\b').test(css));
+  if (missPanels.length) err('body.perf-lite 下没有覆盖这些常驻面板：' + missPanels.join(' / '));
+  else ok('body.perf-lite 覆盖了 4 块常驻面板');
+
+  if (!/body\.perf-lite[\s\S]{0,600}?backdrop-filter:\s*none/.test(css))
+    err('perf-lite 下没有把 backdrop-filter 设成 none（用 blur(0px) 仍会把背后画面拷进纹理，省不下来）');
+  else ok('perf-lite 下把 backdrop-filter 设为 none');
+
+  if (!/body\.perf-lite\s*\{\s*--glass-boost:/.test(css))
+    err('perf-lite 没有抬高面板底色（--glass-boost）—— 关掉毛玻璃后观感会变太透');
+  else ok('perf-lite 同时抬高面板底色，观感仍是磨砂');
+
+  const noBoost = panels.filter((p) => {
+    const r = new RegExp('(^|\\n)\\.' + p + '\\s*\\{([\\s\\S]*?)\\}').exec(css);
+    return !r || !/--glass-boost/.test(r[2]);
+  });
+  if (noBoost.length) err('这些面板的底色没算上 --glass-boost：' + noBoost.join(' / '));
+  else ok('4 块面板的底色都算上了 --glass-boost');
+
+  if (!/classList\.toggle\('perf-lite'/.test(appjs)) err("applyAppearance() 没有按背景类型切换 body.perf-lite");
+  else ok('applyAppearance() 按 bg.kind 切换 perf-lite（图片不动）');
+}
+
+/* ---- 41) 动态背景 · "该停就停"的暂停规则 + 改名「动态背景」 ---- */
+console.log('\n[41] 动态背景 · 暂停规则 + 改名：');
+{
+  if (!/winFocused/.test(appjs) || !/addEventListener\('blur'/.test(appjs) || !/addEventListener\('focus'/.test(appjs))
+    err('没有窗口失焦 / 回焦的暂停恢复（切到别的软件时窗口还露着，会一直烧显卡）');
+  else ok('窗口失焦暂停、回焦恢复');
+
+  if (!/function bgOverlayOpen/.test(appjs) || !/MutationObserver/.test(appjs))
+    err('遮罩打开时没有暂停动态背景（设置面板盖在上面还在播）');
+  else ok('任意遮罩开合都会重算播放状态');
+
+  if (!/addEventListener\('visibilitychange',\s*updateBgVideoPlayback\)/.test(appjs))
+    err('最小化 / 切后台的暂停没接上总闸');
+  else ok('最小化 / 切后台暂停仍然生效');
+
+  if (!/function updateBgVideoPlayback/.test(appjs)) err('没有统一的"该不该播"总闸 updateBgVideoPlayback()');
+  else ok('播放 / 暂停统一由总闸 updateBgVideoPlayback() 判定');
+
+  if (!/DB\.settings\.bg\.perfLite\s*=\s*DB\.settings\.bg\.perfLite\s*!== false/.test(appjs) ||
+      !/DB\.settings\.bg\.pauseOnBlur\s*=\s*DB\.settings\.bg\.pauseOnBlur\s*!== false/.test(appjs))
+    err('migrateSettings() 没给 perfLite / pauseOnBlur 兜底（老存档读出 undefined → 功能会被当成关掉）');
+  else ok('老存档零迁移：perfLite / pauseOnBlur 缺省 = 开');
+
+  if (!/id="chkPerfLite"/.test(html) || !/id="chkPauseBlur"/.test(html))
+    err('设置面板缺少「降低毛玻璃 / 窗口不在前台时暂停」两个开关');
+  else ok('设置面板有省显卡的两个开关');
+
+  if (!/\.field\.is-off/.test(css) || !/id="fieldBgBlur"/.test(html))
+    err('背景是视频时"背景模糊"滑杆没有置灰态');
+  else ok('背景是视频时"背景模糊"滑杆置灰并说明原因');
+
+  // 用户可见文案统一叫「动态背景」—— 连注释一起清，避免以后又混着写
+  const srcFiles = ['src/ui/index.html', 'src/ui/app.js', 'src/ui/style.css', 'src/main.js', 'src/preload.js', 'src/bg-protocol.js'];
+  const bad = srcFiles.filter((f) => read(f).includes('视频背景'));
+  if (bad.length) err('这些文件里还残留「视频背景」字样：' + bad.join(' / '));
+  else ok('源码里已无「视频背景」字样，统一叫「动态背景」');
+
+  if (!/动态背景/.test(html)) err('设置面板标题没有改成「动态背景」');
+  else ok('设置面板标题为「动态背景」');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 41 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
