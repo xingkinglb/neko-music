@@ -65,8 +65,10 @@ def api(method, path, body=None):
     if p.returncode != 0:
         raise SystemExit(f"curl 失败 {method} {path}：{p.stderr.decode('utf-8', 'replace')[:200]}")
 
-    # 请求是经代理发出去的，-i 的输出最前面会多一段代理自己的
-    # "HTTP/1.1 200 Connection Established" 应答，得先把它剥掉再解析真正的响应。
+    # 请求是经代理发出去的，-i 的输出最前面会多几段"中转"应答，得先剥掉再解析真正的响应：
+    #   ① 代理自己的   HTTP/1.1 200 Connection Established
+    #   ② 代理注入的   HTTP/1.1 100 Continue        ← 2026-10-12 起出现，之前只有 ①
+    # 只看真正的响应，上面这些都要跳过。
     raw = p.stdout
     while True:
         head, sep, rest = raw.partition(b"\r\n\r\n")
@@ -74,6 +76,11 @@ def api(method, path, body=None):
             raise SystemExit(f"响应异常 {method} {path}：{p.stdout[:200]!r}")
         status_line = head.split(b"\r\n", 1)[0]
         if b"Connection Established" in status_line:
+            raw = rest
+            continue
+        # 1xx 都是"先收着，真正的还在后面"的中转应答
+        interim = b" 100 " in status_line or b" 102 " in status_line or b"Connection Established" in status_line
+        if interim:
             raw = rest
             continue
         break
