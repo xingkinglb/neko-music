@@ -666,6 +666,19 @@ async function ensureCid(track) {
     // 记下 UP 主的 uid：有了它，列表里的作者名才能点开"这个 UP 的全部视频"
     if (!track.mid && info.owner && info.owner.mid) track.mid = info.owner.mid;
     if (!track.cover) track.cover = info.cover;
+    // ★ v2.2.1：这个 bvid 要是"存过曲目表的合集"，顺手把封面记进 collectCovers。
+    //   曲目表（DB.collectParts）是**故意剥掉封面**存的 —— 上百集的长链接会把存档撑大，
+    //   所以列表 / 播放条要用的封面只能靠 collectCovers 里这单独的一条。
+    //   老存档里它是空的（v2.0.5 只在"重新拉一遍曲目表"时才写，缓存过的合集走不到），
+    //   在这里补上，等于让老存档自己长好。
+    if (track.cover && DB.collectParts && DB.collectParts[track.bvid]) {
+      if (!DB.collectCovers) DB.collectCovers = {};
+      if (DB.collectCovers[track.bvid] !== track.cover) {
+        DB.collectCovers[track.bvid] = track.cover;
+        collectCoverMemo.delete(track.bvid);
+        persistLater();
+      }
+    }
     return pg.cid;
   })();
 
@@ -677,6 +690,31 @@ async function ensureCid(track) {
   } finally {
     cidInFlight.delete(key);
   }
+}
+
+/**
+ * 把一首歌的封面贴到播放条左边那块上（没封面就显示音符兜底）。
+ *
+ * ★ v2.2.1 抽出来的：以前这段只写在 playAt 里、而且**只在开播那一刻贴一次**。
+ *   但很多歌的封面是**后到的** —— 搜索来的单曲、合集里的某一集，都要等
+ *   ensureCid() 去 B 站查一次 videoInfo 才知道封面（见 ensureCid 里的
+ *   `if (!track.cover) track.cover = info.cover`）。查回来时 playAt 早把
+ *   "没封面"那版画上去了，于是播放条一直挂着音符兜底 —— 看着就像"合集没封面"。
+ *   现在抽成一个函数，封面什么时候到就什么时候贴一次。
+ */
+function applyTrackCover(track) {
+  const el = $('npCover');
+  if (!el) return;
+  if (track && track.cover) {
+    el.style.backgroundImage = `url("${track.cover}")`;
+    el.style.backgroundSize = 'cover';
+  } else {
+    // ★ v2.0.5：没有封面时不再塞 'none'（那会盖掉 CSS 里的音符兜底），
+    //   改成清空行内样式 + 挂 .no-art 类，由 CSS 显示一个淡淡的音符。
+    el.style.backgroundImage = '';
+    el.style.backgroundSize = '';
+  }
+  el.classList.toggle('no-art', !(track && track.cover));
 }
 
 /**
@@ -693,16 +731,7 @@ async function playAt(index) {
   // 更新底部播放条的外观（先显示信息，再慢慢加载音频）
   $('npTitle').textContent = track.title;
   $('npSub').textContent = track.author || (queue.name || 'B 站');
-  // ★ v2.0.5：没有封面时不再塞 'none'（那会盖掉 CSS 里的音符兜底），
-  //   改成清空行内样式 + 挂 .no-art 类，由 CSS 显示一个淡淡的音符。
-  if (track.cover) {
-    $('npCover').style.backgroundImage = `url("${track.cover}")`;
-    $('npCover').style.backgroundSize = 'cover';
-  } else {
-    $('npCover').style.backgroundImage = '';
-    $('npCover').style.backgroundSize = '';
-  }
-  $('npCover').classList.toggle('no-art', !track.cover);
+  applyTrackCover(track);
   $('btnFav').innerHTML = ic(isFav(track) ? 'i-heart-fill' : 'i-heart');
   $('btnFav').classList.toggle('on', isFav(track));
   // ★ 换歌不再先转圈：图标由 updatePlayBtn() 按"当前是否在播"决定。
@@ -722,6 +751,21 @@ async function playAt(index) {
     // 如果这首歌还不知道自己的 cid（搜索来的），先查一次补上
     await ensureCid(track);
     if (seq !== playSeq) return;   // 期间已经切到别的歌了 → 放弃（别再动 audio.src）
+    // ★ v2.2.1：ensureCid 顺手会把封面一起补上（它查的 videoInfo 里就有封面），
+    //   所以补完要再贴一次。
+    applyTrackCover(track);
+    // ★★ 但合集里的歌走不到上面那条 —— 缓存下来的曲目表**自带 cid**，
+    //    ensureCid 一开始发现"cid 已经有了"就直接早退，**根本不会去查 videoInfo**，
+    //    封面也就永远拿不到（这正是"合集播放条没封面"的直接原因）。
+    //    所以这里单独立一道：只要还没封面，就自己去补一次，补到就贴上。
+    if (!track.cover) {
+      backfillCover(track.bvid).then((cover) => {
+        if (cover && seq === playSeq && !track.cover) {
+          track.cover = cover;
+          applyTrackCover(track);
+        }
+      });
+    }
 
     // 关键一步：向主进程要音频地址。
     // B 站的真实地址带防盗链，主进程已经帮我们包装成 bili:// 内部地址。
@@ -1033,7 +1077,57 @@ function cachedCollectEntries(bvid, cached) {
     ? cached.map((e) => (e.cover ? e : Object.assign({}, e, { cover })))
     : cached;
   collectCoverMemo.set(bvid, list);
+  // ★ v2.2.1：缓存里没记封面 → 异步补一次（补到就重画，见 backfillCover）。
+  //   老存档里 32 个合集全都是这种（v2.0.5 只在"重新拉一遍曲目表"时才写 collectCovers，
+  //   而缓存过的合集永远走不到那条分支），不补的话列表和播放条一直没封面。
+  if (!cover) backfillCover(bvid);
   return list;
+}
+
+// 正在补封面的 bvid（同一个合集只补一次，别因为反复渲染发一堆请求）
+const coverBackfilling = new Set();
+
+/**
+ * 给一个"还没封面"的 bvid 补一次封面（异步、一次性、自动去重）。
+ *
+ * 谁会用：① 曲目表已缓存、但 collectCovers 里没记的老合集；
+ *        ② 存档里的 lastTrack（历史记录也一样，老数据没有 cover 字段）。
+ * 补到之后：写进存档 → 丢掉 memo → 把队列里同 bvid 的曲目一起补上 → 重画。
+ * @returns {Promise<string>} 补到的封面地址；没补到就是空串
+ */
+async function backfillCover(bvid) {
+  if (!bvid || coverBackfilling.has(bvid)) return '';
+  if (DB.collectCovers && DB.collectCovers[bvid]) return DB.collectCovers[bvid];
+  coverBackfilling.add(bvid);
+  try {
+    const info = await api('videoInfo', bvid);
+    const cover = (info && info.cover) || '';
+    if (!cover) return '';
+    // 只有"确实存过曲目表"的合集才需要单独记 —— 单曲的封面跟着它自己走
+    if (DB.collectParts && DB.collectParts[bvid]) {
+      if (!DB.collectCovers) DB.collectCovers = {};
+      DB.collectCovers[bvid] = cover;
+      collectCoverMemo.delete(bvid);   // 有封面了，下次取到的是带封面的那一份
+    }
+    // 队列里属于这个 bvid 的曲目，一起补上
+    let touchedCurrent = false;
+    const cur = queue.tracks[queue.index];
+    queue.tracks.forEach((t) => {
+      if (t && t.bvid === bvid && !t.cover) {
+        t.cover = cover;
+        if (t === cur) touchedCurrent = true;
+      }
+    });
+    persistLater();
+    if (touchedCurrent) applyTrackCover(cur);
+    if (queue.tracks.length) renderAll();
+    return cover;
+  } catch (_) {
+    // 网络失败就算了：下次再打开这个合集 / 重启还会再试一次
+    return '';
+  } finally {
+    coverBackfilling.delete(bvid);
+  }
 }
 
 async function collectEntriesFor(track) {
@@ -4083,12 +4177,19 @@ async function boot() {
   if (DB.lastTrack) {
     $('npTitle').textContent = DB.lastTrack.title;
     $('npSub').textContent = DB.lastTrack.author || '';
-    if (DB.lastTrack.cover) {
-      $('npCover').style.backgroundImage = `url("${DB.lastTrack.cover}")`;
-      $('npCover').style.backgroundSize = 'cover';
+    // 没封面就挂音符兜底（和 playAt 里一致）
+    applyTrackCover(DB.lastTrack);
+    // ★ v2.2.1：老存档里的 lastTrack 没有 cover 字段（历史记录也一样），
+    //   不补的话一开机播放条上就是个音符 —— 看着像"封面丢了"。
+    //   异步补一次，补到就贴上去；补不到就保持音符，不会更差。
+    if (!DB.lastTrack.cover && DB.lastTrack.bvid) {
+      backfillCover(DB.lastTrack.bvid).then((cover) => {
+        if (cover && DB.lastTrack && !DB.lastTrack.cover) {
+          DB.lastTrack.cover = cover;
+          applyTrackCover(DB.lastTrack);
+        }
+      });
     }
-    // 上次那首没封面 → 也用音符兜底（和 playAt 里一致）
-    $('npCover').classList.toggle('no-art', !DB.lastTrack.cover);
   }
 
   // 6) 上次退出时桌面歌词是开着的，就把它重新挂回屏幕上（位置也还是上次那个）

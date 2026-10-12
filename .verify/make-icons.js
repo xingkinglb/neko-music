@@ -8,11 +8,17 @@
   产出（都进 src/assets/）：
     tray.ico                 —— 托盘图标。ICO 是"多分辨率容器"，里面塞 16×16 和 32×32 两张 PNG，
                                 系统按当前 DPI 自己挑一档（比单张 PNG 清晰）。见 docs/参考实现研究-biu.md §2.5
-    thumb-{prev,play,pause,next}.png —— 任务栏缩略图上那三个按钮（白色，任务栏预览是深色的）
-    menu-{...}.png           —— 托盘菜单每项前面那个小图标（浅粉，深浅色菜单上都看得见）
+    thumb-{prev,play,pause,next}.png (+ @2x) —— 任务栏缩略图上那三个按钮（白色，任务栏预览是深色的）
+    menu-{...}.png           (+ @2x) —— 托盘菜单每项前面那个小图标（浅粉，深浅色菜单上都看得见）
+
+  ★ 每个图标都出两档：16×16 和 `@2x` 的 32×32。主进程用 nativeImage.addRepresentation
+    把 2 倍图挂上去，高分屏（125% / 150% 缩放）下系统自己挑清楚的那张。
 
   另外出一张 .verify/icons-preview.png 接触表（放大 3~4 倍、深色底），
   方便用眼睛检查"到底画出来是个什么形状"——不靠猜。
+  ⚠️ 但**接触表不能代替体检**：它和写盘用的是两条路径，v2.2.0 就出过
+     "预览图全对、真图标全坏"的事（见 6.1 那段注释）。真正的验收是
+     `.verify/check-icons.js` —— 它把写盘的 .png 解码回来，直接数像素。
 
   用法：node .verify/make-icons.js
 */
@@ -126,9 +132,13 @@ const GLYPHS = [
                    inRoundRect(x, y, 8.2, 8.4, 12.8, 11.6, 1.1)],
 
   // 桌面歌词：三行文字
-  ['lyric', (x, y) => onSeg(x, y, 3, 5, 13, 5, 1.6) ||
-                     onSeg(x, y, 3, 8, 13, 8, 1.6) ||
-                     onSeg(x, y, 3, 11, 9.5, 11, 1.6)],
+  //   ★ 三条线放在 5.5 / 8.5 / 11.5 —— 这是**像素中心**。
+  //     早先写在 5 / 8 / 11（像素边界）上，1.6 的线宽骑在边界两边，
+  //     每个像素最多只被覆盖 3/4，渲染出来最亮也只有 191（≈75%），
+  //     整个图标比别的淡一档。check-icons.js 就是这么抓出来的。
+  ['lyric', (x, y) => onSeg(x, y, 3, 5.5, 13, 5.5, 1.6) ||
+                     onSeg(x, y, 3, 8.5, 13, 8.5, 1.6) ||
+                     onSeg(x, y, 3, 11.5, 9.5, 11.5, 1.6)],
 
   // 锁定：挂锁
   ['lock', (x, y) => inRoundRect(x, y, 4.2, 7.2, 11.8, 13.6, 1.6) ||
@@ -294,27 +304,37 @@ function icoWrap(items) {
 fs.mkdirSync(ASSETS, { recursive: true });
 const made = [];
 
-// 6.1 菜单小图标（12 个，16×16，浅粉）
+// 6.1 菜单小图标（12 个，浅粉）
+//   ★★ 这里踩过一个坑（v2.2.1 修）：paint 的形参**只能有 (x, y) 两个**。
+//      renderRGBA 内部是按 `paint(x, y)` 调用的（见上面 renderRGBA 里那一行）——
+//      早先这里写成了 `(size, x, y)`，于是"x 坐标"被当成了 size，
+//      `k = 16 / size` 算出来是乱的，写盘的图标全变成了**纯色块**或**全透明**。
+//      而接触表用的是正确的 (x, y)（见下面第七节），所以预览图一直是对的、
+//      只有真正给 Electron 用的那些 .png 是坏的 —— 光看图根本发现不了。
+const glyphPaint = (shape, color, renderSize) => {
+  const k = 16 / renderSize;   // 渲染尺寸 → 0..16 设计坐标系
+  return (x, y) => (shape(x * k, y * k) ? [color[0], color[1], color[2], 255] : [0, 0, 0, 0]);
+};
+
 for (const [name, shape] of GLYPHS) {
-  const paint = (size, x, y) => {
-    const k = 16 / size;   // 把 size 坐标系换算回 0..16
-    return shape(x * k, y * k) ? [MENU_COLOR[0], MENU_COLOR[1], MENU_COLOR[2], 255] : [0, 0, 0, 0];
-  };
   const file = path.join(ASSETS, `menu-${name}.png`);
-  fs.writeFileSync(file, renderPNG(16, paint));
+  fs.writeFileSync(file, renderPNG(16, glyphPaint(shape, MENU_COLOR, 16)));
   made.push([`menu-${name}.png`, fs.statSync(file).size]);
+  // @2x：高分屏（125% / 150% 缩放）下系统会挑这一张，比把 16×16 硬放大清楚
+  const file2 = path.join(ASSETS, `menu-${name}@2x.png`);
+  fs.writeFileSync(file2, renderPNG(32, glyphPaint(shape, MENU_COLOR, 32)));
+  made.push([`menu-${name}@2x.png`, fs.statSync(file2).size]);
 }
 
-// 6.2 任务栏缩略图按钮（4 个，16×16，纯白）
+// 6.2 任务栏缩略图按钮（4 个，纯白）
 for (const name of ['prev', 'play', 'pause', 'next']) {
   const shape = GLYPHS.find((g) => g[0] === name)[1];
-  const paint = (size, x, y) => {
-    const k = 16 / size;
-    return shape(x * k, y * k) ? [THUMB_COLOR[0], THUMB_COLOR[1], THUMB_COLOR[2], 255] : [0, 0, 0, 0];
-  };
   const file = path.join(ASSETS, `thumb-${name}.png`);
-  fs.writeFileSync(file, renderPNG(16, paint));
+  fs.writeFileSync(file, renderPNG(16, glyphPaint(shape, THUMB_COLOR, 16)));
   made.push([`thumb-${name}.png`, fs.statSync(file).size]);
+  const file2 = path.join(ASSETS, `thumb-${name}@2x.png`);
+  fs.writeFileSync(file2, renderPNG(32, glyphPaint(shape, THUMB_COLOR, 32)));
+  made.push([`thumb-${name}@2x.png`, fs.statSync(file2).size]);
 }
 
 // 6.3 托盘图标：ICO 里塞 16×16 + 32×32 两档

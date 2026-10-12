@@ -2157,5 +2157,99 @@ console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
   } else ok('.gitignore 不会挡住 src/assets 里的图标');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 49 大类检查）');
+/* ============================================================
+   [50] v2.2.1 真机反馈修的四个问题 —— 每一条都是"当时没人拦住"的
+   ============================================================ */
+{
+  const mkIcons = fs.readFileSync(path.join(ROOT, '.verify', 'make-icons.js'), 'utf8');
+
+  /* ---- ① 点 ✕ 必须走 mainWindow.close()（否则第一次点 ✕ 直接退出） ---- */
+  const wcAt = mainCode.indexOf("ipcMain.on('win-close'");
+  const wcBody = wcAt >= 0 ? mainCode.slice(wcAt, wcAt + 260) : '';
+  if (wcAt < 0) {
+    err("main.js 里没有 ipcMain.on('win-close') —— 标题栏的 ✕ 没人接");
+  } else if (/requestMainWindowClose/.test(wcBody)) {
+    err('★ win-close 仍然直接调 requestMainWindowClose() —— 这**绕过了关窗决策**，' +
+        '表现是"第一次点 ✕ 弹窗不出现、软件直接退干净"。必须改成 mainWindow.close()');
+  } else if (!/mainWindow\.close\(\)/.test(wcBody)) {
+    err("win-close 既没走 mainWindow.close()、也没走 requestMainWindowClose() —— 关窗逻辑不对");
+  } else {
+    ok('点 ✕ 走的是 mainWindow.close()（会经过 close 事件的"询问 / 缩小 / 退出"分流）');
+  }
+
+  /* ---- ② 任务栏缩略图按钮必须在窗口显示出来之后再设 ---- */
+  if (!/ready-to-show[\s\S]{0,240}?mainWindow\.show\(\);[\s\S]{0,240}?refreshThumbar\(\);/.test(mainCode)) {
+    err('★ ready-to-show 里没有在 show() 之后调 refreshThumbar() —— ' +
+        'setThumbarButtons 在窗口还没显示时会静默失败，表现是"悬停任务栏图标没有 ⏮▶⏭"');
+  } else ok('任务栏按钮在窗口 show() 之后才设（setThumbarButtons 会静默失败，时机很关键）');
+
+  if (!/mainWindow\.on\('show'/.test(mainCode)) {
+    err('没监听 mainWindow 的 show 事件 —— 从托盘回来后任务栏按钮可能丢');
+  } else ok('从托盘 / 最小化回到前台时会补一次任务栏按钮');
+
+  if (!/okSet|返回 false/.test(mainCode)) {
+    err('setThumbarButtons 的返回值没记账 —— 它静默失败时没有任何线索');
+  } else ok('setThumbarButtons 静默失败时会在控制台留痕');
+
+  /* ---- ③ 图标：生成脚本的 paint 形参 + @2x 两档 ---- */
+  if (/\(\s*size\s*,\s*x\s*,\s*y\s*\)\s*=>/.test(mkIcons)) {
+    err('★ make-icons.js 里又出现了 paint(size, x, y) —— ' +
+        'renderRGBA 是按 paint(x, y) 调用的，多写一个 size 会把"x 坐标"当成尺寸，' +
+        '写盘的图标会全变成纯色块或全透明（v2.2.0 就是这么坏的，而预览图看不出来）');
+  } else ok('make-icons.js 的 paint 只有 (x, y) 两个形参（和 renderRGBA 的调用一致）');
+
+  if (!/glyphPaint/.test(mkIcons)) err('make-icons.js 没有用 glyphPaint 这个统一的画笔工厂');
+  else ok('菜单 / 缩略图图标走同一个 glyphPaint（尺寸换算只有一处，不会再写错）');
+
+  const twoX = ['menu-play@2x.png', 'menu-note@2x.png', 'thumb-play@2x.png', 'thumb-prev@2x.png'];
+  const miss2x = twoX.filter((f) => !fs.existsSync(path.join(ROOT, 'src/assets', f)));
+  if (miss2x.length) err('少了 @2x 图标：' + miss2x.join(' / ') + '（高分屏下菜单图标会糊）');
+  else ok('@2x 图标都在（高分屏下系统挑清楚的那张）');
+
+  if (!/addRepresentation/.test(mainCode)) {
+    err('loadIcon 没有把 @2x 那张挂到 nativeImage 上 —— 高分屏还是会用放大的 16×16');
+  } else ok('loadIcon 会把 @2x 挂成 2 倍档（nativeImage.addRepresentation）');
+
+  /* ---- ④ 必须有"把写盘的图标解码回来数像素"的体检脚本 ---- */
+  if (!fs.existsSync(path.join(ROOT, '.verify', 'check-icons.js'))) {
+    err('少了 .verify/check-icons.js —— 预览图会和写盘走两条路径，' +
+        '光看 icons-preview.png 发现不了"真图标是坏的"');
+  } else ok('有 .verify/check-icons.js（把写盘的 .png 解码回来数像素，不看预览图猜）');
+
+  /* ---- ⑤ 合集封面：贴封面的时机 + 存档自愈 ---- */
+  if (!/function applyTrackCover/.test(appjs)) {
+    err('app.js 没有 applyTrackCover —— 封面"后到"时没法再贴一次');
+  } else ok('贴封面抽成了 applyTrackCover（封面什么时候到就什么时候贴）');
+
+  const ecAt = appjs.indexOf('await ensureCid(track);');
+  const ecBody = ecAt >= 0 ? appjs.slice(ecAt, ecAt + 400) : '';
+  if (ecAt < 0) {
+    err('playAt 里没有 await ensureCid(track)');
+  } else if (!/applyTrackCover\(track\)/.test(ecBody)) {
+    err('★ ensureCid 补到封面之后没有再贴一次 —— ' +
+        '播放条会一直停在开播时那版"没封面"上（合集里的歌最明显）');
+  } else ok('ensureCid 补到封面后会重新贴一次播放条');
+
+  if (!/async function backfillCover/.test(appjs)) {
+    err('app.js 没有 backfillCover —— 老存档里没封面的合集永远补不回来');
+  } else ok('有 backfillCover（给"曲目表已缓存但没记封面"的合集补一次）');
+
+  if (!/if \(!cover\) backfillCover\(bvid\);/.test(appjs)) {
+    err('cachedCollectEntries 里没有触发补封面 —— 缓存过的合集还是没封面');
+  } else ok('取缓存曲目表发现没封面时会触发补一次');
+
+  if (!/backfillCover\(DB\.lastTrack\.bvid\)/.test(appjs)) {
+    err('开机恢复的 lastTrack 没封面时没有补 —— 一开机播放条就是个音符');
+  } else ok('开机恢复的那一首也会补封面');
+
+  if (!/DB\.collectCovers\[track\.bvid\] = track\.cover/.test(appjs)) {
+    err('ensureCid 没有把封面记进 collectCovers —— 老存档不会自己长好');
+  } else ok('ensureCid 顺手把合集封面记进存档（老存档自动长好）');
+
+  if (!/coverBackfilling/.test(appjs)) {
+    err('补封面没有去重 —— 同一个合集会被反复请求');
+  } else ok('补封面有去重（同一个 bvid 只补一次）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 50 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

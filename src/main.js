@@ -364,7 +364,15 @@ function createWindow() {
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+    // ★ v2.2.1：任务栏缩略图按钮必须等窗口**真的显示出来之后**再设。
+    //   whenReady 里那次调用发生在 show() 之前 —— 那时 Explorer 还没给窗口建出任务栏按钮，
+    //   setThumbarButtons 会返回 false 并且什么都不做。
+    //   表现就是"鼠标悬停任务栏图标，预览出来了、但一个按钮都没有"。
+    refreshThumbar();
   });
+
+  // 从托盘 / 最小化回到前台时再补一次（Explorer 偶尔会把按钮状态弄丢）
+  mainWindow.on('show', () => refreshThumbar());
 
   // ============================================================
   //  点 ✕ 之后干什么（v2.2.0）
@@ -476,8 +484,27 @@ function loadIcon(file) {
     const img = nativeImage.createFromPath(p);
     // 图标读不出来要"吭声"：路径写错时托盘会**静默不出现**，非常难查
     // （这条是从参考项目 biu 学来的，见 docs/参考实现研究-biu.md §2.5）
-    if (img.isEmpty()) console.error('[icon] 图标没读出来：' + p);
-    iconCache.set(file, img.isEmpty() ? undefined : img);
+    if (img.isEmpty()) {
+      console.error('[icon] 图标没读出来：' + p);
+      iconCache.set(file, undefined);
+      return undefined;
+    }
+    // ★ v2.2.1：把同名的 @2x（32×32）也挂上去。
+    //   菜单图标在 Windows 上占 16×16 的位置，125% / 150% 缩放时系统要把它放大 ——
+    //   16×16 放大出来是糊的。挂一张 2 倍图，系统按当前 DPI 自己挑清楚的那张。
+    //   没有 @2x 文件也不影响，那就还是用 1 倍图。
+    try {
+      const p2 = p.replace(/\.png$/i, '@2x.png');
+      if (fs.existsSync(p2)) {
+        const buf2 = fs.readFileSync(p2);
+        if (!nativeImage.createFromBuffer(buf2).isEmpty()) {
+          img.addRepresentation({ scaleFactor: 2, buffer: buf2 });
+        }
+      }
+    } catch (err) {
+      console.error('[icon] 挂 @2x 失败（不影响使用）：', err);
+    }
+    iconCache.set(file, img);
   }
   return iconCache.get(file);
 }
@@ -581,7 +608,11 @@ function refreshThumbar() {
   if (btns.some((b) => !b.icon)) return;
 
   try {
-    mainWindow.setThumbarButtons(btns);
+    const okSet = mainWindow.setThumbarButtons(btns);
+    // ★ v2.2.1：这个 API 会**静默失败**。窗口还没显示出来时（Explorer 那边还没建出
+    //   任务栏按钮）它会返回 false 并且什么都不做 —— 表现就是"悬停图标，一个按钮都没有"。
+    //   所以把返回值记下来，出问题时有据可查。
+    if (!okSet) console.error('[thumbar] setThumbarButtons 返回 false（窗口可能还没显示出来）');
     // 悬停时那行提示文字，成本几乎为零
     const tip = uiState.hasTrack && uiState.title ? `Neko Music —— ${uiState.title}` : 'Neko Music';
     mainWindow.setThumbnailToolTip(tip);
@@ -798,7 +829,15 @@ function registerHandlers() {
     if (mainWindow.isMaximized()) mainWindow.unmaximize();
     else mainWindow.maximize();
   });
-  ipcMain.on('win-close', () => requestMainWindowClose());
+  // ★★ v2.2.1 修的 bug：这里**必须走 mainWindow.close()**，让 close 事件去做决策
+  //    （询问 / 缩小到托盘 / 彻底退出）。
+  //    早先这一行直接调 requestMainWindowClose()，等于**绕过了整套决策** ——
+  //    表现就是"第一次点 ✕，弹窗压根不出现，软件直接退干净了"。
+  //    close() 会触发 mainWindow.on('close')：那里 preventDefault 之后再按
+  //    settings.close.action 分流；真要退时它才会回头调 requestMainWindowClose() 走存盘握手。
+  ipcMain.on('win-close', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+  });
   ipcMain.on('win:close-ready', (_event, ok) => finishMainWindowClose(!!ok));
   ipcMain.on('win:fullscreen', (flag) => { if (mainWindow) mainWindow.setFullScreen(!!flag); });
 
