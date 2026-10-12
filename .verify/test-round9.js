@@ -5,7 +5,7 @@
      · P3 播放按钮     —— 不再有 waiting→转圈；play/pause/playing/ended/emptied 都按 audio.paused 重算
      · 三档毛玻璃 + 两个互斥开关 —— plain / prebake / live，默认 prebake，老存档一律迁 prebake
      · prebake 的"预先糊好的图" —— --glass-img 真的生成出来，面板 background-image 指向它
-     · L1 / S3 省显卡 —— 遮罩 / 歌词页 / 失焦时把看不见的无限动画暂停
+     · L1 / S3 省显卡 —— 遮罩 / 歌词页 / 失焦时暂停看不见的动画；播放条封面不再旋转
      · L2 —— 「正在播放」的柱子从 SVG 换成普通元素
 
    ★ 沙箱没有真实 GPU（软件光栅），测不了任务管理器里那个 GPU%。
@@ -373,6 +373,23 @@ app.whenReady().then(async () => {
   if (/data:image\//.test(pPre.img)) ok('--glass-img 真的生成出来了（url("data:image/…")）');
   else bad('--glass-img 没生成：' + pPre.img);
 
+  // 背景压暗必须同时改变预烘焙面板和内容区透出的壁纸，不需重生成 --glass-img。
+  const bgDim = await evalJS(`(() => {
+    const sel = ['.titlebar', '.sidebar', '.topbar', '.player'];
+    const previous = DB.settings.bg.dim;
+    const sample = () => Object.fromEntries(sel.map((s) => [s, getComputedStyle(document.querySelector(s)).backgroundImage]));
+    DB.settings.bg.dim = 0; applyAppearance(); const clear = sample();
+    DB.settings.bg.dim = 0.63; applyAppearance(); const dimmed = sample();
+    const rootDim = getComputedStyle(document.documentElement).getPropertyValue('--bg-dim').trim();
+    DB.settings.bg.dim = previous; applyAppearance();
+    return { rootDim, changed: sel.filter((s) => clear[s] !== dimmed[s]),
+      hasDimLayer: sel.filter((s) => dimmed[s].includes('0.63')) };
+  })()`);
+  say(`  背景压暗 63%：root --bg-dim=${bgDim.rootDim}，变化面板=${bgDim.changed.length}/4，带 0.63 暗罩=${bgDim.hasDimLayer.length}/4`);
+  if (bgDim.rootDim === '0.63' && bgDim.changed.length === 4 && bgDim.hasDimLayer.length === 4)
+    ok('背景压暗滑杆同步影响四块预烘焙面板，与内容区共用全局值');
+  else bad('背景压暗未覆盖全部预烘焙面板：' + JSON.stringify(bgDim));
+
   // 4b) prebake + 视频背景 → 没真模糊，也没有预先糊的图（视频糊不了）
   await evalJS(`(() => { DB.settings.bg.file = '${TEST_VIDEO}'; DB.settings.bg.kind = 'video';
     DB.settings.glass.mode = 'prebake'; applyAppearance(); syncSettingsUI(); return true; })()`);
@@ -430,6 +447,7 @@ app.whenReady().then(async () => {
     const t = window.__mk('BV1bars', '柱子在跳');
     queue = { tracks: [t], index: 0, name: '' };
     document.getElementById('content').innerHTML = trackListHTML([t], {});
+    // 即使旧类名被意外加回，封面也不应再出现旋转动画。
     document.getElementById('npCover').classList.add('spin');
     return true; })()`);
   await sleep(200);
@@ -439,7 +457,7 @@ app.whenReady().then(async () => {
     const cov = document.getElementById('npCover');
     return {
       bar: bar ? getComputedStyle(bar).animationPlayState : 'NO-BAR',
-      cover: getComputedStyle(cov, '::before').animationPlayState,
+      cover: getComputedStyle(cov, '::before').animationName,
       overlay: document.body.classList.contains('has-overlay'),
       lyric: document.body.classList.contains('lyric-open'),
       idle: document.body.classList.contains('perf-idle'),
@@ -447,48 +465,46 @@ app.whenReady().then(async () => {
   })()`);
 
   const a0 = await animState();
-  say(`  起点：柱子=${a0.bar}，封面弧线=${a0.cover}（has-overlay=${a0.overlay}）`);
-  if (a0.bar === 'running' && a0.cover === 'running') ok('没有任何遮罩时，动画照常跑');
+  say(`  起点：柱子=${a0.bar}，封面动画=${a0.cover}（has-overlay=${a0.overlay}）`);
+  if (a0.bar === 'running' && a0.cover === 'none') ok('无遮罩时跳动柱子正常播放，封面无旋转动画');
   else bad('起点动画状态不对：' + JSON.stringify(a0));
 
-  // 打开设置（模态遮罩）→ 全部暂停
+  // 打开设置（模态遮罩）→ 暂停被遮住的内容区动画，封面始终不旋转
   await evalJS(`document.getElementById('btnSettings').click(); true`);
   await sleep(350);
   const a1 = await animState();
-  say(`  打开设置后：has-overlay=${a1.overlay}，柱子=${a1.bar}，封面弧线=${a1.cover}`);
-  if (a1.overlay && a1.bar === 'paused' && a1.cover === 'paused') ok('模态遮罩盖住整块界面 → 连封面弧线一起暂停（L1）');
-  else bad('打开模态遮罩没有暂停动画：' + JSON.stringify(a1));
+  say(`  打开设置后：has-overlay=${a1.overlay}，柱子=${a1.bar}，封面动画=${a1.cover}`);
+  if (a1.overlay && a1.bar === 'paused' && a1.cover === 'none') ok('模态遮罩打开 → 内容区动画暂停，封面无旋转动画（L1）');
+  else bad('打开模态遮罩后的动画状态不对：' + JSON.stringify(a1));
   await evalJS(`document.getElementById('btnCloseModal').click(); true`);
   await sleep(350);
 
-  // 打开整页歌词 → 只停内容区，播放条里的封面弧线留着
+  // 打开整页歌词 → 暂停内容区动画，播放条封面仍无旋转动画
   await evalJS(`(() => { queue = { tracks: [window.__mk('BV1bars','柱子在跳')], index: 0, name: '' };
     document.getElementById('content').innerHTML = trackListHTML([queue.tracks[0]], {});
     toggleLyrics(true); return true; })()`);
   await sleep(350);
   const a2 = await animState();
-  say(`  打开歌词页后：lyric-open=${a2.lyric}，柱子=${a2.bar}，封面弧线=${a2.cover}`);
-  if (a2.lyric && a2.bar === 'paused') ok('整页歌词打开 → 内容区的跳动柱子暂停（L1）');
-  else bad('打开歌词页没有暂停内容区动画：' + JSON.stringify(a2));
-  if (a2.cover === 'running') ok('歌词页开着时封面旋转弧线**不**停（播放条还看得见，停了像没在播）');
-  else bad('歌词页开着却把封面弧线也停了：' + a2.cover);
+  say(`  打开歌词页后：lyric-open=${a2.lyric}，柱子=${a2.bar}，封面动画=${a2.cover}`);
+  if (a2.lyric && a2.bar === 'paused' && a2.cover === 'none') ok('整页歌词打开 → 内容区柱子暂停，封面无旋转动画（L1）');
+  else bad('打开歌词页后的动画状态不对：' + JSON.stringify(a2));
   await evalJS(`toggleLyrics(false); true`);
   await sleep(300);
 
-  // S3：窗口失焦 → 全停
+  // S3：窗口失焦 → 暂停仍在使用的无限动画，封面保持静止
   await evalJS(`window.dispatchEvent(new Event('blur')); true`);
   await sleep(250);
   const a3 = await animState();
-  say(`  窗口失焦后：perf-idle=${a3.idle}，柱子=${a3.bar}，封面弧线=${a3.cover}`);
-  if (a3.idle && a3.bar === 'paused' && a3.cover === 'paused') ok('窗口失焦 → 所有无限动画暂停（S3）');
-  else bad('失焦没有暂停动画：' + JSON.stringify(a3));
+  say(`  窗口失焦后：perf-idle=${a3.idle}，柱子=${a3.bar}，封面动画=${a3.cover}`);
+  if (a3.idle && a3.bar === 'paused' && a3.cover === 'none') ok('窗口失焦 → 内容区动画暂停，封面无旋转动画（S3）');
+  else bad('失焦后的动画状态不对：' + JSON.stringify(a3));
 
   await evalJS(`window.dispatchEvent(new Event('focus')); true`);
   await sleep(250);
   const a4 = await animState();
-  say(`  回焦后：柱子=${a4.bar}，封面弧线=${a4.cover}`);
-  if (a4.bar === 'running' && a4.cover === 'running') ok('回到前台 → 动画恢复（S3）');
-  else bad('回焦没有恢复动画：' + JSON.stringify(a4));
+  say(`  回焦后：柱子=${a4.bar}，封面动画=${a4.cover}`);
+  if (a4.bar === 'running' && a4.cover === 'none') ok('回到前台 → 内容区动画恢复，封面仍无旋转动画（S3）');
+  else bad('回焦后的动画状态不对：' + JSON.stringify(a4));
 
   /* ================= 6) L2：柱子不再是 SVG ================= */
   say('\n[6] L2：柱子从 SVG 换成普通元素：');

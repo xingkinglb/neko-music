@@ -1336,12 +1336,15 @@ console.log('\n[40] 面板毛玻璃 · 三档：');
   if (noPanelA.length) err('这些面板的底色没有走 --panel-a（三档共用它）：' + noPanelA.join(' / '));
   else ok('4 块面板的底色都走 --panel-a');
 
-  // prebake：面板背景改用"预先糊好的图"
-  const pre = /body\.glass-prebake\.has-imgbg[\s\S]{0,500}?\}/.exec(css);
+  // prebake：面板背景改用"预先糊好的图"，并复用全局背景压暗值
+  const pre = /body\.glass-prebake\.has-imgbg[\s\S]{0,650}?\}/.exec(css);
   if (!pre) err('没有 body.glass-prebake.has-imgbg 的规则');
   else {
     if (!/var\(--glass-img\)/.test(pre[0])) err('prebake 档没有把面板背景接上 --glass-img（会退化成纯半透明）');
     else ok('prebake 档面板背景接上了 --glass-img（预先糊好的壁纸图）');
+    if (!/linear-gradient\(rgb\(0 0 0 \/ var\(--bg-dim\)\),\s*rgb\(0 0 0 \/ var\(--bg-dim\)\)\)/.test(pre[0]))
+      err('prebake 面板没有应用全局 --bg-dim（压暗滑杆只会影响内容区）');
+    else ok('prebake 面板与内容区共用 --bg-dim 全局压暗值');
     if (!/fixed/.test(pre[0]))
       err('prebake 的面板背景没有 background-attachment:fixed —— 四块面板显示的就不是壁纸的"对应那一块"');
     else ok('prebake 用 background-attachment:fixed 对齐壁纸');
@@ -1353,6 +1356,9 @@ console.log('\n[40] 面板毛玻璃 · 三档：');
   else ok('没有自定义背景 → 面板一律不挂真模糊');
 
   // app.js 侧
+  if (!/root\.style\.setProperty\('--bg-dim',\s*String\(s\.bg\.dim\s*\?\?\s*0\.55\)\)/.test(appjs))
+    err('applyAppearance() 没有把背景压暗值设为全局变量 --bg-dim');
+  else ok('applyAppearance() 把背景压暗值设为全局 --bg-dim');
   if (!/async function buildGlassImage/.test(appjs)) err('没有生成"预先糊好的图"的函数 buildGlassImage()');
   else ok('有 buildGlassImage() 生成预先糊好的图');
   if (!/glassImgState/.test(appjs)) err('预先糊好的图没有"该不该重生成"的状态记录');
@@ -1497,9 +1503,12 @@ console.log('\n[44] 毛玻璃三档 · 数据与设置项：');
 /* ---- 45) 性能 · 每帧重算的路径已拿掉 ---- */
 console.log('\n[45] 性能 · 每帧重算的路径已拿掉：');
 {
-  if (!/body\.has-overlay \.idx \.bars i/.test(css) || !/body\.perf-idle \.np-cover\.spin::before/.test(css))
-    err('has-overlay / perf-idle 没有覆盖到"跳动柱子 + 封面旋转弧线"');
-  else ok('暂停规则覆盖了跳动柱子与封面旋转弧线');
+  if (!/body\.has-overlay \.idx \.bars i/.test(css) || !/body\.perf-idle \.idx \.bars i/.test(css))
+    err('has-overlay / perf-idle 没有暂停内容区跳动柱子');
+  else ok('遮罩 / 窗口失焦时暂停内容区跳动柱子');
+  if (/\.np-cover\.spin::before|@keyframes\s+coverSpin/.test(css) || /updateCoverSpin/.test(appjs))
+    err('播放条封面仍残留旋转动画或播放状态切换逻辑');
+  else ok('播放条封面不再有旋转动画');
   if (!/body\.lyric-open \.idx \.bars i/.test(css))
     err('打开整页歌词时没有暂停内容区的动画');
   else ok('打开整页歌词时暂停内容区动画');
@@ -1551,9 +1560,9 @@ console.log('\n[46] 颜色语法 · 空格三元组只能配斜杠写法：');
     err(`斜杠写法 rgb(var(--… ) / α) 只有 ${slash ? slash.length : 0} 处，半透明主题色可能整片失效`);
   else ok(`斜杠写法 rgb(var(--…) / α) 共 ${slash.length} 处`);
 
-  if (!/rgb\(var\(--glass-rgb\) \/ var\(--panel-a\)\)\) center\/cover no-repeat fixed/.test(css))
-    err('prebake 的多层背景里，底色层没写成斜杠语法（会整条落空 → 面板没有预先糊好的图）');
-  else ok('prebake 多层背景的底色层用的是斜杠语法');
+  if (!/linear-gradient\(rgb\(var\(--glass-rgb\) \/ 0\.26\),\s*rgb\(var\(--glass-rgb\) \/ 0\.26\)\)\s*center\/cover no-repeat fixed/.test(css))
+    err('prebake 的固定暗罩没有保持斜杠颜色语法或 0.26 alpha');
+  else ok('prebake 多层背景的固定 0.26 暗罩使用斜杠语法');
 
   // 开关勾上必须真的变色（曾经因为上面那个坑，勾上反而变成全透明）
   if (!/input:checked \+ \.switch \{ background: rgb\(var\(--accent-rgb\) \/ 0\.85\)/.test(css))

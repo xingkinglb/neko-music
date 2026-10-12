@@ -343,6 +343,8 @@ function applyAppearance() {
 
   // 1) 主题（给 <html> 打标记，CSS 里的 [data-theme="xxx"] 就会生效）
   root.dataset.theme = s.theme || 'pink';
+  // 背景压暗是全局设置：放在 <html> 上，让壁纸底层与 prebake 面板背景都能读取。
+  root.style.setProperty('--bg-dim', String(s.bg.dim ?? 0.55));
 
   // 2) 毛玻璃：三档（plain 纯半透明 / prebake 预先糊好的图 / live 实时毛玻璃）
   //    三档共用 --glass-blur 与 --glass-alpha；区别只在"面板到底用不用真 backdrop-filter"，
@@ -362,7 +364,6 @@ function applyAppearance() {
     const isImage = has && !isVideo;
 
     layer.style.setProperty('--bg-image', isImage ? `url("bg://local/${s.bg.file}")` : 'none');
-    layer.style.setProperty('--bg-dim',  String(s.bg.dim  ?? 0.55));
     // blur(0px) 会让多余的图层一直占着显卡，直接用 none 更省
     const b = Number(s.bg.blur) || 0;
     layer.style.setProperty('--bg-blur', b > 0 ? b + 'px' : '0px');
@@ -425,11 +426,11 @@ function bgOverlayOpen() {
  * backdrop-filter 之所以贵，是因为"合成器一直在产帧"，而产帧的源头是**动画**。
  * 所以只要会动的东西被盖住、用户看不见，就应该暂停它 —— 这是纯赚的优化：
  *   · has-overlay —— 模态遮罩盖住整块界面（设置 / 选集 / 队列 / 弹窗）：
- *                    连播放条里那条封面旋转弧线一起停（它也在遮罩后面）。
+ *                    暂停遮罩后的内容区动画与加载转圈。
  *   · lyric-open  —— 整页歌词开着：只盖住内容区，播放条还看得见，
- *                    所以**只停内容区的动画**（那三根跳动的柱子），旋转弧线留着 ——
- *                    停了会让人以为"没在播"。
- *   · perf-idle   —— 窗口失焦 / 最小化 / 切后台：什么都看不见，全停。
+ *                    暂停内容区的跳动柱子与加载转圈。
+ *   · perf-idle   —— 窗口失焦 / 最小化 / 切后台：暂停性能规则覆盖的内容区动画与加载转圈。
+ *   播放条封面不再有旋转弧线；播放状态由播放 / 暂停按钮表示。
  *
  * CSS 侧在 style.css 的「省显卡：把"看不见的动画"停掉」一节。
  */
@@ -2486,8 +2487,8 @@ function bindEvents() {
   // ★ 播放按钮的图标只有一个来源：updatePlayBtn()（按 audio.paused 决定 ▶ / ‖）。
   //   这里**故意不监听 waiting** —— 缓冲时不再换成转圈（那样一旦没人换回来就永远转圈）。
   //   播放/暂停/缓冲结束(playing)/被清空(emptied)/出错/播完，都只是"重算一次图标"。
-  audio.addEventListener('play',    () => { updatePlayBtn(); updateCoverSpin(); pushLyricToDesktop(); });
-  audio.addEventListener('pause',   () => { updatePlayBtn(); updateCoverSpin(); pushLyricToDesktop(); });
+  audio.addEventListener('play',    () => { updatePlayBtn(); pushLyricToDesktop(); });
+  audio.addEventListener('pause',   () => { updatePlayBtn(); pushLyricToDesktop(); });
   audio.addEventListener('playing', () => { updatePlayBtn(); });
   audio.addEventListener('emptied', () => { updatePlayBtn(); });
 
@@ -2908,12 +2909,6 @@ function updateLyricHeadBtn() {
   if (!btn) return;
   btn.classList.toggle('on', !!lw().on);
   btn.title = lw().on ? '关闭桌面歌词' : '在桌面上挂一个悬浮歌词窗';
-}
-
-/** 播放中给封面套一圈旋转弧线（暂停就停），一眼能看出在播 */
-function updateCoverSpin() {
-  const cover = $('npCover');
-  if (cover) cover.classList.toggle('spin', !audio.paused && !!audio.src);
 }
 
 /**
