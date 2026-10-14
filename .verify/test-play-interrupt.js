@@ -59,10 +59,6 @@ ipcMain.handle('bili:videoInfo', (_e, bvid) => ({
 ipcMain.handle('bili:upVideos', () => ({ ok: true, data: { list: [], hasMore: false } }));
 ipcMain.handle('bg:pick', () => ({ ok: true, data: { file: null, kind: 'image', sizeMB: 0 } }));
 ipcMain.handle('bg:clear', () => ({ ok: true, data: true }));
-/* 下载 / 本地歌曲 IPC：真实主进程都注册了（main.js 的 download:* / local:*）。
-   ★ 本脚本会把"页面有报错"直接判 FAIL，不打桩的话，"桩缺了"会被当成"产品坏了"。
-   统一走共享桩，与 round13~16 / test-keys / test-playing 保持一致。 */
-require('./stub-download-ipc.js')();
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({

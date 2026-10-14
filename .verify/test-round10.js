@@ -66,10 +66,6 @@ ipcMain.handle('bili:videoInfo', (_e, bvid) => ({
 ipcMain.handle('bili:upVideos', () => ({ ok: true, data: { list: [], hasMore: false } }));
 ipcMain.handle('bg:pick', () => ({ ok: true, data: null }));
 ipcMain.handle('bg:clear', () => ({ ok: true, data: true }));
-/* v2.8.0：下载 / 本地歌曲 IPC 桩。★ 本脚本会把"页面有报错"判 FAIL，
-   不打桩的话 boot() 里的 refreshDownloads 会挂 "No handler registered"，
-   "桩缺了"会被当成"产品坏了"。详见 stub-download-ipc.js 顶部说明。 */
-require('./stub-download-ipc.js')();
 
 /* 窗口按钮：只记一下，别真去动窗口（动了会影响尺寸断言） */
 const winCalls = [];

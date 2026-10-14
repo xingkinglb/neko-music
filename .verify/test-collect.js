@@ -64,7 +64,6 @@ ipcMain.handle('bili:audioUrl', () => ({ ok: true, data: { url: '', quality: 302
    不打桩控制台就会挂一条 "No handler registered"（桩缺了，不是产品坏了）。
    详见 stub-download-ipc.js 顶部的说明。 */
 require('./stub-download-ipc.js')();
-const dlStub = require('./stub-download-ipc.js');   // v2.8.0：面板里的批量下载要断言"主进程收到了几首"
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -241,85 +240,6 @@ app.whenReady().then(async () => {
   say('  点第 1 行后：队列长度=' + queued.len + '，第一首「' + queued.first + '」');
   if (queued.len === 134) ok('点列表里任意一行 = 整段 134 首成为队列（原来的能力没丢）');
   else bad('点行后队列数量不对：' + queued.len);
-
-  /* ---- ★ v2.8.0 修订：面板里的「批量下载」要能**挑**，不能点一下就下全部 ----
-     真机反馈原话："展开歌单界面里的批量下载没有让选择的功能，点击后是直接下载全部了"。
-     ★ 判别力：这条在旧代码上必挂 —— 旧代码点一下就直接 enqueueDownloads(启用中的全部)，
-       既不会出现 collectPick，也没有 btnCollectPickDo。 */
-  await evalJS(`(() => { DB.settings.download = DB.settings.download || {};
-    DB.settings.download.dir = 'C:\\\\测试\\\\下载'; return true; })()`);
-  const dlPos = await centerOf('#btnDownloadCollect');
-  const addBefore = dlStub.calls.add.length;
-  await clickAt(dlPos.x, dlPos.y);
-  await sleep(400);
-  const pickOn = await evalJS(`({
-    on: !!collectPick,
-    barShown: getComputedStyle(document.getElementById('collectPickBar')).display !== 'none',
-    boxes: document.querySelectorAll('#collectList .collect-row.pickable .pick').length,
-    doText: (document.getElementById('btnCollectPickDo') || {}).textContent || '',
-    doDisabled: !!(document.getElementById('btnCollectPickDo') || {}).disabled,
-    toggleAllHidden: document.getElementById('btnCollectToggleAll').style.display === 'none',
-    btnText: document.getElementById('btnDownloadCollect').textContent,
-    btnCls: document.getElementById('btnDownloadCollect').className,
-  })`);
-  say('\n--- 面板「批量下载」= 进勾选态（v2.8.0 修订）---');
-  say('  勾选态=' + pickOn.on + '；复选框=' + pickOn.boxes + '；按钮「' + pickOn.doText + '」');
-  if (pickOn.on && pickOn.barShown && pickOn.boxes === 134 && pickOn.doDisabled && /下载选中的 0 首/.test(pickOn.doText))
-    ok('★ 点「批量下载」→ 进勾选态：134 行都出现复选框，工具条写「下载选中的 0 首」且置灰');
-  else bad('面板勾选态没起来：' + JSON.stringify(pickOn));
-  if (dlStub.calls.add.length === addBefore)
-    ok('★ 进勾选态时**没有**发出任何下载请求（反向：不再"点一下直接下全部"）');
-  else bad('点「批量下载」就直接下载了：' + JSON.stringify(dlStub.calls.add.slice(addBefore)));
-  if (pickOn.btnText === '退出批量下载' && /\bon\b/.test(pickOn.btnCls) && pickOn.toggleAllHidden)
-    ok('入口按钮变成「退出批量下载」（ghost-btn.on），「全部启用」让位收起');
-  else bad('入口按钮状态不对：' + JSON.stringify({ t: pickOn.btnText, c: pickOn.btnCls, h: pickOn.toggleAllHidden }));
-
-  // 点第 2 行 = 勾上它，且**不该播放**
-  const qLenBefore = await evalJS(`queue.tracks.length`);
-  const row2 = await evalJS(`(() => {
-    const r = document.querySelectorAll('#collectList .collect-row')[1];
-    const b = r.getBoundingClientRect();
-    return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) };
-  })()`);
-  await clickAt(row2.x, row2.y);
-  await sleep(350);
-  const onePicked = await evalJS(`({
-    n: collectPick ? collectPick.selected.size : -1,
-    doText: (document.getElementById('btnCollectPickDo') || {}).textContent || '',
-    queueLen: queue.tracks.length,
-    onRows: document.querySelectorAll('#collectList .collect-row.pickable.picked').length,
-  })`);
-  if (onePicked.n === 1 && onePicked.onRows === 1 && onePicked.queueLen === qLenBefore && /下载选中的 1 首/.test(onePicked.doText))
-    ok('★ 点行 = 勾选（1 首），**不播放**（队列长度没变）');
-  else bad('勾选行行为不对：' + JSON.stringify(onePicked));
-
-  // 全选 → 下载选中的 134 首 → 主进程真的收到 134 首
-  await evalJS(`document.getElementById('btnCollectPickAll').click()`);
-  await sleep(300);
-  const allPicked = await evalJS(`({ n: collectPick ? collectPick.selected.size : -1,
-    doText: (document.getElementById('btnCollectPickDo') || {}).textContent || '' })`);
-  if (allPicked.n === 134 && /下载选中的 134 首/.test(allPicked.doText)) ok('★ 全选 → 已选 134 首');
-  else bad('全选不对：' + JSON.stringify(allPicked));
-
-  await evalJS(`document.getElementById('btnCollectPickDo').click()`);
-  await sleep(1000);
-  const sent = dlStub.calls.add.slice(addBefore);
-  const lastSent = sent.length ? sent[sent.length - 1] : null;
-  const stillPicking = await evalJS(`!!collectPick`);
-  if (lastSent && lastSent.length === 134 && !stillPicking)
-    ok('★ 点「下载选中的 134 首」→ 主进程收到 134 首，且自动退出勾选态');
-  else bad('勾选下载没闭环：' + JSON.stringify({ n: lastSent && lastSent.length, stillPicking }));
-
-  // 关面板必须把勾选态一起清掉（否则下次打开会带着上次的勾）
-  await evalJS(`(() => { toggleCollectPick(); return true; })()`);
-  await sleep(250);
-  await evalJS(`closeCollectPanel()`);
-  await sleep(250);
-  const afterClose = await evalJS(`({ pick: !!collectPick, state: !!collectState })`);
-  if (!afterClose.pick && !afterClose.state) ok('★ 收起面板会连勾选态一起清掉（下次打开不带旧勾）');
-  else bad('关面板没清勾选态：' + JSON.stringify(afterClose));
-  await evalJS(`expandCollection(searchResults[0], { tracks: searchResults, index: 0, name: '' })`);
-  await sleep(500);
 
   /* ★ 点行之后面板**仍然开着** —— 这是有意的（方便接着挑下一首；旧的「加入队列」会顺手关掉，
      点行不会）。但下一步要回到搜索结果列表去点徽章，所以这里得先把面板收起来，

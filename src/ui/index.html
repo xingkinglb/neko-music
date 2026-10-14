@@ -295,10 +295,6 @@
       <div class="nav-item" data-view="history">
         <span class="ico"><svg class="ic"><use href="#i-history"/></svg></span><span>最近播放</span>
       </div>
-      <!-- v2.8.0 批次 B：本地歌曲（下载来的 + 从硬盘导入的） -->
-      <div class="nav-item" data-view="local">
-        <span class="ico"><svg class="ic"><use href="#i-folder"/></svg></span><span>本地歌曲</span>
-      </div>
     </nav>
 
     <div class="playlist-section">
@@ -501,11 +497,6 @@
       -->
       <input class="collect-search" id="collectSearch" placeholder="搜索选集…" autocomplete="off" />
     </div>
-    <!--
-      v2.8.0：勾选态才出现的那条工具条（内容由 syncCollectPickBar() 填）。
-      独立一行，不去跟上面那排抢宽度 —— 面板总共才 400px。
-    -->
-    <div class="collect-pickbar" id="collectPickBar" style="display:none"></div>
     <div class="collect-body" id="collectList"></div>
   </div>
 </div>
