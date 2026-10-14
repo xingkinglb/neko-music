@@ -497,6 +497,11 @@
       -->
       <input class="collect-search" id="collectSearch" placeholder="搜索选集…" autocomplete="off" />
     </div>
+    <!--
+      v2.8.0：勾选态才出现的那条工具条（内容由 syncCollectPickBar() 填）。
+      独立一行，不去跟上面那排抢宽度 —— 面板总共才 400px。
+    -->
+    <div class="collect-pickbar" id="collectPickBar" style="display:none"></div>
     <div class="collect-body" id="collectList"></div>
   </div>
 </div>

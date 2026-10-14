@@ -233,7 +233,7 @@ const coverUrl = (f) => `local://cover?f=${encodeURIComponent(f)}`;
   say('[11] ★不变式★ safeCoverName() 生成的任何名字都必须能通过校验');
   {
     const keys = [
-      'BV1test0001:39243287210',         // 正常的 bvid:cid（合成样本，仓库里不放真实 bvid）
+      'BV1ybj66YEpv:39243287210',        // 正常的 bvid:cid
       'BV1xx:1',
       '中文键:中文',                      // 含中文
       '../../etc/passwd',                 // 穿越写法

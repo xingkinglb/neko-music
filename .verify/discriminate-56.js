@@ -68,6 +68,64 @@ const CASES = [
     to:   '<button class="ghost-btn" id="btnDlManager" title="下载管理">',
     expect: '应该是「设置」+「下载管理」两个按钮',
   },
+
+  /* ---- v2.8.0 修订（真机反馈）那五处，各自一条 ---- */
+  {
+    name: '歌词浮层的「桌面歌词」按钮又变成无条件可点（收起时会盖住工具栏）',
+    file: 'src/ui/style.css',
+    from: '  background: rgba(255,255,255,0.07);\n  transition: background 0.14s, color 0.14s;\n}',
+    to:   '  background: rgba(255,255,255,0.07);\n  transition: background 0.14s, color 0.14s;\n  pointer-events: auto;\n}',
+    expect: '又写了无条件的 pointer-events: auto',
+  },
+  {
+    name: '.primary-btn 丢掉 inline-flex（带图标时按钮会变成两行）',
+    file: 'src/ui/style.css',
+    from: '  display: inline-flex; align-items: center; justify-content: center; gap: 6px;\n}\n.primary-btn .ic',
+    to:   '}\n.primary-btn .ic',
+    expect: '.primary-btn 没有 display: inline-flex',
+  },
+  {
+    name: '.ghost-btn.on 被删（勾选态只能切 primary-btn，盒子会变）',
+    file: 'src/ui/style.css',
+    from: '.ghost-btn.on {\n  background: rgb(var(--accent-rgb) / 0.18);',
+    to:   '.ghost-btn--on {\n  background: rgb(var(--accent-rgb) / 0.18);',
+    expect: '没有 .ghost-btn.on',
+  },
+  {
+    name: '工具条「批量下载」又切回 primary-btn（真机反馈的"变形变高"）',
+    file: 'src/ui/app.js',
+    from: `class="ghost-btn\${picking ? ' on' : ''}"`,
+    to:   'class="primary-btn"',
+    expect: '没在用 ghost-btn + on',
+  },
+  {
+    name: '选集面板的勾选工具条被删（又变成点一下直接下全部）',
+    file: 'src/ui/app.js',
+    from: 'id="btnCollectPickAll"',
+    to:   'id="btnCollectPickAllX"',
+    expect: '选集勾选工具条缺按钮',
+  },
+  {
+    name: '合集面板的「批量下载」改回直接 enqueueDownloads',
+    file: 'src/ui/app.js',
+    from: "$('btnDownloadCollect').addEventListener('click', toggleCollectPick);",
+    to:   "$('btnDownloadCollect').addEventListener('click', () => { const on = enabledEntries(collectState, collectState.entries); enqueueDownloads(on, { jump: false }); });",
+    expect: '没有改成进勾选态',
+  },
+  {
+    name: '下载管理的「全部删除」被删',
+    file: 'src/ui/app.js',
+    from: 'id="btnDlClearAll"',
+    to:   'id="btnDlClearAllX"',
+    expect: '下载管理没有「全部删除」',
+  },
+  {
+    name: '删任务不再清本地库那条（绿勾会一直挂着）',
+    file: 'src/ui/app.js',
+    from: 'function dropLocalEntryOf(t) {',
+    to:   'function dropLocalEntryOfXX(t) {',
+    expect: 'app.js 没有 dropLocalEntryOf',
+  },
 ];
 
 let pass = 0, fail = 0;

@@ -507,6 +507,112 @@ app.whenReady().then(async () => {
     ok(`点行内下载按钮 → 主进程收到 ${last[0].bvid}:${last[0].cid}；且首次下载先弹了选目录框（已记住 ${dirSaved}）`);
   else bad('下载链路没有闭环：' + JSON.stringify({ last, pickedDir, dirSaved }));
 
+  /* ================= v2.8.0 修订（真机反馈） ================= */
+
+  /* ⑦ 收起的整页歌词不能接鼠标 —— 它的「桌面歌词」按钮正好压在工具栏最右侧
+     「批量下载」那个 ↓ 图标上面。之前点那个图标会莫名其妙把悬浮歌词开出来。 */
+  await evalJS(`(() => {
+    if (dlPick) dlPick = null;
+    closeQueue();
+    currentView = 'favorites'; renderAll();
+    DB.settings.lyricWin = DB.settings.lyricWin || {};
+    DB.settings.lyricWin.on = false;
+    return true;
+  })()`);
+  await sleep(300);
+  {
+    const icPos = await evalJS(`(() => {
+      const s = document.getElementById('btnDownloadFav').querySelector('svg.ic').getBoundingClientRect();
+      return { x: Math.round(s.x + s.width / 2), y: Math.round(s.y + s.height / 2) };
+    })()`);
+    await clickAt(icPos.x, icPos.y);
+    const after = await evalJS(`({
+      lyricOn: !!(DB.settings.lyricWin && DB.settings.lyricWin.on),
+      overlay: document.getElementById('lyricOverlay').classList.contains('show'),
+      picking: !!document.getElementById('btnDlPickDo'),
+    })`);
+    if (!after.lyricOn && !after.overlay && after.picking)
+      ok('★ 点「批量下载」前面的 ↓ 图标 → 进勾选模式，不再误开悬浮歌词');
+    else bad('点那个图标的行为不对（疑似又落在隐藏歌词浮层的按钮上）：' + JSON.stringify(after));
+    await evalJS(`(() => { if (dlPick) { dlPick = null; renderAll(); } return true; })()`);
+    await sleep(250);
+  }
+
+  /* ⑧ 勾选态下按钮**不许变形**（真机反馈"变形变高"）。
+     量的是同一颗按钮在两种状态下的高度 + 图标文字是否还在同一行。 */
+  {
+    const b1 = await evalJS(`Math.round(document.getElementById('btnDownloadFav').getBoundingClientRect().height)`);
+    await evalJS(`document.getElementById('btnDownloadFav').click()`);
+    await sleep(320);
+    const b2 = await evalJS(`(() => {
+      const b = document.getElementById('btnDownloadFav');
+      const i = b.querySelector('svg.ic').getBoundingClientRect();
+      const s = b.querySelector('span').getBoundingClientRect();
+      return { h: Math.round(b.getBoundingClientRect().height), text: b.textContent, cls: b.className,
+               oneRow: Math.abs((i.top + i.height / 2) - (s.top + s.height / 2)) < 6 };
+    })()`);
+    if (b2.h === b1 && b2.oneRow && /退出批量下载/.test(b2.text) && /\bon\b/.test(b2.cls))
+      ok(`★ 勾选态下按钮不变形：${b1}px → ${b2.h}px，图标和文字仍在同一行（class="${b2.cls}"）`);
+    else bad('勾选态按钮变形了：' + JSON.stringify({ before: b1, after: b2 }));
+    await evalJS(`(() => { if (dlPick) { dlPick = null; renderAll(); } return true; })()`);
+    await sleep(250);
+  }
+
+  /* ⑨ 下载管理有「全部删除」（真机反馈"没有全部删除的功能"）。 */
+  await evalJS(`(async () => { currentView = 'downloads'; dlFilter = 'all'; await refreshDownloads(); renderAll(); return true; })()`);
+  await sleep(350);
+  {
+    const ids = await evalJS(`[...document.querySelectorAll('#content button')].map((b) => b.id).filter(Boolean)`);
+    if (ids.includes('btnDlClearAll')) ok('★ 下载管理有「全部删除」按钮');
+    else bad('下载管理缺「全部删除」：' + JSON.stringify(ids));
+  }
+
+  /* ⑩ 删掉下载记录后绿勾必须消失（真机反馈"下载后又删除了，图标还是下载成功图标"）。
+     ★ 关键在**本地库那条也要一起清**：绿勾是"本地库 ∪ 已完成任务"两个来源的并集。
+       只删任务不清本地库的话绿勾会一直挂着 —— 老代码只在"同时删文件"时才清本地库，
+       而那个勾默认**不勾**，所以这条断言在旧代码上必挂（判别力就在这儿）。 */
+  await evalJS(`(() => {
+    DB.local = [{ id: 'L1', path: 'C:\\\\测试\\\\下载\\\\周深 - 大鱼.m4a', title: '大鱼',
+                  key: 'BV1song0001:7', bvid: 'BV1song0001', cid: 7, src: 'download' }];
+    dlDir = 'C:\\\\测试\\\\下载';
+    rebuildDlKeys();
+    currentView = 'search'; searchKeyword = '测试';
+    searchResults[0].cid = 7;
+    renderAll();
+    return true;
+  })()`);
+  await sleep(300);
+  const greenBefore = await evalJS(`(() => {
+    const b = document.querySelector('#content .track [data-act="download"]');
+    return b ? { done: /\\bdone\\b/.test(b.className), icon: (b.querySelector('use') || {}).getAttribute('href') } : null;
+  })()`);
+  if (greenBefore && greenBefore.done && greenBefore.icon === '#i-check') ok('（前置）这首歌先是「已下载」绿勾');
+  else bad('前置条件不成立，后面那条就测不出东西：' + JSON.stringify(greenBefore));
+
+  await evalJS(`(async () => { currentView = 'downloads'; dlFilter = 'all'; await refreshDownloads(); renderAll(); return true; })()`);
+  await sleep(350);
+  const rmBtn = await centerOf('#content .dl-row[data-dlid="dl_test1"] [data-dlact="remove"]');
+  const rmBefore = dlStub.calls.remove.length;
+  if (rmBtn) {
+    await clickAt(rmBtn.x, rmBtn.y);
+    await sleep(350);
+    const okBtn = await centerOf('#promptOk');
+    if (okBtn) { await clickAt(okBtn.x, okBtn.y); await sleep(800); }
+    const after = await evalJS(`(() => {
+      const keys = (DB.local || []).filter((e) => e && e.key).map((e) => e.key);
+      currentView = 'search'; searchKeyword = '测试'; renderAll();
+      const b = document.querySelector('#content .track [data-act="download"]');
+      return { localKeys: keys, done: b ? /\\bdone\\b/.test(b.className) : null,
+               icon: b ? (b.querySelector('use') || {}).getAttribute('href') : '' };
+    })()`);
+    const sent = dlStub.calls.remove.slice(rmBefore);
+    if (sent.length && sent[0][1] === false && !after.localKeys.length && after.done === false && after.icon === '#i-download')
+      ok('★ 删掉下载记录（没勾"同时删文件"）→ 本地库那条也清了，绿勾变回下载箭头');
+    else bad('删除后绿勾没消失：' + JSON.stringify({ sent, after }));
+  } else {
+    bad('下载管理里找不到这条任务的「删除」按钮');
+  }
+
   /* 勾选模式的那张图：要的是"已选 2 首"的样子，所以先重进一次勾选模式再截 */
   await evalJS(`(() => { closeQueue(); if (dlPick) dlPick = null;
     currentView = 'favorites'; renderAll();

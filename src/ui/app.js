@@ -1360,10 +1360,20 @@ async function buildSequence(tracks) {
 
 let collectState = null;   // 面板开着时才有值：{ bvid, title, baseSub, entries }
 
+/**
+ * 选集面板的「批量下载」勾选态（v2.8.0）。
+ * ★ 为什么单独一份、不复用 dlPick：dlPick 是**绑在某个列表视图上**的
+ *   （它按 `currentTracks()[i]` 取曲目），而面板里的条目是"这个合集的第 N 集"，
+ *   压根不在当前视图的列表里。硬塞进去会取到别的歌。
+ *   形状：{ selected: Map<entryKey, entry> }；null = 不在勾选态。
+ */
+let collectPick = null;
+
 function closeCollectPanel() {
   const mask = $('collectMask');
   if (mask) mask.classList.remove('show');
   collectState = null;
+  collectPick = null;   // 关面板一定要退出勾选态，不然下次打开会带着上次的勾
 }
 
 /** 点「选集」徽章：把分P / 合集摊开；若其实不是合集就直接播这一首 */
@@ -1371,6 +1381,7 @@ async function expandCollection(track, fallback) {
   if (!track || !track.bvid) return;
 
   collectState = null;
+  collectPick = null;   // 换一个合集 → 上次的勾选不能带过来
   $('collectTitle').textContent = track.title;
   $('collectSub').textContent = '正在读取选集…';
   $('collectSearch').value = '';
@@ -1425,6 +1436,7 @@ function renderCollectList(filter) {
   const q = (filter || '').trim().toLowerCase();
   const entries = collectState.entries;
   const cur = queue.tracks[queue.index];
+  const picking = !!collectPick;   // v2.8.0：面板里的「批量下载」勾选态
   const rows = entries
     .map((e, i) => ({ e, i }))
     .filter(({ e, i }) => !q || (e.title || '').toLowerCase().includes(q) || String(i + 1) === q);
@@ -1434,6 +1446,20 @@ function renderCollectList(filter) {
       const liked = isFav(e);
       const off = isEntryOff(collectState.bvid, e);
       const done = isDownloaded(e);
+
+      /* 勾选态：左边是复选框，序号和那排操作按钮全收起来。
+         ★ 不显示 .off（划掉）：那个标记说的是"不参与播放"，跟"要不要下载"是两回事，
+           在勾选态里显示只会让人以为这集选不了。 */
+      if (picking) {
+        const picked = collectPick.selected.has(entryKey(e));
+        return `
+        <div class="collect-row pickable ${picked ? 'picked' : ''}" data-ci="${i}">
+          <span class="pick${picked ? ' on' : ''}" role="checkbox" aria-checked="${picked ? 'true' : 'false'}" data-cpick="${i}">${ic('i-check')}</span>
+          <span class="ct" title="${esc(e.title)}">${esc(e.title)}</span>
+          <span class="cd">${fmtTime(e.duration)}</span>
+        </div>`;
+      }
+
       return `
         <div class="collect-row ${off ? 'off' : ''} ${sameTrack(e, cur) ? 'on' : ''}" data-ci="${i}">
           <span class="cn">${i + 1}</span>
@@ -1466,9 +1492,83 @@ function syncCollectBar() {
   const on = enabledEntries(collectState, entries);
   $('collectSub').textContent = `${collectState.baseSub} · 已启用 ${on.length}/${entries.length} 集`;
   const all = $('btnCollectToggleAll');
-  if (all) all.textContent = (on.length === entries.length) ? '全部禁用' : '全部启用';
+  if (all) {
+    all.textContent = (on.length === entries.length) ? '全部禁用' : '全部启用';
+    // ★ v2.8.0：勾选态里把「全部启用 / 全部禁用」收起来。
+    //   勾选中去改"播放范围"没有意义，而且腾出地方给「退出批量下载」这个长文案
+    //   （面板总共才 400px 宽，两个长按钮 + 搜索框挤不下）。
+    all.style.display = collectPick ? 'none' : '';
+  }
   const dl = $('btnDownloadCollect');
-  if (dl) dl.textContent = `批量下载 (${on.length})`;
+  if (dl) {
+    // ★ 文案不再带 (N)：那个 N 是"启用中"的集数，跟"这次要下几首"已经不是一回事了 ——
+    //   现在下几首由勾选态里的选择决定，带个旧数字只会误导。
+    dl.textContent = collectPick ? '退出批量下载' : '批量下载';
+    dl.classList.toggle('on', !!collectPick);
+  }
+  syncCollectPickBar();
+}
+
+/**
+ * 勾选态那条工具条（v2.8.0）。不在勾选态时整条藏起来。
+ * ★ 单独占一行，不去跟上面那排抢宽度 —— 见 style.css 里 .collect-pickbar 的注释。
+ */
+function syncCollectPickBar() {
+  const bar = $('collectPickBar');
+  if (!bar) return;
+  bar.style.display = collectPick ? '' : 'none';
+  if (!collectPick) { bar.innerHTML = ''; return; }
+  const n = collectPick.selected.size;
+  const total = collectState ? collectState.entries.length : 0;
+  bar.innerHTML = `
+    <span class="cp-count">已选 <b>${n}</b> 首</span>
+    <button class="ghost-btn" id="btnCollectPickAll">全选 (${total})</button>
+    <button class="ghost-btn" id="btnCollectPickNone"${n ? '' : ' disabled'}>清空</button>
+    <button class="primary-btn" id="btnCollectPickDo"${n ? '' : ' disabled'}>下载选中的 ${n} 首</button>`;
+}
+
+/* ---------- 选集面板的勾选态 ---------- */
+
+/** 面板里「批量下载」= 进 / 出勾选态（和工具条上那个按钮一个手感） */
+function toggleCollectPick() {
+  if (collectPick) { collectPick = null; renderCollectList($('collectSearch').value); return; }
+  if (!collectState) return;
+  // ★ 默认**一个都不勾**：真机反馈的原话是"点了就直接下全部"，
+  //   所以这里必须让"下什么"由用户明确选出来，不能替他默认全选。
+  collectPick = { selected: new Map() };
+  renderCollectList($('collectSearch').value);
+}
+
+function collectPickToggle(i) {
+  if (!collectPick || !collectState) return;
+  const e = collectState.entries[i];
+  if (!e) return;
+  const k = entryKey(e);
+  if (collectPick.selected.has(k)) collectPick.selected.delete(k);
+  else collectPick.selected.set(k, e);
+  renderCollectList($('collectSearch').value);
+}
+
+function collectPickAll() {
+  if (!collectPick || !collectState) return;
+  for (const e of collectState.entries) collectPick.selected.set(entryKey(e), e);
+  renderCollectList($('collectSearch').value);
+}
+
+function collectPickNone() {
+  if (!collectPick) return;
+  collectPick.selected.clear();
+  renderCollectList($('collectSearch').value);
+}
+
+async function collectPickDo() {
+  if (!collectPick) return;
+  const list = [...collectPick.selected.values()];
+  if (!list.length) return;
+  // ★ jump:false —— 面板还开着，跳走等于把用户正在挑的选集列表抽掉。
+  //   下载完再重画一次面板：刚下过的那些行要变成绿勾。
+  await enqueueDownloads(list, { jump: false });
+  if (collectState) renderCollectList($('collectSearch').value);
 }
 
 /** 一键全部启用 / 全部禁用（按当前状态决定往哪边切） */
@@ -1509,6 +1609,12 @@ function bindCollect() {
   });
   $('collectSearch').addEventListener('input', (e) => renderCollectList(e.target.value));
   $('collectList').addEventListener('click', (e) => {
+    // ★ v2.8.0：勾选态优先 —— 这时行里只剩复选框，点整行就是勾 / 取消，不播放。
+    if (collectPick) {
+      const prow = e.target.closest('.collect-row');
+      if (prow) collectPickToggle(Number(prow.dataset.ci));
+      return;
+    }
     // 每一集右侧的图标按钮（启用开关 / 收藏 / 加歌单）优先，不能顺手把整行"播放"也触发了
     const act = e.target.closest('[data-cact]');
     if (act && collectState) {
@@ -1533,16 +1639,24 @@ function bindCollect() {
     if (row) playCollectEntry(Number(row.dataset.ci));
   });
   $('btnCollectToggleAll').addEventListener('click', toggleAllEntries);
-  // v2.8.0：这里原来是「播放全部」，现在是「批量下载」——把**启用中的**整批丢进下载队列。
-  // ★ 不跳转到「下载管理」：面板还开着，跳走等于把用户正在看的选集列表抽掉。
-  $('btnDownloadCollect').addEventListener('click', () => {
-    if (!collectState) return;
-    const on = enabledEntries(collectState, collectState.entries);
-    if (!on.length) { toast('这条合集里的曲目都被禁用了'); return; }
-    enqueueDownloads(on, { jump: false });
+  /* v2.8.0：这里原来是「播放全部」，现在是「批量下载」→ **进勾选态**。
+     ★ 真机反馈改过一版：最早点它就直接把"启用中"的整批丢进下载队列，
+       用户没地方挑（"没有让选择的功能，点击后是直接下载全部了"）。
+       现在它只是个入口，下哪几首由勾选态里的选择决定。 */
+  $('btnDownloadCollect').addEventListener('click', toggleCollectPick);
+  // 勾选工具条里那三个按钮：内容是每次重画生成的，所以在**容器**上做事件代理
+  $('collectPickBar').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.id === 'btnCollectPickAll') collectPickAll();
+    else if (b.id === 'btnCollectPickNone') collectPickNone();
+    else if (b.id === 'btnCollectPickDo') collectPickDo();
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && collectState) closeCollectPanel();
+    if (e.key !== 'Escape' || !collectState) return;
+    // 勾选态下先退勾选态，再按一次才收面板 —— 免得一按 Esc 把挑了一半的整个面板关掉
+    if (collectPick) { collectPick = null; renderCollectList($('collectSearch').value); return; }
+    closeCollectPanel();
   });
 }
 
@@ -2334,7 +2448,7 @@ function renderFavorites() {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayFav">${ic('i-play')}<span>播放全部</span></button>
-        <button class="${picking ? 'primary-btn' : 'ghost-btn'}" id="btnDownloadFav">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
+        <button class="ghost-btn${picking ? ' on' : ''}" id="btnDownloadFav">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
       </div>
     </div>
     ${picking ? dlBarHTML() : ''}
@@ -2379,7 +2493,7 @@ function renderPlaylist(playlistId) {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayPl">${ic('i-play')}<span>播放全部</span></button>
-        <button class="${picking ? 'primary-btn' : 'ghost-btn'}" id="btnDownloadPl">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
+        <button class="ghost-btn${picking ? ' on' : ''}" id="btnDownloadPl">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
         <button class="ghost-btn" id="btnRenamePl">重命名</button>
         <button class="ghost-btn" id="btnDelPl">删除歌单</button>
       </div>
@@ -3169,6 +3283,7 @@ async function enqueueDownloads(tracks, opts = {}) {
   toast(parts.length ? parts.join(' · ') : '没有新的可下载曲目');
 
   if (dlPick) dlPick = null;                     // 批量勾选干完了 → 退出勾选模式
+  if (collectPick) collectPick = null;           // 选集面板的勾选态同理
   await refreshDownloads();
   if (jump && res.added) currentView = 'downloads';
   renderAll();
@@ -3374,6 +3489,7 @@ function renderDownloads() {
       <div class="block-actions">
         <button class="ghost-btn" id="btnDlOpenDir"${dlDir ? '' : ' disabled'}>${ic('i-folder')}<span>打开下载文件夹</span></button>
         <button class="ghost-btn" id="btnDlClearDone"${st.done ? '' : ' disabled'}>清空已完成</button>
+        <button class="ghost-btn" id="btnDlClearAll"${dlTasks.length ? '' : ' disabled'}>全部删除</button>
       </div>
     </div>
 
@@ -3414,10 +3530,11 @@ function patchDlProgress(list) {
 /* ---------------- 任务操作 ---------------- */
 
 /** 「删除记录」确认框。★ 默认**不勾**"同时删磁盘文件"——
- *  删记录可逆（重下就有），删文件不可逆，所以危险的那一半必须用户主动勾。 */
+ *  删记录可逆（重下就有），删文件不可逆，所以危险的那一半必须用户主动勾。
+ *  ★ v2.8.0：文案写明"本地歌曲库里那条也会一起走" —— 否则用户会以为绿勾还挂着是没删掉。 */
 function askRemoveTask(title) {
   const p = openPrompt('删除下载记录',
-    `<div class="pl-empty" style="padding:0">「${esc(title || '这首歌')}」会从下载列表里移掉。</div>` +
+    `<div class="pl-empty" style="padding:0">「${esc(title || '这首歌')}」会从下载列表和本地歌曲库里移掉。</div>` +
     `<label class="dl-del-chk"><input type="checkbox" id="promptDelFile" /><span>同时删掉磁盘上的文件（不可恢复）</span></label>`,
     `<button class="ghost-btn" id="promptCancel">取消</button>` +
     `<button class="primary-btn" id="promptOk">删除</button>`);
@@ -3429,21 +3546,54 @@ function askRemoveTask(title) {
   return p;
 }
 
+/**
+ * 把本地库里指向这个任务文件的那条记录删掉（真删了东西就落盘）。
+ * ★ 这是"绿勾消失"的关键：`rebuildDlKeys()` 会同时看本地库和"已完成"的任务，
+ *   只删任务、不清本地库的话，绿勾会一直挂着 —— 真机反馈的就是这个。
+ * @returns {boolean} 是否真的删掉了一条
+ */
+function dropLocalEntryOf(t) {
+  if (!t || !t.file || !dlDir) return false;
+  const full = joinPath(dlDir, t.file);
+  const before = (DB.local || []).length;
+  DB.local = (DB.local || []).filter((e) => !e || e.path !== full);
+  if (DB.local.length === before) return false;
+  rebuildDlKeys();
+  persistLater();
+  return true;
+}
+
 async function dlRemoveOne(t) {
   const res = await askRemoveTask(t.title);
   if (!res) return;                       // 用户取消 / 直接关掉了弹窗
   try { await api('downloadRemove', [t.id], !!res.deleteFile); }
   catch (err) { toast(err.message || '删除失败'); return; }
 
-  // 连磁盘文件一起删了 → 本地库里那条也该走，否则「本地歌曲」会留一条失效项
-  if (res.deleteFile && t.file && dlDir) {
-    const full = joinPath(dlDir, t.file);
-    const before = (DB.local || []).length;
-    DB.local = (DB.local || []).filter((e) => !e || e.path !== full);
-    if (DB.local.length !== before) { rebuildDlKeys(); persistLater(); }
-  }
+  // ★ 不管勾没勾"同时删磁盘文件"，本地库那条都要走：
+  //   不勾 → 文件留在磁盘上，但它不该再算"已下载"；勾 → 文件也没了，更不该算。
+  dropLocalEntryOf(t);
   await refreshDownloads();
   renderAll();
+}
+
+/**
+ * 「全部删除」：清空下载列表（v2.8.0，真机反馈"下载管理里没有全部删除的功能"）。
+ * ★ 规矩和单条删除完全一致：默认只清记录（本地库那条也一起走，绿勾才会消失），
+ *   勾上"同时删磁盘文件"才真去删文件。
+ * ★ 正在下载的会先被中止 —— 主进程 `downloader.remove()` 里会 abort 掉运行中的请求。
+ */
+async function dlClearAll() {
+  if (!dlTasks.length) return;
+  const ids = dlTasks.map((t) => t.id);
+  const res = await askRemoveTask(`全部 ${ids.length} 条下载记录`);
+  if (!res) return;
+  try { await api('downloadRemove', ids, !!res.deleteFile); }
+  catch (err) { toast(err.message || '删除失败'); return; }
+
+  for (const t of dlTasks) dropLocalEntryOf(t);
+  await refreshDownloads();
+  renderAll();
+  toast(`已删除 ${ids.length} 条下载记录`);
 }
 
 async function dlClearFinished() {
@@ -4736,6 +4886,7 @@ function bindEvents() {
       return;
     }
     if (id === 'btnDlClearDone') { dlClearFinished(); return; }
+    if (id === 'btnDlClearAll') { dlClearAll(); return; }
     if (id === 'btnDlPauseAll') { dlPauseAll(); return; }
     if (id === 'btnDlRetryAll') { dlRetryAll(); return; }
     if (id === 'btnDlSetDir') { showSettingsTab('download'); return; }

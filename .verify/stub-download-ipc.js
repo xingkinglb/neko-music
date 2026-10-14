@@ -56,11 +56,29 @@ module.exports = function stubDownloadIpc(opts = {}) {
     return { ok: true, data: { added: list.length, skipped: 0, duplicates: 0, needDir: false } };
   });
   ipcMain.handle('download:setDir', (_e, d) => { calls.setDir.push(d); return { ok: true, data: true }; });
-  ipcMain.handle('download:remove', (_e, ids, del) => { calls.remove.push([ids, del]); return { ok: true, data: true }; });
+
+  /* ★ 删除类必须**真的改任务表**：回个 true 就完事的话，界面删完再拉一次列表
+     拿到的还是原来那两条 —— "删掉之后绿勾消失"这类断言就永远测不出来（假通过）。 */
+  ipcMain.handle('download:remove', (_e, ids, del) => {
+    const list = Array.isArray(ids) ? ids : [ids];
+    calls.remove.push([list, del]);
+    for (const id of list) {
+      const i = tasks.findIndex((t) => t.id === id);
+      if (i >= 0) tasks.splice(i, 1);
+    }
+    return { ok: true, data: true };
+  });
+  ipcMain.handle('download:clearFinished', () => {
+    let removed = 0;
+    for (let i = tasks.length - 1; i >= 0; i--) {
+      if (tasks[i].status === 'done') { tasks.splice(i, 1); removed++; }
+    }
+    return { ok: true, data: { removed } };
+  });
 
   // 其余都是"发指令"型：离屏测试不关心主进程真去下什么，回个成功即可。
   ['download:pause', 'download:resume', 'download:retry', 'download:cancel',
-   'download:clearFinished', 'download:openDir', 'download:reveal'].forEach((ch) => {
+   'download:openDir', 'download:reveal'].forEach((ch) => {
     ipcMain.handle(ch, () => ({ ok: true, data: true }));
   });
 

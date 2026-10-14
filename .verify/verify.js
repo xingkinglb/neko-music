@@ -853,9 +853,20 @@ console.log('\n[27] 合集 / 分P 展开：徽章入口 + 右侧抽屉 + 点空�
   if (/function queueCollection\(/.test(appjs)) err('v2.4.0 删掉的 queueCollection 还在（按钮没了它就是死代码）');
   else ok('整段入队由"点行 / 播放全部"承担（queueCollection 已删）');
 
-  if (!/e\.key === 'Escape' && collectState/.test(appjs) || !/e\.target\.id === 'collectMask'/.test(appjs))
-    err('合集面板没有"点空白 / Esc 收起"');
-  else ok('合集面板可点空白或按 Esc 收起（与歌词浮层一致）');
+  /* 合集面板的两种收起方式。
+     ★ 断言"性质"而不是"写法"：原来这里写死了 `e.key === 'Escape' && collectState`，
+       v2.8.0 给 Esc 加了一层"勾选态下先退勾选态、再按一次才收面板"，写法一变就误报。
+       现在只要求 bindCollect 里那个 keydown 处理器**最终会调 closeCollectPanel()**。 */
+  {
+    const bi = appjs.indexOf('function bindCollect(');
+    const body = bi < 0 ? '' : appjs.slice(bi, bi + 6000);
+    const ki = body.indexOf("addEventListener('keydown'");
+    const kb = ki < 0 ? '' : body.slice(ki, ki + 400);
+    const hasEsc = /'Escape'/.test(kb) && /closeCollectPanel\(\)/.test(kb);
+    const hasMask = /e\.target\.id === 'collectMask'/.test(body);
+    if (!hasEsc || !hasMask) err('合集面板没有"点空白 / Esc 收起"');
+    else ok('合集面板可点空白或按 Esc 收起（与歌词浮层一致）');
+  }
 
   if (!/^\s*bindCollect\(\);$/m.test(appjs)) err('启动时没有调用 bindCollect()');
   else ok('启动时绑定合集面板');
@@ -2964,6 +2975,65 @@ console.log('\n[56] 下载与本地歌曲（v2.8.0）：');
   const t19 = fs.existsSync(p19) ? fs.readFileSync(p19, 'utf8') : '';
   if (/白名单外/.test(t19)) ok('test-round19 覆盖了"白名单外必须 403"这条头号断言');
   else err('test-round19 没有把"白名单外必须 403"写成断言');
+
+  /* ---- ⑩ 真机反馈修的五处（v2.8.0 修订）---- */
+
+  // ① 收起的整页歌词不能接鼠标 —— 它的「桌面歌词」按钮正好压在工具栏「批量下载」上面
+  {
+    const lhb = (css.match(/\.lyric-head-btn\s*\{[^}]*\}/) || [''])[0];
+    const scoped = /\.lyric-overlay\.show\s+\.lyric-head-btn\s*\{[^}]*pointer-events:\s*auto/.test(css);
+    if (/pointer-events:\s*auto/.test(lhb))
+      err('.lyric-head-btn 又写了无条件的 pointer-events: auto —— 收起歌词页后它会顶掉父级的 none，把工具栏最右侧的按钮盖住');
+    else if (!scoped)
+      err('没有 .lyric-overlay.show .lyric-head-btn { pointer-events: auto } —— 展开时那个「桌面歌词」按钮会点不动');
+    else ok('★ 歌词浮层收起时不接鼠标（pointer-events: auto 只在 .lyric-overlay.show 下放行）');
+  }
+
+  // ② 勾选态按钮不变形：换的是配色，不是盒子
+  {
+    const pb = (css.match(/\.primary-btn\s*\{[^}]*\}/) || [''])[0];
+    if (!/display:\s*inline-flex/.test(pb))
+      err('.primary-btn 没有 display: inline-flex —— 里面放图标时（.ic 是 display:block）图标会独占一行，按钮从 32px 撑到 47px');
+    else ok('★ .primary-btn 也是 inline-flex（带图标的按钮不会变成两行）');
+    if (!/\.ghost-btn\.on\s*\{/.test(css)) err('没有 .ghost-btn.on —— 勾选态只能切到 .primary-btn，盒子会变');
+    else ok('有 .ghost-btn.on（勾选态只换配色、不动盒子）');
+    if (!/ghost-btn\$\{picking \? ' on' : ''\}/.test(appjs))
+      err('工具条那两个「批量下载」按钮没在用 ghost-btn + on');
+    else ok('工具条的「批量下载」用 ghost-btn + on 表示勾选态（不再切 primary-btn）');
+  }
+
+  // ③ 选集面板的「批量下载」进勾选态，不再"点一下直接下全部"
+  {
+    const miss = ['btnCollectPickAll', 'btnCollectPickNone', 'btnCollectPickDo']
+      .filter((k) => !new RegExp('id="' + k + '"').test(appjs));
+    if (miss.length) err('选集勾选工具条缺按钮：' + miss.join(' '));
+    else ok('★ 选集面板有勾选工具条（全选 / 清空 / 下载选中的 N 首）');
+    if (!/id="collectPickBar"/.test(html)) err('index.html 里没有 #collectPickBar');
+    else ok('index.html 有 #collectPickBar（独立一行，不跟搜索框抢那 368px）');
+    if (!/function collectPickToggle\(/.test(appjs) || !/function toggleCollectPick\(/.test(appjs))
+      err('app.js 缺 collectPickToggle / toggleCollectPick');
+    else ok('app.js 有 collectPick 勾选态（点行 = 勾选）');
+    if (!/btnDownloadCollect'\)\.addEventListener\('click', toggleCollectPick\)/.test(appjs))
+      err('合集面板的「批量下载」没有改成进勾选态');
+    else ok('合集面板的「批量下载」→ toggleCollectPick');
+    if (/const on = enabledEntries\(collectState, collectState\.entries\);[\s\S]{0,160}enqueueDownloads\(on/.test(appjs))
+      err('合集面板又变回"点一下直接下载启用中的全部"了');
+    else ok('★ 反向断言：合集面板不再"点一下直接下全部"');
+  }
+
+  // ④ 下载管理有「全部删除」
+  if (!/id="btnDlClearAll"/.test(appjs) || !/function dlClearAll\(/.test(appjs))
+    err('下载管理没有「全部删除」（真机反馈）');
+  else ok('★ 下载管理有「全部删除」');
+  if (!/id === 'btnDlClearAll'/.test(appjs)) err('「全部删除」没绑点击事件');
+  else ok('「全部删除」绑了点击事件');
+
+  // ⑤ 删任务要连本地库那条一起清 —— 否则「已下载」绿勾一直挂着
+  if (!/function dropLocalEntryOf\(/.test(appjs)) err('app.js 没有 dropLocalEntryOf');
+  else ok('★ 有 dropLocalEntryOf（删任务时清掉本地库里那条）');
+  if (!/dropLocalEntryOf\(t\)/.test(appjs))
+    err('dlRemoveOne / dlClearAll 没有调 dropLocalEntryOf —— 删完任务绿勾不会消失');
+  else ok('★ 单条删除 / 全部删除都会清本地库记录（绿勾据此消失）');
 }
 
 if (fail === 0) console.log('\n全部静态自检通过 ✅（共 56 大类检查）');
