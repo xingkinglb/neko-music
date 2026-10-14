@@ -30,6 +30,9 @@ contextBridge.exposeInMainWorld('neko', {
   // 读取收藏夹里的视频
   favMedias: (mediaId, pn) => ipcRenderer.invoke('bili:favMedias', mediaId, pn),
 
+  // v2.6.0：认出"你是谁"（uid / 昵称 / 头像）—— 「导入我的收藏夹」用
+  myInfo: () => ipcRenderer.invoke('bili:myInfo'),
+
   // 某个 UP 主公开的投稿视频（点作者名 → 看他的全部视频）
   upVideos: (mid, pn) => ipcRenderer.invoke('bili:upVideos', mid, pn),
 

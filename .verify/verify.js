@@ -2459,5 +2459,152 @@ console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
   } else ok('有 .verify/test-keys.js（离屏真派发键盘事件验证）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 51 大类检查）');
+/* ============================================================
+   [52] 导入我的 B 站收藏夹（v2.6.0）
+   ------------------------------------------------------------
+   这一版的新东西集中在一条链路上：认人（myinfo）→ 列收藏夹 → 挑视频 → 建歌单。
+   链子任何一环断了都是"点了没反应"或白屏，所以逐环都钉住。
+   ============================================================ */
+console.log('\n[52] 导入我的 B 站收藏夹（v2.6.0）：');
+{
+  const bilijs = read('src/bilibili.js');
+
+  /* ---- ① 后端：认人 ---- */
+  if (!/async function getMyInfo\(/.test(bilijs)) err('bilibili.js 没有 getMyInfo —— 认不出"你是谁"');
+  else ok('bilibili.js 有 getMyInfo（拿 uid / 昵称）');
+  if (!/space\/myinfo/.test(bilijs)) err('getMyInfo 没打 /x/space/myinfo 这个接口');
+  else ok('getMyInfo 打的是 /x/space/myinfo');
+  if (!/getMyInfo,/.test(bilijs)) err('getMyInfo 没有导出 —— 主进程 require 不到');
+  else ok('getMyInfo 已导出');
+
+  /* ---- ② 没填 Cookie 必须提前退出（别白跑一次请求） ---- */
+  const myinfoBody = (bilijs.match(/async function getMyInfo\(\)[\s\S]*?\n}/) || [''])[0];
+  if (!/hasLoginCookie\(\)/.test(myinfoBody)) {
+    err('getMyInfo 开头没查 hasLoginCookie —— 没填 Cookie 时会白跑一次请求、白挨一次限流');
+  } else ok('getMyInfo 没填 Cookie 时提前退出（不白跑请求）');
+  if (!/reason\s*=\s*'no-cookie'/.test(myinfoBody)) err('getMyInfo 没把"没填 Cookie"标成 reason:no-cookie');
+  else ok('getMyInfo 会抛 reason:"no-cookie"');
+  if (!/cookie-expired/.test(myinfoBody)) err('getMyInfo 没把 -101 映射成 cookie-expired（界面就分不清"没填"和"过期了"）');
+  else ok('getMyInfo 把 -101 映射成 reason:"cookie-expired"');
+
+  /* ---- ③ 错误码要挂成字段（别再靠字符串匹配 "-101"） ---- */
+  if (!/e\.code\s*=\s*json\.code/.test(bilijs)) {
+    err('requestJSON 没把 B 站的 code 挂到 error 上 —— 界面只能去匹配字符串，改一次文案就失效');
+  } else ok('requestJSON 把原始 code 挂成 e.code');
+
+  /* ---- ④ 收藏夹要带总数（卡片「86 个视频」+ 分页都靠它） ---- */
+  const favBody = (bilijs.match(/async function getFavMedias\([\s\S]*?\n}/) || [''])[0];
+  if (!/total:/.test(favBody)) err('getFavMedias 没返回 total —— 卡片显示不出条数、分页算不出总页数');
+  else ok('getFavMedias 带出 total（media_count）');
+  if (!/private:\s*f\.attr\s*===\s*1/.test(bilijs)) err('getFavFolders 没标出私密收藏夹');
+  else ok('getFavFolders 标出了私密收藏夹（attr === 1）');
+
+  /* ---- ⑤ IPC 链路：main 注册 → preload 暴露 → 界面用 api() 调 ---- */
+  if (!/handle\('bili:myInfo'/.test(mainjs)) err('main.js 没注册 bili:myInfo');
+  else ok('main.js 注册了 bili:myInfo');
+  if (!/myInfo:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('bili:myInfo'\)/.test(preload)) {
+    err('preload.js 没暴露 myInfo');
+  } else ok('preload.js 暴露了 myInfo');
+  if (!/api\('myInfo'\)/.test(appjs)) err('app.js 没通过 api(\'myInfo\') 调用（可能绕过了解包那层）');
+  else ok('app.js 走 api(\'myInfo\') 调用');
+  // ★ 没填 Cookie 时界面**不能**去调 myInfo（后端那道闸是双保险，第一道在界面）
+  if (!/api\('hasCookie'\)/.test(appjs)) {
+    err('app.js 没有先问 hasCookie —— 没填 Cookie 时还会去打一次 myinfo');
+  } else ok('app.js 先问 hasCookie 再决定要不要打 myinfo');
+
+  /* ---- ⑥ 入口与图标 ---- */
+  if (!/<symbol id="i-import"/.test(html)) err('index.html 的 sprite 里没有 #i-import 图标');
+  else ok('有 #i-import 图标');
+  if (!/id="btnImportMine"/.test(html)) err('侧栏没有 #btnImportMine 入口按钮');
+  else ok('侧栏有 #btnImportMine 入口按钮');
+  if (!/use href="#i-import"/.test(html)) err('#btnImportMine 没用上 #i-import 图标');
+  else ok('#btnImportMine 用的是 #i-import 图标');
+  if (!/getElementById\('btnImportMine'\)|\$\('btnImportMine'\)/.test(appjs) && !/btnImportMine'\)\.addEventListener/.test(appjs)) {
+    err('#btnImportMine 没绑点击事件 —— 点了没反应');
+  } else ok('#btnImportMine 绑上了点击事件');
+
+  /* ---- ⑦ ★★ 核心：选择集必须是 Map，且跨收藏夹累积 ---- */
+  if (!/selected:\s*new Map\(\)/.test(appjs)) {
+    err('★ impState.selected 不是 Map —— 同一个视频出现在两个收藏夹里会被算两次');
+  } else ok('★ 选择集是 Map（用 bvid 当键，天然去重）');
+  if (!/selected\.has\(track\.bvid\)/.test(appjs)) {
+    err('★ 行的勾选状态没有"从选择集反查" —— 换收藏夹 / 翻页回来勾就丢了');
+  } else ok('★ 行的勾选状态从选择集反查（翻页 / 换收藏夹都不丢）');
+  // 返回键不许顺手清空选择 —— 这是"跨收藏夹累积"能成立的前提
+  const backBody = (appjs.match(/function impBack\(\)[\s\S]*?\n}/) || [''])[0];
+  if (/selected\.clear\(\)/.test(backBody)) {
+    err('★ impBack 里清了选择集 —— 跨收藏夹累积会当场失效（返回一次就白挑了）');
+  } else ok('★ 返回不清空选择（跨收藏夹累积的前提）');
+  // 只有"导入成功"和"清空选择"两处能清
+  const clearCount = (appjs.match(/selected\.clear\(\)/g) || []).length;
+  if (clearCount !== 2) {
+    err(`★ 清空选择集的地方有 ${clearCount} 处，应该正好 2 处（导入成功 + 清空选择）`);
+  } else ok('★ 只有 2 处会清空选择集（导入成功 / 清空选择）');
+
+  /* ---- ⑧ 四屏渲染与按钮都在 ---- */
+  ['openImportMine', 'renderImportMine', 'renderImpHome', 'renderImpFolders',
+   'renderImpList', 'loadImpFolders', 'loadImpList', 'impToggle', 'impClear',
+   'impWholeFolder', 'importPicked'].forEach((fn) => {
+    if (!new RegExp('function ' + fn + '\\(').test(appjs)) err(`app.js 缺少 ${fn}()`);
+  });
+  ok('导入页的渲染 / 加载 / 选择 / 落地函数都在');
+  if (!/currentView === 'importMine'/.test(appjs)) err('renderAll() 里没有 importMine 分支 —— 这页永远画不出来');
+  else ok('renderAll() 里有 importMine 分支');
+  ['btnImpBack', 'btnImpUp', 'btnImpFav', 'btnImpPickAll', 'btnImpPickNone',
+   'btnImpClear', 'btnImpDo', 'btnImpWholeUp'].forEach((id) => {
+    if (!new RegExp(`id === '${id}'`).test(appjs)) err(`点击代理里没有 ${id} 的处理`);
+  });
+  ok('八个导入页按钮都接进了点击代理');
+
+  /* ---- ⑨ 复用 v2.5.0 的分页条（别再抄一份） ---- */
+  if (!/paginationHTML\(page, totalPages\)/.test(appjs)) {
+    err('导入页没有复用 paginationHTML —— 分页条抄成两份，以后改一处漏一处');
+  } else ok('导入页复用了 v2.5.0 的 paginationHTML');
+  // 分页条的点击要按"当前在哪一页"分流，别让 UP 主页和导入页互相踩
+  if (!/currentView === 'importMine'[\s\S]{0,120}loadImpList\(p\)/.test(appjs)) {
+    err('分页条的点击没有按 importMine 分流 —— 在导入页点页码会去翻 UP 主页');
+  } else ok('分页条点击按页面分流（UP 主页 / 导入页各翻各的）');
+
+  /* ---- ⑩ 挑歌行的三个约束 ---- */
+  if (!/opts\.pick/.test(appjs)) err('trackRow 没有 opts.pick 分支 —— 行左边长不出复选框');
+  else ok('trackRow 支持挑歌模式（opts.pick）');
+  if (!/class="pick/.test(appjs)) err('挑歌行没有画 .pick 复选框');
+  else ok('挑歌行画出了 .pick 复选框');
+  if (!/closest\('\.track\.pickable'\)/.test(appjs)) {
+    err('没有拦下"点挑歌行" —— 会一路漏到"点整行 = 播放"，挑歌时点一下就把歌播了');
+  } else ok('挑歌时点整行 = 勾选（不会误播）');
+  // 反向断言：徽章那列在 pickable 里不存在，多画一个就把网格挤乱
+  if (!/showBadge = !opts\.pick/.test(appjs)) {
+    err('挑歌模式下还会画「选集 N」徽章 —— pickable 只定义四列，会被挤乱');
+  } else ok('挑歌模式下不画徽章（四列网格对得上）');
+
+  /* ---- ⑪ 卡片上的「整个导入」要抢在"点卡片进收藏夹"之前 ---- */
+  const wholeIdx = appjs.indexOf("closest('[data-imp-whole]')");
+  const cardIdx = appjs.indexOf("closest('[data-imp-folder]')");
+  if (wholeIdx < 0 || cardIdx < 0) err('收藏夹卡片的点击没接');
+  else if (wholeIdx > cardIdx) {
+    err('★「整个导入」的判断排在"点卡片"之后 —— 点它会顺带进收藏夹');
+  } else ok('「整个导入」抢在"点卡片进收藏夹"之前判（不会顺带跳走）');
+
+  /* ---- ⑫ CSS ---- */
+  ['.imp-bar', '.src-card', '.c-pick', '.c-sel', '.pick', '.track.pickable'].forEach((sel) => {
+    if (!new RegExp(sel.replace(/[.]/g, '\\.') + '[\\s,{]').test(css)) err(`style.css 少了 ${sel} 的样式`);
+  });
+  ok('导入页的样式都在（工具条 / 来源卡 / 整夹按钮 / 角标 / 复选框 / 挑歌行）');
+  if (!/\.track\.pickable\s+\.ops\s*\{\s*display:\s*none/.test(css)) {
+    err('挑歌行没有把右侧那排操作按钮藏掉 —— 挑歌时它们是干扰，还会抢走点击');
+  } else ok('挑歌行藏掉了右侧那排操作按钮');
+
+  /* ---- ⑬ 边界文案：没填 Cookie 要有引导，不能白屏 ---- */
+  if (!/impBlockedHTML/.test(appjs) || !/设置 → B 站/.test(appjs)) {
+    err('没填 Cookie 时没有给出"去设置填 Cookie"的引导');
+  } else ok('没填 Cookie / 过期时都有整页引导（不留白屏）');
+
+  /* ---- ⑭ 必须有离屏实测 ---- */
+  if (!fs.existsSync(path.join(ROOT, '.verify', 'test-round15.js'))) {
+    err('少了 .verify/test-round15.js —— "跨收藏夹累积选择"这种必须真点一次才算数');
+  } else ok('有 .verify/test-round15.js（离屏真点，含跨收藏夹累积）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 52 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

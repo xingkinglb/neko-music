@@ -201,6 +201,13 @@
       <path d="M6.4 6.6 7.3 19a1.6 1.6 0 0 0 1.6 1.5h6.2A1.6 1.6 0 0 0 16.7 19l.9-12.4"/>
       <path d="M10.4 10.4v6.2M13.6 10.4v6.2"/>
     </symbol>
+
+    <!-- ---- 导入（v2.6.0）：箭头落进托盘，表示"从 B 站导进来" ---- -->
+    <symbol id="i-import" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.6v10.2"/>
+      <path d="M7.9 9.8 12 13.9l4.1-4.1"/>
+      <path d="M4.2 15.6v2.6a2 2 0 0 0 2 2h11.6a2 2 0 0 0 2-2v-2.6"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -268,7 +275,10 @@
     <div class="playlist-section">
       <div class="section-head">
         <span>我的歌单</span>
-        <button class="mini-btn" id="btnNewPlaylist" title="新建歌单"><svg class="ic"><use href="#i-plus"/></svg></button>
+        <span class="section-head-actions">
+          <button class="mini-btn" id="btnImportMine" title="导入我的 B 站收藏夹"><svg class="ic"><use href="#i-import"/></svg></button>
+          <button class="mini-btn" id="btnNewPlaylist" title="新建歌单"><svg class="ic"><use href="#i-plus"/></svg></button>
+        </span>
       </div>
       <ul class="playlist-list" id="playlistList"></ul>
     </div>

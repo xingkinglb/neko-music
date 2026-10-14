@@ -400,6 +400,9 @@ body.glass-prebake.has-imgbg .player {
 }
 .mini-btn .ic { width: 12px; height: 12px; }
 .mini-btn:hover { background: var(--accent); color: #fff; }
+/* 「我的歌单」右侧现在有两个小按钮（导入 / 新建），包一层才不会
+   被 .section-head 的 space-between 撑到两头去 */
+.section-head-actions { display: inline-flex; align-items: center; gap: 6px; }
 
 .playlist-list { overflow-y: auto; flex: 1; padding-right: 2px; }
 .playlist-row {
@@ -499,6 +502,9 @@ body.glass-prebake.has-imgbg .player {
 }
 .ghost-btn .ic { width: 14px; height: 14px; }
 .ghost-btn:hover { background: var(--panel-2); color: #fff; border-color: rgb(var(--accent-rgb) / 0.45); }
+/* 置灰的次要按钮（v2.6.0：导入页「清空选择」在没选东西时） */
+.ghost-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ghost-btn:disabled:hover { background: var(--panel); color: var(--text-2); border-color: var(--line); }
 
 /* ---------- 分页条（v2.5.0，UP 主页用） ----------
    [← 上一页] [1] [2] [3] … [28] [下一页 →]，居中挂在列表下方。
@@ -656,6 +662,8 @@ body.perf-idle .spinner {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 11px;
   cursor: pointer; transition: transform 0.18s, background 0.18s, border-color 0.18s;
+  /* v2.6.0：卡片右下角的「整个导入 / 已选 N」是绝对定位挂上来的 */
+  position: relative;
 }
 .card:hover { transform: translateY(-3px); background: var(--panel-2); border-color: rgb(var(--accent-rgb) / 0.4); }
 .card .thumb {
@@ -668,6 +676,91 @@ body.perf-idle .spinner {
   overflow: hidden;
 }
 .card .c-sub { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+
+/* ============================================================
+   v2.6.0「导入我的 B 站收藏夹」
+   ------------------------------------------------------------
+   一个整页、三步（选来源 → 选收藏夹 → 挑视频），共用一套"已选 N 个"工具条。
+   挑视频那一屏的行就是普通的 .track，只是多一个复选框、并把 .ops 藏掉。
+   ============================================================ */
+
+/* ---------- 来源选择：两张大卡片 ---------- */
+.src-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+.src-card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 20px 18px;
+  cursor: pointer; transition: transform 0.18s, background 0.18s, border-color 0.18s;
+  display: flex; align-items: center; gap: 14px;
+}
+.src-card:hover { transform: translateY(-3px); background: var(--panel-2); border-color: rgb(var(--accent-rgb) / 0.4); }
+.src-card .sc-ic {
+  width: 42px; height: 42px; border-radius: 12px; flex: 0 0 auto;
+  display: flex; align-items: center; justify-content: center;
+  background: rgb(var(--accent-rgb) / 0.14); color: var(--accent);
+}
+.src-card .sc-ic .ic { width: 21px; height: 21px; }
+.src-card .sc-t { font-size: 14.5px; font-weight: 600; }
+.src-card .sc-s { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+/* ---------- 顶部「已选 N 个 · 清空选择 · 导入选中的 N 个」工具条 ---------- */
+.imp-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px; padding: 9px 13px; margin-bottom: 14px;
+}
+.imp-count { font-size: 12.5px; color: var(--muted); }
+.imp-count b { color: var(--accent); font-size: 14px; font-variant-numeric: tabular-nums; }
+.imp-bar-actions { display: inline-flex; align-items: center; gap: 8px; }
+/* 已选 0 个时「导入」置灰，点不动 */
+.primary-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.primary-btn:disabled:hover { opacity: 0.4; }
+
+/* ---------- 收藏夹卡片右下角：整个导入 / 已选 N ---------- */
+.c-foot { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.c-sel {
+  margin-right: auto; font-size: 11.5px; font-weight: 600;
+  color: var(--accent); font-variant-numeric: tabular-nums;
+}
+.c-pick {
+  background: var(--panel-2); border: 1px solid var(--line);
+  color: var(--text-2); font-family: inherit; font-size: 11.5px;
+  padding: 4px 9px; border-radius: 7px; transition: all 0.16s;
+}
+.c-pick:hover { background: var(--accent); color: #fff; border-color: transparent; }
+/* 空收藏夹：「整个导入」点不动 */
+.c-pick:disabled { opacity: 0.4; cursor: not-allowed; }
+.c-pick:disabled:hover { background: var(--panel-2); color: var(--text-2); border-color: var(--line); }
+/* 已经整个选上了 → 按钮变成"取消整个收藏夹" */
+.c-pick.on { background: rgb(var(--accent-rgb) / 0.16); color: var(--accent); border-color: rgb(var(--accent-rgb) / 0.45); }
+.c-pick.on:hover { background: var(--accent); color: #fff; }
+/* 私密收藏夹的小标（本人登录可见，不是错误） */
+.c-priv {
+  display: inline-block; margin-left: 6px; padding: 1px 6px;
+  font-size: 10.5px; border-radius: 5px; vertical-align: 1px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+}
+
+/* ---------- 挑视频那一屏的行 ---------- */
+/* 四列：复选框 / 封面 / 信息 / 时长。序号和右侧那排操作按钮都让位 ——
+   挑歌时"收藏 / 加歌单 / 详情"是干扰，而且点整行要留给"勾选"。
+   ★ 这里是"改列数"而不是"多插一列"：序号列整个拿掉，复选框顶上去。 */
+.track.pickable { grid-template-columns: 26px 56px 1fr auto; }
+.track.pickable .idx { display: none; }
+.track.pickable .ops { display: none; }
+/* 已经勾上的那一行，整行也带一点主题色，扫一眼就知道选了哪些 */
+.track.pickable.picked { background: rgb(var(--accent-rgb) / 0.1); }
+
+/* 复选框：自己画（不用系统控件），勾上就是主题色实心 + 白勾 */
+.pick {
+  width: 17px; height: 17px; border-radius: 5px; flex: 0 0 auto;
+  border: 1.6px solid var(--line); background: var(--panel);
+  display: flex; align-items: center; justify-content: center;
+  color: transparent; transition: all 0.15s;
+}
+.pick .ic { width: 11px; height: 11px; }
+.pick.on { background: var(--accent); border-color: transparent; color: #fff; }
+.track.pickable:hover .pick:not(.on) { border-color: rgb(var(--accent-rgb) / 0.5); }
 
 /* ---------- 空状态 / 加载 / 错误 ---------- */
 .empty {

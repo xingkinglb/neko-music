@@ -231,6 +231,11 @@ async function requestJSON(url, options = {}) {
         const limited = [-101, -412, -509].includes(json.code);
         const e = new Error(`B 站返回错误 ${json.code}：${json.message}`);
         e.retryable = limited;   // 限流类的错误，等一会儿重试往往就好了
+        // ★ v2.6.0：把 B 站的原始 code 一起挂出来。
+        //   以前只有消息字符串里含 "-101"，调用方要识别就得去匹配字符串，太脆
+        //   （改一次文案就失效）。挂成字段之后，getMyInfo 能直接把 -101 映射成
+        //   reason:'cookie-expired'，界面就能说"Cookie 过期了，重新填一次"。
+        e.code = json.code;
         throw e;
       }
       return json;
@@ -432,6 +437,46 @@ async function getAudioUrl(bvid, cid) {
 }
 
 /**
+ * ★ v2.6.0：认出"你是谁" —— 拿自己的 uid / 昵称 / 头像。
+ *
+ * 为什么需要它：「导入我的收藏夹」得先知道自己是谁，才能去列**自己的**收藏夹
+ * （包括私密收藏夹 —— 那是本人登录才看得见的，光有 uid 也拉不到）。
+ * 这个接口认证方式就是 SESSDATA，所以只要用户填过 Cookie 就能认出来。
+ *
+ * 两种失败要分开报，界面才能给不同的引导：
+ *   · 没填 Cookie      → reason:'no-cookie'（**提前退出，不去白跑一次请求**，
+ *                        和字幕那条一样的规矩：省一次被限流的机会）
+ *   · Cookie 过期/失效 → reason:'cookie-expired'（B 站回 -101）
+ *
+ * @returns {Promise<{mid:number, name:string, face:string}>}
+ * @throws  {Error} 带 reason 字段
+ */
+async function getMyInfo() {
+  if (!hasLoginCookie()) {
+    const e = new Error('还没填 B 站 Cookie，认不出你是谁');
+    e.reason = 'no-cookie';
+    throw e;
+  }
+  try {
+    const json = await requestJSON('https://api.bilibili.com/x/space/myinfo');
+    const d = json.data || {};
+    return {
+      mid: d.mid,
+      name: d.name,
+      face: toHttps(d.face),
+    };
+  } catch (err) {
+    // -101 = 账号未登录（Cookie 过期 / 被挤下线）。单独标出来，界面好说人话。
+    if (err && err.code === -101) {
+      const e = new Error('Cookie 好像过期了，认不出你是谁');
+      e.reason = 'cookie-expired';
+      throw e;
+    }
+    throw err;
+  }
+}
+
+/**
  * 列出某个 UP 主的所有公开收藏夹
  */
 async function getFavFolders(mid) {
@@ -444,6 +489,9 @@ async function getFavFolders(mid) {
     title: f.title,
     count: f.media_count,
     cover: toHttps(f.cover),
+    // ★ v2.6.0：attr === 1 是私密收藏夹。看**自己**的收藏夹时会出现，
+    //   界面上挂一个「私密」小标（不是错误，本人登录就是看得见的）。
+    private: f.attr === 1,
   }));
 }
 
@@ -465,6 +513,11 @@ async function getFavMedias(mediaId, pn = 1) {
       duration: m.duration,
       page: 1,
     })),
+    // ★ v2.6.0：收藏夹里的总条数（`data.info.media_count`）。
+    //   界面靠它算总页数、卡片上显示「86 个视频」。
+    //   取不到就退化成 0，界面用 hasMore 兜底（不会算出"0 页"）。
+    total: (json.data && json.data.info && json.data.info.media_count) || 0,
+    pageSize: 30,
     hasMore: !!json.data.has_more,
   };
 }
@@ -795,6 +848,7 @@ module.exports = {
   getVideoInfo,
   searchVideos,
   getAudioUrl,
+  getMyInfo,
   getFavFolders,
   getFavMedias,
   getUpVideos,

@@ -929,8 +929,14 @@ function trackRow(track, i, opts = {}) {
   const playing = rowIsPlaying(track);
   const liked = isFav(track);
   // 长视频 / 疑似合集，在行上放一个「选集 N」小徽章当入口（详情见 expandCollection）
-  const showBadge = opts.expand !== false && maybeCollection(track);
+  // ★ v2.6.0：挑歌模式（opts.pick）下不画徽章 —— 那一行只留"勾选"一个交互，
+  //   而且徽章会多占一列、把网格挤乱（pickable 只定义了四列）。
+  const showBadge = !opts.pick && opts.expand !== false && maybeCollection(track);
   const badgeLabel = collectionBadgeLabel(track);
+
+  // v2.6.0：这一行勾没勾上，从**选择集**反查（不是行自己的状态）——
+  //   所以翻页 / 换收藏夹回来，勾选状态照样在，同一个视频也不会被算两次。
+  const picked = !!(opts.pick && impState && track.bvid && impState.selected.has(track.bvid));
 
   // 作者名：知道 UP 的 mid 就做成可点的（点开看这个 UP 的全部视频），
   // 老数据 / 收藏夹导入来的没有 mid，就还是普通文字，不会点出个空页面。
@@ -941,7 +947,8 @@ function trackRow(track, i, opts = {}) {
     : '';
 
   return `
-    <div class="track ${playing ? 'playing' : ''}" data-i="${i}">
+    <div class="track ${playing ? 'playing' : ''} ${opts.pick ? 'pickable' : ''} ${picked ? 'picked' : ''}" data-i="${i}">
+      ${opts.pick ? `<span class="pick${picked ? ' on' : ''}" role="checkbox" aria-checked="${picked ? 'true' : 'false'}" data-pick="${i}">${ic('i-check')}</span>` : ''}
       <div class="idx">${playing ? BARS_ICON : i + 1}</div>
       <div class="cover" style="background-image:url('${esc(track.cover || '')}')"></div>
       <div class="info">
@@ -2328,6 +2335,548 @@ async function loadFavItems(mediaId) {
   }
 }
 
+/* ============================================================
+   页面 7：导入我的 B 站收藏夹（v2.6.0）
+   ------------------------------------------------------------
+   侧栏「我的歌单」那一行、＋ 左边那个按钮进来的整页。三步：
+       选来源（我的投稿 / 我的收藏夹） → 选收藏夹 → 挑视频 → 起名落地
+   ★ 和上面「页面 6：导入收藏夹」的分工（两套都留着，别互相顶掉）：
+       · 页面 6（旧的）：**别人的**收藏夹 —— 粘一个 space.bilibili.com/xxx 链接，要手填 uid；
+       · 页面 7（这个）：**自己的**收藏夹 —— 点一下，myinfo 自动认出你是谁，
+         连私密收藏夹都列得出来（那是本人登录才看得见的）。
+   ============================================================ */
+
+/**
+ * 导入页的全部状态。
+ *
+ * ★★ 这个功能最容易做错的地方就是 `selected`：**它是跨收藏夹累积的**。
+ *    在收藏夹 A 里挑 3 个 → 回列表 → 进收藏夹 B 再挑 2 个 → 最后一起导入成**一个**歌单。
+ *
+ *    所以 `selected` 是独立于"当前在看哪一页 / 哪一个收藏夹"的一等状态，三条铁律：
+ *      1. **只有两件事会清空它**：导入成功之后、用户点「清空选择」。
+ *         翻页 / 换收藏夹 / 返回列表 / 回到来源选择 —— 一律不动它。
+ *      2. 进任何一个收藏夹时，行的勾选状态**从 selected 反查**（`selected.has(bvid)`）——
+ *         所以同一个视频出现在两个收藏夹里时，第二次进去它已经是勾上的，**不会重复计数**。
+ *      3. `from` 记着"这一条是从哪儿选的"，用来算收藏夹卡片上的「已选 N」角标。
+ *
+ *    为什么是 Map 而不是数组：B 站收藏夹里同一个视频可以同时存在于多个收藏夹，
+ *    用 bvid 当键**天然去重**；数组就得自己写一遍 find + 判重。
+ *
+ *    shape: { step, me, loading, error, errorReason, folders,
+ *             source, folderId, folderName, list, page, pageSize, total, selected }
+ *      step       : 'home' | 'folders' | 'list'
+ *      me         : { mid, name, face } —— myinfo 拿到的
+ *      errorReason: '' | 'no-cookie' | 'cookie-expired'（这两种要整页给引导）
+ *      source     : 'up'（我的投稿）| 'fav'（某个收藏夹）
+ *      selected   : Map<bvid, { track, from }>   from = 收藏夹 id 或 'up'
+ */
+let impState = null;
+
+/** 进入导入页（从侧栏按钮进来）—— 全新一次，选择集重新开一个 */
+function openImportMine() {
+  impState = {
+    step: 'home',
+    me: null,
+    loading: true,
+    error: '',
+    errorReason: '',
+    folders: [],
+    source: 'up',
+    folderId: '',
+    folderName: '',
+    list: [],
+    page: 0,
+    pageSize: 30,
+    total: 0,
+    selected: new Map(),
+  };
+  currentView = 'importMine';
+  renderImportMine();
+  content().scrollTop = 0;
+  loadMyInfo();
+}
+
+/**
+ * 认出"你是谁"。
+ *
+ * ★ 先问 `hasCookie` 再问 `myInfo` —— 没填 Cookie 时**根本不发 myinfo 请求**。
+ *   和字幕那条一样的规矩：既然注定拿不到，就别白跑一趟、白挨一次限流。
+ *   后端 `getMyInfo()` 里也有一道同样的闸（双保险）。
+ */
+async function loadMyInfo() {
+  if (!impState) return;
+  try {
+    const has = await api('hasCookie');
+    if (!impState) return;
+    if (!has) {
+      impState.errorReason = 'no-cookie';
+      return;                       // 下面的 finally 会把 loading 关掉并重画
+    }
+    impState.me = await api('myInfo');
+    impState.error = '';
+    impState.errorReason = '';
+  } catch (err) {
+    if (!impState) return;
+    impState.error = err.message || '认不出你是谁';
+    impState.errorReason = err.reason || '';
+  } finally {
+    if (impState) {
+      impState.loading = false;
+      renderImportMine();
+    }
+  }
+}
+
+/** 换"屏"（step 变了）→ 重画并回到顶部 */
+function impGo(step) {
+  if (!impState) return;
+  impState.step = step;
+  renderImportMine();
+  content().scrollTop = 0;
+}
+
+/** 重画导入页但**保留滚动位置** —— 勾选 / 全选这种不该把人弹回顶部 */
+function impRerender() {
+  if (!impState) return;
+  const top = content().scrollTop;
+  renderImportMine();
+  content().scrollTop = top;
+}
+
+/** 顶部的「← 返回」——★ 返回**不清空选择**（这是跨收藏夹累积能成立的前提） */
+function impBack() {
+  if (!impState) return;
+  if (impState.step === 'list' && impState.source === 'fav') { impGo('folders'); return; }
+  if (impState.step === 'list' || impState.step === 'folders') { impGo('home'); return; }
+  // 已经在来源选择页了 → 再返回就是离开这个页面
+  currentView = 'discovery';
+  renderAll();
+}
+
+/** 带「← 返回」的页头（导入页三屏共用） */
+function impSimpleHead(title, sub = '') {
+  return `
+    <div class="block-head">
+      <div>
+        <button class="ghost-btn" id="btnImpBack">← 返回</button>
+        <div class="block-title" style="margin-top:12px">${esc(title)}</div>
+        ${sub ? `<div class="block-sub">${esc(sub)}</div>` : ''}
+      </div>
+    </div>`;
+}
+
+/**
+ * 「已选 N 个 · 清空选择 · 导入选中的 N 个」工具条。
+ * 收藏夹列表屏和挑视频屏共用 —— 用户在哪一屏都能看到"我现在选了多少"。
+ * 已选 0 个时「导入」置灰（disabled 的按钮在浏览器里连 click 都不派发，天然点不动）。
+ */
+function impBarHTML() {
+  const n = impState ? impState.selected.size : 0;
+  return `
+    <div class="imp-bar">
+      <span class="imp-count">已选 <b>${n}</b> 个</span>
+      <span class="imp-bar-actions">
+        <button class="ghost-btn" id="btnImpClear"${n ? '' : ' disabled'}>清空选择</button>
+        <button class="primary-btn" id="btnImpDo"${n ? '' : ' disabled'}>导入选中的 ${n} 个</button>
+      </span>
+    </div>`;
+}
+
+/** 没填 Cookie / Cookie 过期 —— 整页给引导，不留白屏 */
+function impBlockedHTML() {
+  const expired = impState.errorReason === 'cookie-expired';
+  return `
+    <div class="block-head">
+      <div>
+        <button class="ghost-btn" id="btnImpBack">← 返回</button>
+        <div class="block-title" style="margin-top:12px">从 B 站导入</div>
+      </div>
+    </div>
+    <div class="empty">
+      <div class="big">${ic('i-import')}</div>
+      <div class="msg">${expired ? 'Cookie 好像过期了' : '这个功能要用你自己的 B 站账号'}</div>
+      <div class="hint">${expired
+        ? '去左下角「设置 → B 站」重新粘一次 Cookie，再回来点这个按钮。'
+        : '去左下角「设置 → B 站」填一下 Cookie，再回来点这个按钮 —— 填了才能认出你是谁，也才看得到你自己的收藏夹（包括私密的）。'}</div>
+    </div>`;
+}
+
+/** 按当前状态画导入页 */
+function renderImportMine() {
+  if (!impState) { currentView = 'discovery'; renderAll(); return; }
+
+  // ① 没填 Cookie / Cookie 过期：整页引导（不会去白跑 myinfo，见 loadMyInfo）
+  if (impState.errorReason === 'no-cookie' || impState.errorReason === 'cookie-expired') {
+    content().innerHTML = impBlockedHTML();
+    return;
+  }
+  // ② 还没认出"你是谁"
+  if (!impState.me) {
+    content().innerHTML = impSimpleHead('从 B 站导入') + (impState.error
+      ? `<div class="err">${esc(impState.error)}</div>`
+      : `<div class="loading"><div class="spinner"></div>正在认出你是谁…</div>`);
+    return;
+  }
+  // ③ 认出来了 → 按 step 画
+  if (impState.step === 'folders') return renderImpFolders();
+  if (impState.step === 'list') return renderImpList();
+  return renderImpHome();
+}
+
+/* ---------- 屏 2：选来源 ---------- */
+function renderImpHome() {
+  content().innerHTML = `
+    ${impSimpleHead('从 B 站导入', `已识别：${impState.me.name} · UID ${impState.me.mid}`)}
+    <div class="src-grid">
+      <div class="src-card" id="btnImpUp">
+        <div class="sc-ic">${ic('i-note')}</div>
+        <div>
+          <div class="sc-t">我的投稿</div>
+          <div class="sc-s">按发布时间列出你投稿的全部视频</div>
+        </div>
+      </div>
+      <div class="src-card" id="btnImpFav">
+        <div class="sc-ic">${ic('i-heart')}</div>
+        <div>
+          <div class="sc-t">我的收藏夹</div>
+          <div class="sc-s">整个收藏夹导入，或者进去一个一个挑</div>
+        </div>
+      </div>
+    </div>
+    ${impState.selected.size ? impBarHTML() : ''}`;
+}
+
+/* ---------- 屏 3：收藏夹列表 ---------- */
+function openImpFolders() {
+  if (!impState) return;
+  impGo('folders');
+  loadImpFolders();
+}
+
+async function loadImpFolders() {
+  if (!impState) return;
+  impState.loading = true;
+  impState.error = '';
+  renderImportMine();
+  try {
+    impState.folders = await api('favFolders', impState.me.mid) || [];
+  } catch (err) {
+    impState.folders = [];
+    impState.error = err.message || '读取收藏夹失败';
+  } finally {
+    if (impState) {
+      impState.loading = false;
+      renderImportMine();
+    }
+  }
+}
+
+/** 一张收藏夹卡片。右下角：「整个导入」/「取消整个收藏夹」+ 已选角标 */
+function impFolderCardHTML(f) {
+  const from = String(f.id);
+  const picked = [...impState.selected.values()].filter((v) => v.from === from).length;
+  // 已经"整个都选上"了 → 按钮换成"取消整个收藏夹"
+  const isWhole = (f.count || 0) > 0 && picked >= f.count;
+  return `
+    <div class="card" data-imp-folder="${esc(from)}">
+      <div class="thumb" style="background-image:url('${esc(f.cover || '')}')"></div>
+      <div class="c-title">${esc(f.title)}${f.private ? '<span class="c-priv">私密</span>' : ''}</div>
+      <div class="c-sub">${f.count} 个视频</div>
+      <div class="c-foot">
+        ${picked ? `<span class="c-sel">已选 ${picked}</span>` : ''}
+        <button class="c-pick${isWhole ? ' on' : ''}" data-imp-whole="${esc(from)}"${f.count > 0 ? '' : ' disabled'}>${isWhole ? '取消整个收藏夹' : '整个导入'}</button>
+      </div>
+    </div>`;
+}
+
+function renderImpFolders() {
+  const n = impState.folders.length;
+  const head = impSimpleHead(`我的收藏夹${n ? ' · ' + n + ' 个' : ''}`);
+  if (impState.loading && !n) {
+    content().innerHTML = head + impBarHTML() + `<div class="loading"><div class="spinner"></div>正在读取你的收藏夹…</div>`;
+    return;
+  }
+  if (impState.error && !n) {
+    content().innerHTML = head + impBarHTML() + `<div class="err">读取失败：${esc(impState.error)}</div>`;
+    return;
+  }
+  if (!n) {
+    content().innerHTML = head + impBarHTML() + `<div class="empty">
+      <div class="big">${ic('i-heart')}</div>
+      <div class="msg">你的 B 站账号下没有收藏夹</div>
+      <div class="hint">在 B 站网页上建一个收藏夹，再回来点这个按钮就能看到。</div>
+    </div>`;
+    return;
+  }
+  content().innerHTML = head + impBarHTML()
+    + `<div class="card-grid">${impState.folders.map(impFolderCardHTML).join('')}</div>`;
+}
+
+/* ---------- 屏 4：挑视频 ---------- */
+function openImpUp() {
+  if (!impState) return;
+  impState.source = 'up';
+  impState.folderId = '';
+  impState.folderName = '我的投稿';
+  impState.list = [];
+  impState.page = 0;
+  impState.total = 0;
+  impGo('list');
+  loadImpList(1);
+}
+
+function openImpFolder(id) {
+  if (!impState) return;
+  const f = impState.folders.find((x) => String(x.id) === String(id));
+  impState.source = 'fav';
+  impState.folderId = String(id);
+  impState.folderName = f ? f.title : '收藏夹';
+  impState.list = [];
+  impState.page = 0;
+  impState.total = (f && f.count) || 0;
+  impGo('list');
+  loadImpList(1);
+}
+
+/** 把后端返回的一条视频转成"曲目"对象 */
+function impTrackOf(v, source, mid) {
+  if (source === 'up') {
+    // 空间接口的 duration 是 "3:45" 这种字符串，得换算成秒
+    return {
+      bvid: v.bvid, cid: null, page: 1,
+      title: v.title, author: v.author || '', mid: v.mid || mid,
+      cover: v.cover || '', duration: parseDuration(v.duration),
+    };
+  }
+  // 收藏夹接口的 duration 已经是秒数
+  return {
+    bvid: v.bvid, cid: null, page: 1,
+    title: v.title, author: '', cover: v.cover || '', duration: v.duration || 0,
+  };
+}
+
+/** 拉导入页的第 pn 页（我的投稿 / 某个收藏夹，同一个屏） */
+async function loadImpList(pn) {
+  if (!impState || !impState.me) return;
+  impState.loading = true;
+  impState.error = '';
+  renderImportMine();
+  try {
+    const res = impState.source === 'up'
+      ? await api('upVideos', impState.me.mid, pn)
+      : await api('favMedias', impState.folderId, pn);
+    impState.list = (res.list || []).map((v) => impTrackOf(v, impState.source, impState.me.mid));
+    impState.page = pn;
+    impState.pageSize = res.pageSize || impState.pageSize || 30;
+    // 总数：后端给得出就用后端的；收藏夹接口偶尔给 0，就退回卡片上那个数字
+    const known = impState.source === 'fav'
+      ? ((impState.folders.find((x) => String(x.id) === String(impState.folderId)) || {}).count || 0)
+      : 0;
+    impState.total = res.total || known || impState.list.length;
+  } catch (err) {
+    impState.error = err.message || '读取失败';
+  } finally {
+    if (impState) {
+      impState.loading = false;
+      impRerender();
+    }
+  }
+}
+
+function renderImpList() {
+  const loaded = impState.list.length;
+  const pageSize = impState.pageSize || 30;
+  const page = Math.max(1, impState.page);
+  const totalPages = Math.max(1, Math.ceil(impState.total / pageSize));
+  const isUp = impState.source === 'up';
+
+  const sub = impState.total
+    ? `共 ${impState.total} 个视频 · 第 ${page} / ${totalPages} 页`
+    : (loaded ? `本页 ${loaded} 个` : '正在读取…');
+
+  const head = `
+    <div class="block-head">
+      <div>
+        <button class="ghost-btn" id="btnImpBack">← 返回</button>
+        <div class="block-title" style="margin-top:12px">${esc(impState.folderName)}</div>
+        <div class="block-sub">${esc(sub)}</div>
+      </div>
+      <div class="block-actions">
+        ${loaded ? `<button class="ghost-btn" id="btnImpPickAll">全选本页</button>
+        <button class="ghost-btn" id="btnImpPickNone">全不选本页</button>` : ''}
+        ${isUp ? '<button class="ghost-btn" id="btnImpWholeUp">导入全部投稿</button>' : ''}
+      </div>
+    </div>`;
+
+  if (impState.loading && !loaded) {
+    content().innerHTML = head + impBarHTML() + `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
+    return;
+  }
+  if (impState.error && !loaded) {
+    content().innerHTML = head + impBarHTML() + `<div class="err">读取失败：${esc(impState.error)}</div>`;
+    return;
+  }
+  content().innerHTML = head + impBarHTML()
+    + trackListHTML(impState.list, {
+        // ★ 挑歌模式：左边换成复选框、右侧那排操作按钮藏掉、点整行 = 勾选
+        pick: true, expand: false,
+        emptyIcon: isUp ? 'i-note' : 'i-heart',
+        emptyText: isUp ? '你还没有投稿过视频' : '这个收藏夹里没有视频',
+      })
+    // 分页条直接复用 v2.5.0 的（同一个函数，别再抄一份）
+    + (totalPages > 1 ? paginationHTML(page, totalPages) : '');
+}
+
+/* ---------- 选择集操作 ---------- */
+
+/** 勾 / 取消勾一行（点整行或点复选框都走这里 —— 只有一条代码路径） */
+function impToggle(i) {
+  if (!impState) return;
+  const t = impState.list[i];
+  if (!t || !t.bvid) return;
+  if (impState.selected.has(t.bvid)) {
+    impState.selected.delete(t.bvid);
+  } else {
+    impState.selected.set(t.bvid, { track: t, from: impState.source === 'fav' ? impState.folderId : 'up' });
+  }
+  impRerender();
+}
+
+/** 本页的当前来源标记（'up' 或收藏夹 id） */
+function impFrom() {
+  return impState.source === 'fav' ? impState.folderId : 'up';
+}
+
+/** 全选本页 */
+function impPickAll() {
+  if (!impState) return;
+  const from = impFrom();
+  impState.list.forEach((t) => {
+    if (t.bvid) impState.selected.set(t.bvid, { track: t, from });
+  });
+  impRerender();
+}
+
+/** 全不选本页（只影响这一页，别的收藏夹选的不动） */
+function impPickNone() {
+  if (!impState) return;
+  impState.list.forEach((t) => { if (t.bvid) impState.selected.delete(t.bvid); });
+  impRerender();
+}
+
+/** 清空选择（唯一会整体清掉的两个入口之一，另一个是导入成功） */
+function impClear() {
+  if (!impState) return;
+  impState.selected.clear();
+  impRerender();
+}
+
+/**
+ * 把"整个来源"逐页拉下来，全部塞进选择集。
+ * 逐页是**必须**的 —— 接口一次只给 30 条，没有"一次给全部"的用法。
+ * @param {'fav'|'up'} source
+ * @param {string|number} id 收藏夹 id（fav）或 mid（up）
+ * @param {number} total     已知总数（估页数用；估错了靠 hasMore 兜底）
+ * @param {string} from      选择集里的来源标记
+ * @returns {Promise<number>} 新加进去的条数
+ */
+async function impFetchAll(source, id, total, from) {
+  const pageSize = 30;
+  const cap = 20;   // 最多自动翻 20 页（600 首）。再多就请用户进去逐页挑，别把接口刷爆
+  const pages = Math.min(Math.max(1, Math.ceil((total || 0) / pageSize)), cap);
+  let added = 0;
+  for (let p = 1; p <= pages; p += 1) {
+    const res = source === 'fav'
+      ? await api('favMedias', id, p)
+      : await api('upVideos', id, p);
+    (res.list || []).forEach((v) => {
+      const t = impTrackOf(v, source, id);
+      if (!t.bvid) return;
+      if (!impState.selected.has(t.bvid)) {
+        impState.selected.set(t.bvid, { track: t, from });
+        added += 1;
+      }
+    });
+    if (!res.hasMore) break;   // 页数估多了（count 不准）→ 提前收工
+  }
+  return added;
+}
+
+/** 卡片右下角：整个导入 / 取消整个收藏夹 */
+async function impWholeFolder(folder) {
+  if (!impState || !folder) return;
+  const from = String(folder.id);
+  const picked = [...impState.selected.values()].filter((v) => v.from === from).length;
+  if ((folder.count || 0) > 0 && picked >= folder.count) {
+    // 已经整个选上了 → 这一步是"取消整个收藏夹"
+    [...impState.selected.keys()].forEach((k) => {
+      if (impState.selected.get(k).from === from) impState.selected.delete(k);
+    });
+    toast(`已取消「${folder.title}」的 ${picked} 首`);
+    impRerender();
+    return;
+  }
+  if (!(folder.count > 0)) { toast('这个收藏夹里没有视频'); return; }
+  toast(`正在把「${folder.title}」整个读进来…`);
+  try {
+    const added = await impFetchAll('fav', folder.id, folder.count, from);
+    toast(added ? `已把「${folder.title}」整个选上（新加 ${added} 个）` : `「${folder.title}」已经整个选上了`);
+  } catch (err) {
+    toast('读取失败：' + (err.message || ''));
+  }
+  impRerender();
+}
+
+/** 「导入全部投稿」（我的投稿那一屏的快捷入口） */
+async function impWholeUp() {
+  if (!impState || impState.source !== 'up' || !impState.me) return;
+  toast('正在把你的投稿全部读进来…');
+  try {
+    const added = await impFetchAll('up', impState.me.mid, impState.total, 'up');
+    toast(added ? `已选上你的全部投稿（新加 ${added} 个）` : '你的投稿都已经选上了');
+  } catch (err) {
+    toast('读取失败：' + (err.message || ''));
+  }
+  impRerender();
+}
+
+/**
+ * 新歌单的默认名字。
+ * 只在一个收藏夹里挑的 → 用收藏夹名；跨收藏夹 / 我的投稿 → 「我的收藏」。
+ */
+function impDefaultName() {
+  const froms = new Set([...impState.selected.values()].map((v) => v.from));
+  if (froms.size === 1) {
+    const only = [...froms][0];
+    if (only !== 'up') {
+      const f = impState.folders.find((x) => String(x.id) === String(only));
+      if (f) return f.title;
+    }
+    return '我的投稿';
+  }
+  return '我的收藏';
+}
+
+/* ---------- 屏 5：命名 + 落地 ---------- */
+async function importPicked() {
+  if (!impState) return;
+  const picked = [...impState.selected.values()].map((v) => v.track);
+  if (!picked.length) { toast('还没选任何视频'); return; }
+
+  const name = await askName('新建歌单', impDefaultName(), '导入');
+  if (!name) return;
+
+  const pl = { id: uid(), name, tracks: picked };
+  DB.playlists.push(pl);
+  await persist();
+  // ★ 导入成功 = 选择集该清空的时刻之一（另一个是「清空选择」）
+  impState.selected.clear();
+  toast(`已导入 ${picked.length} 首到新歌单「${name}」`);
+  // 跳到刚建好的歌单（走 renderAll 才会把侧栏的歌单列表一起刷出来）
+  currentView = 'playlist:' + pl.id;
+  renderAll();
+}
+
 /* ---------- 侧边栏：歌单列表 ---------- */
 function renderPlaylistSidebar() {
   const ul = $('playlistList');
@@ -2362,6 +2911,7 @@ function renderAll() {
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'history') renderHistory();
   else if (currentView === 'up') renderUp();
+  else if (currentView === 'importMine') renderImportMine();   // v2.6.0：导入我的 B 站收藏夹
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
   else if (currentView === 'parsed') renderParsed();
 
@@ -3247,6 +3797,9 @@ function bindEvents() {
     toast(`已创建歌单「${name}」`);
   });
 
+  /* ---- 导入我的 B 站收藏夹（v2.6.0）—— 侧栏「我的歌单」那一行的导入按钮 ---- */
+  $('btnImportMine').addEventListener('click', openImportMine);
+
   /* ---- 内容区：列表点击（事件委托，一次绑定管所有动态行） ---- */
   $('content').addEventListener('click', async (e) => {
     // 作者名：点开这个 UP 主的主页（看他的全部视频）。
@@ -3296,6 +3849,20 @@ function bindEvents() {
       return;
     }
 
+    // 导入页的收藏夹卡片（v2.6.0）。★ 「整个导入」那个小按钮在卡片**里面**，
+    //   必须先判它 —— 否则点它会一路走到下面"点卡片 = 进收藏夹"那条去。
+    const wholeBtn = e.target.closest('[data-imp-whole]');
+    if (wholeBtn) {
+      const f = impState && impState.folders.find((x) => String(x.id) === wholeBtn.dataset.impWhole);
+      if (f) impWholeFolder(f);
+      return;
+    }
+    const folderCard = e.target.closest('[data-imp-folder]');
+    if (folderCard) {
+      openImpFolder(folderCard.dataset.impFolder);
+      return;
+    }
+
     // 分页条（v2.5.0）：上一页 / 下一页 / 具体页码。
     // ★ 得放在下面 closest('[id]') 之前 —— 这些按钮只有 data-page，没有 id，
     //   不单独拦下的话会一路漏到最后"点整行 = 播放"那段去。
@@ -3303,7 +3870,13 @@ function bindEvents() {
     if (pager) {
       if (pager.disabled) return;              // 首页的「上一页」/ 末页的「下一页」
       const p = Number(pager.dataset.page);
-      if (upState && p >= 1 && p !== upState.page) loadUp(p);
+      // 同一条分页条现在有两个页面在用：UP 主页（v2.5.0）/ 导入页的挑视频（v2.6.0）。
+      // 按当前在哪一页决定翻谁的页 —— 别让它俩互相踩。
+      if (currentView === 'importMine') {
+        if (impState && p >= 1 && p !== impState.page) loadImpList(p);
+      } else if (upState && p >= 1 && p !== upState.page) {
+        loadUp(p);
+      }
       return;
     }
 
@@ -3357,6 +3930,24 @@ function bindEvents() {
     if (id === 'btnDelPl') {
       const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
       if (pl) deletePlaylist(pl.id);
+      return;
+    }
+
+    // ---- 导入我的 B 站收藏夹（v2.6.0）----
+    if (id === 'btnImpBack') { impBack(); return; }
+    if (id === 'btnImpUp') { openImpUp(); return; }
+    if (id === 'btnImpFav') { openImpFolders(); return; }
+    if (id === 'btnImpPickAll') { impPickAll(); return; }
+    if (id === 'btnImpPickNone') { impPickNone(); return; }
+    if (id === 'btnImpClear') { impClear(); return; }
+    if (id === 'btnImpDo') { importPicked(); return; }
+    if (id === 'btnImpWholeUp') { impWholeUp(); return; }
+
+    // 挑歌模式（v2.6.0）：点整行 = 勾选 / 取消，**不播放**。
+    // ★ 必须放在下面"点整行 = 播放"之前 —— 否则在导入页点一下行就把歌播了。
+    const pickRow = e.target.closest('.track.pickable');
+    if (pickRow) {
+      impToggle(Number(pickRow.dataset.i));
       return;
     }
 

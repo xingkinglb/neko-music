@@ -767,6 +767,9 @@ function registerHandlers() {
 
   handle('bili:favFolders', (mid) => bili.getFavFolders(mid));
   handle('bili:favMedias', (mediaId, pn) => bili.getFavMedias(mediaId, pn || 1));
+  // v2.6.0：认出"你是谁"（uid / 昵称）—— 「导入我的收藏夹」的入口靠它。
+  // 失败时 reason 会原样传回界面（no-cookie / cookie-expired），界面据此给不同引导。
+  handle('bili:myInfo', () => bili.getMyInfo());
   // 点作者名 → 看这个 UP 的全部视频
   handle('bili:upVideos', (mid, pn) => bili.getUpVideos(mid, pn || 1));
 
