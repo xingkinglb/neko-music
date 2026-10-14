@@ -478,10 +478,16 @@ async function getFavMedias(mediaId, pn = 1) {
  *      code = -352 / -799，或者干脆返回一整个 HTML 风控页（JSON.parse 会炸）。
  *      所以这里把 B 站的原始 code 一起抛出去，让界面能提示"去设置里填 Cookie"，
  *      而不是显示一个让人摸不着头脑的报错。
+ *
+ * ★ v2.5.0：这个接口**本来就返回总投稿数**（`data.page.count`），
+ *   以前只用它算了个 hasMore，界面拿不到总数，就只做得出"还有没有下一页"。
+ *   现在把 total / pageSize 一起带出去，界面才能做"第 x / 共 y 页"的真分页。
  */
+const UP_PAGE_SIZE = 30;   // 每页 30 条（和下面的 ps 参数是同一个数，别只改一处）
+
 async function getUpVideos(mid, pn = 1) {
   const query = await signParams({
-    mid, ps: 30, pn, order: 'pubdate', platform: 'web',
+    mid, ps: UP_PAGE_SIZE, pn, order: 'pubdate', platform: 'web',
     web_location: 1550101, tid: 0, keyword: '',
   });
   const json = await requestJSON(
@@ -501,7 +507,9 @@ async function getUpVideos(mid, pn = 1) {
       duration: v.length,  // 形如 "3:45" 的字符串，交给界面里的 parseDuration
       play: v.play,
     })),
-    hasMore: pn * 30 < (page.count || 0),
+    total: page.count || 0,   // ★ v2.5.0：总投稿数（界面靠它算总页数）
+    pageSize: UP_PAGE_SIZE,   // ★ v2.5.0：每页几条（界面不硬编码 30）
+    hasMore: pn * UP_PAGE_SIZE < (page.count || 0),
   };
 }
 

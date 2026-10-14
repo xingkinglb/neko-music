@@ -67,6 +67,8 @@ ipcMain.handle('bili:upVideos', (_e, mid, pn) => {
         { bvid: UP_BVID, cid: null, page: 1, title: '这个UP的第一首', author: '皓晨音乐', mid, cover: '', duration: '3:45', play: 1000 },
         { bvid: 'BV1upvideo2', cid: null, page: 1, title: '这个UP的第二首', author: '皓晨音乐', mid, cover: '', duration: '4:20', play: 2000 },
       ],
+      total: 2,        // ★ v2.5.0：真实后端现在会带 total / pageSize（这里只有 2 条 → 1 页，不出分页条）
+      pageSize: 30,
       hasMore: false,
     },
   };
@@ -298,11 +300,22 @@ app.whenReady().then(async () => {
     rows: document.querySelectorAll('#content .track').length,
     first: document.querySelector('#content .track .t') ? document.querySelector('#content .track .t').textContent : '',
     hasPlayAll: !!document.getElementById('btnPlayUp'),
+    playUpText: (document.getElementById('btnPlayUp') || {}).textContent || '',
+    sub: (document.querySelector('#content .block-sub') || {}).textContent || '',
+    hasPager: !!document.querySelector('#content .pager'),
     queueLen: queue.tracks.length,
   })`);
-  say('  点作者名后：view=' + upView.view + '，UP=' + upView.upName + '，列出 ' + upView.rows + ' 个视频，播放全部按钮=' + upView.hasPlayAll);
+  say('  点作者名后：view=' + upView.view + '，UP=' + upView.upName + '，列出 ' + upView.rows + ' 个视频，右上角按钮=' + JSON.stringify(upView.playUpText));
+  say('  副标题：' + JSON.stringify(upView.sub) + '；有分页条=' + upView.hasPager);
   if (upView.view === 'up' && upView.rows === 2 && upView.hasPlayAll && upCalls > 0) ok('点作者名打开了 UP 主页，并按 mid 拉到了他的视频');
   else bad('UP 主页没有正常打开：' + JSON.stringify(upView));
+  // ★ v2.5.0：只有 1 页时不该出现分页条；副标题要写明"共 N 个视频 · 第 x / y 页"
+  if (upView.hasPager) bad('只有 1 页却画出了分页条（应该藏起来）');
+  else ok('只有 1 页时不画分页条（v2.5.0）');
+  if (/共 2 个视频/.test(upView.sub) && /第 1 \/ 1 页/.test(upView.sub)) ok('副标题写明总数与页码：' + upView.sub);
+  else bad('副标题没写总数 / 页码：' + JSON.stringify(upView.sub));
+  if (/播放本页 \(2\)/.test(upView.playUpText)) ok('右上角按钮已改成「播放本页 (N)」（v2.5.0）');
+  else bad('右上角按钮文案不对：' + JSON.stringify(upView.playUpText));
 
   /* 截图：UP 主页 */
   const img1 = await win.webContents.capturePage();

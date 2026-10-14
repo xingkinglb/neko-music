@@ -500,6 +500,33 @@ body.glass-prebake.has-imgbg .player {
 .ghost-btn .ic { width: 14px; height: 14px; }
 .ghost-btn:hover { background: var(--panel-2); color: #fff; border-color: rgb(var(--accent-rgb) / 0.45); }
 
+/* ---------- 分页条（v2.5.0，UP 主页用） ----------
+   [← 上一页] [1] [2] [3] … [28] [下一页 →]，居中挂在列表下方。
+   页码之间的 … 是 .pager-gap，只占位、不可点。 */
+.pager {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 6px; margin: 18px 0 6px;
+}
+.pager-btn, .pager-num {
+  background: var(--panel); border: 1px solid var(--line);
+  color: var(--text-2); font-family: inherit; font-size: 12.5px;
+  min-width: 34px; padding: 6px 10px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: all 0.16s;
+}
+.pager-btn:hover:not(:disabled), .pager-num:hover {
+  background: var(--panel-2); color: #fff; border-color: rgb(var(--accent-rgb) / 0.45);
+}
+/* 当前页：实心主题色，扫一眼就知道在第几页 */
+.pager-num.on {
+  background: var(--accent); border-color: transparent; color: #fff; font-weight: 700;
+  box-shadow: 0 3px 12px rgb(var(--accent-rgb) / 0.35);
+}
+.pager-num.on:hover { background: var(--accent); color: #fff; }
+/* 首页的「上一页」/ 末页的「下一页」：置灰 + 禁止光标 */
+.pager-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pager-gap { color: var(--muted); padding: 0 3px; user-select: none; }
+
 /* ---------- 歌曲列表 ---------- */
 .track-list { display: flex; flex-direction: column; gap: 4px; }
 .track {

@@ -947,6 +947,39 @@ console.log('\n[28] 小弹窗 / 播放队列 / 图标操作 / UP 主页：');
   } else if (!/mid:\s*v\.mid/.test(appjs)) {
     err('搜索结果映射时把 mid 丢了 —— 列表里的作者名点不开');
   } else ok('搜索结果已带上 UP 的 mid（作者名才能点）');
+
+  /* --- G. ★ v2.5.0：UP 主页分页 --- */
+  const bilijs = read('src/bilibili.js');
+  if (!/total:\s*page\.count/.test(bilijs))
+    err('bilibili.js 的 getUpVideos 没有把 page.count 当 total 带出来 —— 界面算不出总页数');
+  else ok('getUpVideos 带出 total（B 站给的总投稿数）');
+  if (!/pageSize:\s*UP_PAGE_SIZE/.test(bilijs) || !/ps:\s*UP_PAGE_SIZE/.test(bilijs))
+    err('每页条数没有收敛到 UP_PAGE_SIZE 这一个常量（ps 和 pageSize 必须同源）');
+  else ok('每页条数只有 UP_PAGE_SIZE 一个来源（ps / pageSize 同源）');
+
+  if (!/function paginationHTML\(/.test(appjs)) err('app.js 缺少 paginationHTML —— 分页条画不出来');
+  else ok('有 paginationHTML（页码省略 / 当前页高亮 / 到头置灰都在里面）');
+  if (!/totalPages\s*>\s*1\s*\?\s*paginationHTML\(/.test(appjs))
+    err('只有一页时也会画出分页条（应该藏起来）');
+  else ok('只有一页时不画分页条');
+  if (!/\.pager-num,\s*\.pager-btn|\.pager-num, \.pager-btn/.test(appjs))
+    err('分页按钮没有接上点击代理 —— 点了没反应');
+  else ok('分页按钮接进了全局点击代理');
+
+  // ★ 反向断言：旧的「加载更多」不许复活（列表已经是"翻页替换"，再累加就自相矛盾）
+  if (/btnMoreUp/.test(html) || /btnMoreUp/.test(appjs))
+    err('v2.5.0 删掉的「加载更多」（btnMoreUp）又回来了 —— 和"翻页替换"是两套矛盾的模型');
+  else ok('「加载更多」已删除（列表改成翻页替换，不再累加）');
+  if (/upState\.list\s*=\s*pn\s*===\s*1\s*\?/.test(appjs))
+    err('loadUp 又变回"累加"写法了（翻到第 5 页会堆 150 条）');
+  else ok('loadUp 是"替换"而不是"累加"（列表里只有当前页）');
+  if (!/共 \$\{upState\.total\} 个视频 · 第 \$\{page\} \/ \$\{totalPages\} 页/.test(appjs))
+    err('UP 主页副标题没有写「共 N 个视频 · 第 x / y 页」');
+  else ok('UP 主页副标题写明总数与页码');
+
+  const pagercss = /\.pager\s*\{/.test(css) && /\.pager-num\.on\s*\{/.test(css) && /\.pager-btn:disabled\s*\{/.test(css);
+  if (!pagercss) err('style.css 缺少分页条样式（.pager / .pager-num.on / .pager-btn:disabled）');
+  else ok('分页条样式齐全（当前页高亮 + 到头置灰）');
 }
 
 /* ---------------------------------------------------------------

@@ -1865,7 +1865,7 @@ function handleWinCmd(cmd) {
    所以这里的失败提示会明确引导去「设置 → B 站」填 Cookie，而不是丢个看不懂的报错。
    ============================================================ */
 
-let upState = null;   // { mid, name, list, page, hasMore, loading, error }
+let upState = null;   // { mid, name, list, page, pageSize, total, loading, error }
 
 /** 点作者名：打开这个 UP 主的主页 */
 async function openUpPage(track) {
@@ -1873,13 +1873,20 @@ async function openUpPage(track) {
   upState = {
     mid: track.mid,
     name: track.author || '这个 UP 主',
-    list: [], page: 0, hasMore: true, loading: true, error: '',
+    list: [], page: 0, pageSize: 30, total: 0, loading: true, error: '',
   };
   currentView = 'up';
   renderUp();
   await loadUp(1);
 }
 
+/**
+ * 拉 UP 主页的第 pn 页。
+ *
+ * ★ v2.5.0：从"累加"改成"翻页" —— 列表里**只装当前这一页**。
+ *   以前是 `pn === 1 ? mapped : list.concat(mapped)`，翻到第 5 页时列表里堆着 150 条，
+ *   而且只能靠「加载更多」一页页往后点。现在每页替换，配上下面的分页条就能任意跳页。
+ */
 async function loadUp(pn) {
   if (!upState) return;
   upState.loading = true;
@@ -1892,11 +1899,11 @@ async function loadUp(pn) {
       title: v.title, author: v.author, mid: upState.mid,
       cover: v.cover, duration: parseDuration(v.duration),
     }));
-    upState.list = pn === 1 ? mapped : upState.list.concat(mapped);
+    upState.list = mapped;                       // ★ v2.5.0：只装这一页（原来是 concat 累加）
     upState.page = pn;
-    upState.hasMore = !!res.hasMore;
+    upState.pageSize = res.pageSize || upState.pageSize || 30;
+    upState.total = res.total || mapped.length;  // ★ v2.5.0：总数（后端给不出就退回"本页条数"）
   } catch (err) {
-    upState.hasMore = false;
     upState.error = err.message || '读取失败';
   } finally {
     upState.loading = false;
@@ -1904,20 +1911,67 @@ async function loadUp(pn) {
   }
 }
 
+/**
+ * 分页条（v2.5.0）
+ * ------------------------------------------------------------
+ * 产出： [← 上一页] [1] [2] [3] … [28] [下一页 →]
+ *
+ * 页码规则：
+ *   · 总页数 ≤ 7 → 全部列出来（页数本来就少，再省略反而看不懂）；
+ *   · 否则只留「首页 + 当前页前后各 2 页 + 末页」，中间断档处用一个 … 顶掉。
+ *     例：28 页时，第 1 页显示 `1 2 3 … 28`；第 5 页显示 `1 … 3 4 [5] 6 7 … 28`。
+ *   · 当前页高亮（主题色）；首页「上一页」、末页「下一页」置灰。
+ *
+ * @param {number} page       当前页（从 1 开始）
+ * @param {number} totalPages 总页数（至少 1）
+ */
+function paginationHTML(page, totalPages) {
+  const total = Math.max(1, Math.floor(totalPages) || 1);
+  const cur = Math.min(Math.max(1, Math.floor(page) || 1), total);
+
+  // ≤ 7 页就全列；再多就只挑「首 + 当前前后各 2 + 尾」
+  const nums = [];
+  if (total <= 7) {
+    for (let p = 1; p <= total; p += 1) nums.push(p);
+  } else {
+    const picked = new Set([1, total]);
+    for (let p = cur - 2; p <= cur + 2; p += 1) {
+      if (p >= 1 && p <= total) picked.add(p);
+    }
+    nums.push(...[...picked].sort((a, b) => a - b));
+  }
+
+  // 相邻页码之间断档就插一个 …
+  let prev = 0;
+  const cells = nums.map((p) => {
+    const gap = p - prev > 1 ? '<span class="pager-gap">…</span>' : '';
+    prev = p;
+    return gap + `<button class="pager-num${p === cur ? ' on' : ''}" data-page="${p}"${p === cur ? ' aria-current="page"' : ''}>${p}</button>`;
+  }).join('');
+
+  return `<div class="pager">
+    <button class="pager-btn" data-page="${cur - 1}"${cur <= 1 ? ' disabled' : ''}>← 上一页</button>
+    ${cells}
+    <button class="pager-btn" data-page="${cur + 1}"${cur >= total ? ' disabled' : ''}>下一页 →</button>
+  </div>`;
+}
+
 function renderUp() {
   if (!upState) { currentView = 'discovery'; renderAll(); return; }
   const loaded = upState.list.length;
+  const pageSize = upState.pageSize || 30;
+  const page = Math.max(1, upState.page);
+  const totalPages = Math.max(1, Math.ceil(upState.total / pageSize));
 
   const head = `
     <div class="block-head">
       <div>
         <button class="ghost-btn" id="btnUpBack">← 返回</button>
         <div class="block-title" style="margin-top:12px">${esc(upState.name)}</div>
-        <div class="block-sub">${loaded ? `已加载 ${loaded} 个视频${upState.hasMore ? '（还能继续往下加载）' : ''}` : '正在读取这个 UP 主的视频…'}</div>
+        <div class="block-sub">${loaded ? `共 ${upState.total} 个视频 · 第 ${page} / ${totalPages} 页` : '正在读取这个 UP 主的视频…'}</div>
       </div>
       <div class="block-actions">
-        ${loaded ? `<button class="ghost-btn" id="btnPlayUp">${ic('i-play')}<span>播放全部</span></button>` : ''}
-        ${loaded && upState.hasMore ? '<button class="ghost-btn" id="btnMoreUp">加载更多</button>' : ''}
+        ${loaded ? `<button class="ghost-btn" id="btnPlayUp">${ic('i-play')}<span>播放本页 (${loaded})</span></button>` : ''}
       </div>
     </div>`;
 
@@ -1933,7 +1987,8 @@ function renderUp() {
   content().innerHTML = head + trackListHTML(upState.list, {
     emptyIcon: 'i-note',
     emptyText: '这个 UP 主没有公开的视频',
-  }) + (upState.loading ? `<div class="loading"><div class="spinner"></div>正在读取更多…</div>` : '');
+  }) + (upState.loading ? `<div class="loading"><div class="spinner"></div>正在读取…</div>` : '')
+    + (totalPages > 1 ? paginationHTML(page, totalPages) : '');
 }
 
 /* ---------- 页面 1：搜索结果 ---------- */
@@ -3241,6 +3296,17 @@ function bindEvents() {
       return;
     }
 
+    // 分页条（v2.5.0）：上一页 / 下一页 / 具体页码。
+    // ★ 得放在下面 closest('[id]') 之前 —— 这些按钮只有 data-page，没有 id，
+    //   不单独拦下的话会一路漏到最后"点整行 = 播放"那段去。
+    const pager = e.target.closest('.pager-num, .pager-btn');
+    if (pager) {
+      if (pager.disabled) return;              // 首页的「上一页」/ 末页的「下一页」
+      const p = Number(pager.dataset.page);
+      if (upState && p >= 1 && p !== upState.page) loadUp(p);
+      return;
+    }
+
     // 块级按钮（用 closest('[id]') 而不是直接 e.target.id，
     // 这样按钮里万一包了子元素，点子元素也能正确命中按钮本身）
     const idEl = e.target.closest('[id]');
@@ -3266,8 +3332,9 @@ function bindEvents() {
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
     if (id === 'btnUpBack') { currentView = 'discovery'; renderAll(); return; }
+    // v2.5.0：只播当前这一页（翻页后 upState.list 自动就是当前页）。
+    // 播 800 首会把队列、随机、单曲循环全搞难用，而且每首都得先补 cid 才能播。
     if (id === 'btnPlayUp') { if (upState) startFromView(upState.list, 0); return; }
-    if (id === 'btnMoreUp') { if (upState) loadUp(upState.page + 1); return; }
     if (id === 'btnPlayParsed') { startFromView(parsedView.tracks, 0); return; }
     if (id === 'btnAddParsed') { addManyToPlaylist(parsedView.tracks); return; }
     if (id === 'btnPlayFav') { startFromView(DB.favorites, 0); return; }
