@@ -2721,5 +2721,78 @@ console.log('\n[54] 打包内容白名单（v2.6.1）：');
   }
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 54 大类检查）');
+/* ============================================================
+   55) 歌词碎句合并（v2.7.0）
+   ------------------------------------------------------------
+   只修「歌唱置信度高 + 时间轴确实有真停顿 + 合并后字数合理」的碎句。
+   缺少 to / music 时 fail-closed，不用缺失值猜歌词边界。
+   ============================================================ */
+console.log('\n[55] 歌词碎句合并（v2.7.0）：');
+{
+  const bilijs = read('src/bilibili.js');
+  const test = path.join(ROOT, '.verify', 'test-round17.js');
+
+  const thresholds = [
+    ['LYRIC_MUSIC_MIN', '0.5'],
+    ['LYRIC_GAP_REAL', '0.4'],
+    ['LYRIC_GAP_TRUST', '0.6'],
+    ['LYRIC_GAP_MERGE', '0.05'],
+    ['LYRIC_MERGE_MAX', '15'],
+  ];
+  for (const [name, value] of thresholds) {
+    if (bilijs.includes(`const ${name} = ${value};`)) ok(`${name} 阈值存在且为 ${value}`);
+    else err(`${name} 缺失或数值不符（应为 ${value}）`);
+  }
+
+  for (const name of ['plainLyricLen', 'joinLyricText', 'mergeShatteredLines']) {
+    if (new RegExp(`function\\s+${name}\\s*\\(`).test(bilijs)) ok(`有 ${name}() 纯函数`);
+    else err(`缺少 ${name}() —— 歌词合并算法不完整`);
+  }
+
+  if (/tEnd:\s*it\.to/.test(bilijs) && /music:\s*Number\(it\.music\)/.test(bilijs)) {
+    ok('原始字幕保留 to / music 字段供安全判别');
+  } else err('字幕映射漏了 to 或 music，无法判断碎句 / 对白');
+
+  if (/let lines\s*=\s*body\s*\.map\(\(it\)\s*=>\s*\(\{\s*t:\s*Number\(it\.from\)/.test(bilijs)) {
+    err('★ 退回只取 from / content 的旧映射 —— 字幕又会原样碎句显示');
+  } else ok('★ 没有退回只取 from / content 的旧映射（反向断言）');
+
+  if (/lines\s*=\s*mergeShatteredLines\(rawSegs\)\.map\(\(\{\s*t,\s*text\s*\}\)\s*=>\s*\(\{\s*t,\s*text\s*\}\)\)/.test(bilijs)) {
+    ok('经过算法后只公开 {t, text}，内部字段不会泄漏到 UI');
+  } else err('lines 没有走碎句合并，或公开格式已改变');
+
+  if (/!Number\.isFinite\(line\.tEnd\)\s*\|\|\s*line\.tEnd\s*<\s*line\.t/.test(bilijs)) {
+    ok('缺少 to / to 早于 from 时 fail-closed');
+  } else err('无效 to 没有保护，可能把未知时间轴当成真停顿');
+
+  if (/musicAvg\s*<\s*LYRIC_MUSIC_MIN/.test(bilijs)) ok('music 置信度不够时不合并（挡口播）');
+  else err('缺少 music 闸门，口播可能被合成一句');
+
+  if (/realGapRatio\s*<\s*LYRIC_GAP_TRUST/.test(bilijs)) ok('时间轴真停顿占比不足时不合并');
+  else err('缺少时间轴可信度闸门，铺满式字幕可能被糊成一团');
+
+  if (/line\.t\s*-\s*previous\.tEnd\s*<=\s*LYRIC_GAP_MERGE\s*\+\s*1e-6/.test(bilijs)) {
+    ok('只考虑无缝边界，并容忍毫秒级浮点误差');
+  } else err('合并边界没有限制在无缝区间或缺少浮点误差保护');
+
+  if (/plainLyricLen\(text\)\s*<=\s*LYRIC_MERGE_MAX/.test(bilijs)) ok('合并后字数有上限，避免跨句粘连');
+  else err('缺少合并后字数上限');
+
+  if (bilijs.includes('const separator = /[A-Za-z0-9]$/.test(left)')) {
+    ok('中文拼接不插空格，英文词边界留空格');
+  } else err('接缝拼接规则缺失或没有保护英文分词');
+
+  if (fs.existsSync(test)) ok('有 .verify/test-round17.js 离线实测');
+  else err('缺少 test-round17.js —— 必须打桩实测三道闸门');
+
+  if (/music 缺失按低置信度/.test(fs.existsSync(test) ? fs.readFileSync(test, 'utf8') : '')) {
+    ok('离线实测覆盖 music 缺失的保守行为');
+  } else err('实测未覆盖 music 缺失边界');
+
+  if (/to 缺失时不把未知时间轴/.test(fs.existsSync(test) ? fs.readFileSync(test, 'utf8') : '')) {
+    ok('离线实测覆盖 to 缺失的保守行为');
+  } else err('实测未覆盖 to 缺失边界');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 55 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

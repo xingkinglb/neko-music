@@ -631,6 +631,62 @@ function hasLoginCookie() {
 const subtitleCache = new Map();
 const SUBTITLE_TTL = 10 * 60 * 1000;   // 10 分钟，够用且不会占多少内存
 
+// 字幕碎句合并阈值。阈值集中管理，真实样本显示时间轴不可信时一律原样返回。
+const LYRIC_MUSIC_MIN = 0.5;
+const LYRIC_GAP_REAL = 0.4;
+const LYRIC_GAP_TRUST = 0.6;
+const LYRIC_GAP_MERGE = 0.05;
+const LYRIC_MERGE_MAX = 15;
+
+/** 去掉装饰音符和空白后计歌词字数，按 Unicode 码点计数。 */
+function plainLyricLen(text) {
+  return Array.from(String(text || '').replace(/[♪\s]/g, '')).length;
+}
+
+/** 拼接两段歌词：去掉接缝处重复的 ♪；拉丁字母/数字之间留空格，中文直接相连。 */
+function joinLyricText(leftText, rightText) {
+  const left = String(leftText || '').trim().replace(/\s*♪\s*$/, '');
+  const right = String(rightText || '').trim().replace(/^\s*♪\s*/, '');
+  const separator = /[A-Za-z0-9]$/.test(left) && /^[A-Za-z0-9]/.test(right) ? ' ' : '';
+  return (left + separator + right).trim();
+}
+
+/**
+ * 只合并有充分证据的碎句；唱词置信度、时间轴可信度任一不足都原样返回。
+ * 输入/输出均为 { t, tEnd, music, text }，调用方负责裁剪为公开的 { t, text }。
+ */
+function mergeShatteredLines(segs) {
+  if (!Array.isArray(segs) || segs.length < 2) return Array.isArray(segs) ? segs : [];
+
+  // 缺 to / to 早于 from 就没有可靠间隙；宁可不修，也不拿脏时间轴猜句式。
+  if (segs.some((line) => !Number.isFinite(line.tEnd) || line.tEnd < line.t)) return segs;
+
+  const musicAvg = segs.reduce((sum, line) => sum + (Number(line.music) || 0), 0) / segs.length;
+  if (musicAvg < LYRIC_MUSIC_MIN) return segs;
+
+  const gaps = [];
+  for (let i = 0; i < segs.length - 1; i++) {
+    gaps.push(Math.max(0, segs[i + 1].t - segs[i].tEnd));
+  }
+  const realGapRatio = gaps.filter((gap) => gap > LYRIC_GAP_REAL).length / gaps.length;
+  if (realGapRatio < LYRIC_GAP_TRUST) return segs;
+
+  const merged = [];
+  for (const line of segs) {
+    const previous = merged[merged.length - 1];
+    if (previous && line.t - previous.tEnd <= LYRIC_GAP_MERGE + 1e-6) {
+      const text = joinLyricText(previous.text, line.text);
+      if (plainLyricLen(text) <= LYRIC_MERGE_MAX) {
+        previous.text = text;
+        previous.tEnd = Math.max(previous.tEnd, line.tEnd);
+        continue;
+      }
+    }
+    merged.push({ ...line });
+  }
+  return merged;
+}
+
 /** 取字幕最多试几次。换到 wbi 路径后基本一次就成，这是纯粹的兜底 */
 const SUBTITLE_ATTEMPTS = 3;
 
@@ -814,14 +870,17 @@ async function fetchSubtitleOnce(bvid, cid) {
     throw e;
   }
 
-  // 整理成统一格式：t = 开始时间（秒），text = 这一句
-  let lines = body
+  // 先保留原始分段 + B 站给的结束时间 / 歌唱置信度；公开给 UI 的格式仍然只有 {t, text}。
+  const rawSegs = body
     .map((it) => ({
       t: Number(it.from) || 0,
+      tEnd: it.to == null || it.to === '' ? NaN : Number(it.to),
+      music: Number(it.music) || 0,
       text: String(it.content || '').trim(),
     }))
     .filter((l) => l.text)          // 丢掉空行（有的是换行占位）
     .sort((a, b) => a.t - b.t);   // 保证按时间递增
+  let lines = rawSegs.map(({ t, text }) => ({ t, text }));
 
   // ★ 兜底：极少数情况下旧降级路径漏出的"诱饵"字幕（"♪ 音乐 ♪"这类占位）。
   //   换成 wbi 路径后基本见不到了，留着以防万一 —— 见到就重试。
@@ -853,6 +912,10 @@ async function fetchSubtitleOnce(bvid, cid) {
     e.reason = 'limit';
     throw e;
   }
+
+  // 只有明显属于歌曲、且时间轴多数带有真停顿时才合并碎句。
+  // 缺少 to / music 或风格不明的字幕原样返回，优先避免误合并。
+  lines = mergeShatteredLines(rawSegs).map(({ t, text }) => ({ t, text }));
 
   const result = {
     lines,
