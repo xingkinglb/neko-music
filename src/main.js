@@ -78,7 +78,7 @@ let closeTimeout = null;
 const {
   MINI_W, MINI_H_COLLAPSED, MINI_H_EXPANDED,
   FULL_MIN_W, FULL_MIN_H, FULL_DEF_W, FULL_DEF_H,
-  applyMiniBounds, restoreFullBounds, handleMiniRequest,
+  applyMiniBounds, restoreFullBounds, handleMiniRequest, setMiniAlwaysOnTop,
 } = require('./win-mini');
 
 // 进 mini 之前的窗口位置和大小（退出时原样还回去）+ 当前 mini 的两态
@@ -317,6 +317,12 @@ function createWindow() {
     autoHideMenuBar: true,       // 隐藏顶部菜单栏，更清爽
     show: false,                 // 等页面准备好再显示，避免白屏闪烁
 
+    // ★ v2.4.0：存档就是 mini 时，一开窗就置顶。
+    //   mini 是一条"悬浮小窗"，和桌面歌词一样该浮在别的窗口上面（Neo 2026-10-14 报的）。
+    //   这里先给个普通置顶；真正那一档（'screen-saver'）在 ready-to-show 里升上去。
+    //   完整模式不置顶。
+    alwaysOnTop: startMini,
+
     // ★ 干掉窗口最上面那圈"白边"。
     //   那圈白边是 Windows 自带的标题栏，它的颜色跟着系统是浅色还是深色走，
     //   CSS 完全够不着它 —— 所以只能整条藏掉，换成网页里自己画的深色标题栏
@@ -364,6 +370,9 @@ function createWindow() {
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+    // ★ v2.4.0：mini 的置顶也要等窗口**真的显示出来之后**再升档。
+    //   和下面 refreshThumbar 是同一个时机问题 —— 窗口还没显示时设了可能不算数。
+    if (miniState.on) setMiniAlwaysOnTop(mainWindow, true);
     // ★ v2.2.1：任务栏缩略图按钮必须等窗口**真的显示出来之后**再设。
     //   whenReady 里那次调用发生在 show() 之前 —— 那时 Explorer 还没给窗口建出任务栏按钮，
     //   setThumbarButtons 会返回 false 并且什么都不做。
@@ -571,6 +580,9 @@ function pushMiniState(st) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.webContents.send('win:mini-state', { on: st.on, expanded: st.expanded }); } catch (_) {}
   }
+  // 注：mini 的置顶不在这里做 —— 它跟着窗口状态走，已经收在 win-mini.js 的
+  //     applyMiniBounds / restoreFullBounds 里（进 / 出两个方向各一句），
+  //     而那两句是**进 / 出 mini 两条入口**都会经过的 handleMiniRequest 调的。
   applyThumbnailClip();   // 缩略图裁哪一块，跟着 mini 变
   refreshTrayMenu();      // 托盘里「窗口模式」那个打勾，跟着 mini 变
 }

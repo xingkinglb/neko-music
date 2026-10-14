@@ -783,10 +783,19 @@ if (!/^\s*syncTopbarHeight\(\);$/m.test(appjs)) {
 console.log('\n[27] 合集 / 分P 展开：徽章入口 + 右侧抽屉 + 点空白/Esc 收起：');
 {
   const need = ['collectMask', 'collectTitle', 'collectSub', 'collectSearch', 'collectList',
-                'btnCloseCollect', 'btnPlayCollect', 'btnQueueCollect'];
+                'btnCloseCollect', 'btnPlayCollect'];
   const miss = need.filter((id) => !htmlIds.has(id));
   if (miss.length) err(`index.html 缺少合集面板元素：${miss.join(', ')}`);
-  else ok('合集面板的遮罩 / 标题 / 搜索框 / 列表 / 三个按钮都在 index.html');
+  else ok('合集面板的遮罩 / 标题 / 搜索框 / 列表 / 两个按钮都在 index.html');
+
+  /* ★ v2.4.0：删掉「加入队列」之后，这里改成**反向**断言 —— 防它哪天又被加回来 */
+  if (htmlIds.has('btnQueueCollect')) err('v2.4.0 删掉的「加入队列」又回来了 —— 搜索框会被重新挤成一个字');
+  else ok('合集面板里没有「加入队列」（v2.4.0 已删，搜索框才有地方）');
+
+  /* ★ v2.4.0：搜索框必须有下限，不许被按钮挤成一个字（Neo 这次报的问题） */
+  if (!/\.collect-search\s*\{[^}]*min-width:\s*140px/.test(css))
+    err('.collect-search 没有 min-width:140px —— 搜索框可能又被挤成一个字');
+  else ok('合集面板的搜索框有最小宽度（min-width:140px）');
 
   if (!/\.collect-mask\s*\{[^}]*position:\s*fixed/.test(css) || !/\.collect-panel\s*\{/.test(css))
     err('style.css 缺少 .collect-mask / .collect-panel 右侧抽屉样式');
@@ -817,8 +826,9 @@ console.log('\n[27] 合集 / 分P 展开：徽章入口 + 右侧抽屉 + 点空�
     err("行上的徽章没有接上点击（data-act=\"expand\" / closest('.badge')）");
   else ok('徽章点击被单独拦下，不会误触发"整行播放"');
 
-  if (!/function queueCollection\(/.test(appjs)) err('缺少"整段加入队列"的 queueCollection');
-  else ok('支持把整段合集加入播放队列');
+  /* ★ v2.4.0：整段入队的能力改由"点行 / 播放全部"承担，queueCollection 已删 */
+  if (/function queueCollection\(/.test(appjs)) err('v2.4.0 删掉的 queueCollection 还在（按钮没了它就是死代码）');
+  else ok('整段入队由"点行 / 播放全部"承担（queueCollection 已删）');
 
   if (!/e\.key === 'Escape' && collectState/.test(appjs) || !/e\.target\.id === 'collectMask'/.test(appjs))
     err('合集面板没有"点空白 / Esc 收起"');
@@ -917,9 +927,10 @@ console.log('\n[28] 小弹窗 / 播放队列 / 图标操作 / UP 主页：');
     err('队列状态与列表取数的链路断了');
   else ok('队列复用既有的 queue.tracks（上一首/下一首用的就是它，不是新造一套）');
 
-  if (!/function refreshQueueIfOpen\(/.test(appjs) || !/refreshQueueIfOpen\(\)/.test(appjs))
-    err('"加入队列"后没有同步队列面板');
-  else ok('"加入队列"后，打开着的队列面板会同步刷新');
+  /* ★ v2.4.0：refreshQueueIfOpen 是给「加入队列」同步队列面板用的；按钮删了它就是死代码 */
+  if (/function refreshQueueIfOpen\(/.test(appjs))
+    err('v2.4.0 删掉的 refreshQueueIfOpen 还在（它只服务于已删的「加入队列」，是死代码）');
+  else ok('refreshQueueIfOpen 已随「加入队列」一起删除');
 
   /* --- F. UP 主页的后端链路 --- */
   if (!/async function getUpVideos\(/.test(read('src/bilibili.js'))) err('bilibili.js 缺少 getUpVideos');
@@ -1799,6 +1810,34 @@ console.log('\n[48] mini 模式 · 同一个窗口换布局（v2.1.0）：');
   if (!/body\.mini\.mini-open\s+\.app\s*\{[^}]*grid-template-areas:\s*"player"\s*"mini-list"/.test(css))
     err('mini 展开态没有把网格排成"播放条在上、队列列表在下"');
   else ok('展开态：播放条在上，队列列表在下');
+
+  /* ---- ★ v2.4.0：mini 长歌名会把右边那排图标挤出窗口（Neo 报的真 bug） ---- */
+  if (!/body\.mini\s+\.player\s*\{[^}]*min-width:\s*0/.test(css))
+    err('body.mini .player 没有 min-width:0 —— 歌名一长播放条会被撑宽，右边那排图标会被挤出窗口');
+  else ok('body.mini .player 有 min-width:0（长歌名撑不宽播放条）');
+  if (!/body\.mini\s+\.np-title\s*\{[^}]*flex:\s*1\s+1\s+auto/.test(css))
+    err('body.mini .np-title 不是 flex:1 1 auto —— 标题不会先让位，作者名会被挤没');
+  else ok('mini 下标题先让位（flex:1 1 auto）');
+  if (!/body\.mini\s+\.np-sub\s*\{[^}]*max-width:\s*45%/.test(css))
+    err('body.mini .np-sub 没有 max-width:45% —— 超长作者名会把标题挤没');
+  else ok('mini 下作者名最多占 45%（短作者名原样显示）');
+
+  /* ---- ★ v2.4.0：mini 是一条"悬浮小窗"，要跟桌面歌词一样置顶 ----
+     实现落在 win-mini.js（独立模块，离线实测能拿真窗口验 isAlwaysOnTop），
+     main.js 只负责"开窗时"和"ready-to-show 时"把档升上去。 */
+  if (!/function setMiniAlwaysOnTop\(/.test(winmini))
+    err('win-mini.js 没有 setMiniAlwaysOnTop —— mini 不会置顶');
+  else if (!/setAlwaysOnTop\(!!on,\s*'screen-saver'\)/.test(winmini))
+    err("mini 置顶没有用 'screen-saver' 这一档 —— 会被全屏程序盖住");
+  else if (!/setMiniAlwaysOnTop\(win,\s*true\)/.test(winmini))
+    err('applyMiniBounds 里没开置顶 —— 进 mini 不会浮起来');
+  else if (!/setMiniAlwaysOnTop\(win,\s*false\)/.test(winmini))
+    err('restoreFullBounds 里没关置顶 —— 退出 mini 会一直赖在最上面');
+  else if (!/alwaysOnTop:\s*startMini/.test(mainjs))
+    err('存档就是 mini 时，开窗没有置顶（首帧会闪一下被盖住）');
+  else if (!/setMiniAlwaysOnTop\(mainWindow,\s*true\)/.test(mainjs))
+    err('ready-to-show 里没升置顶档 —— mini 首帧不是最高档');
+  else ok('mini 置顶：进/出 mini 双向开关 + 存档即 mini 时开窗即置顶（screen-saver 档）');
 
   /* ---- ③ app.js：设置、存档、绑定、快捷键 ---- */
   if (!/window:\s*\{\s*mini:\s*false/.test(appjs))

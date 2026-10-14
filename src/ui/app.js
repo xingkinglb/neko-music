@@ -1363,8 +1363,6 @@ function syncCollectBar() {
   if (all) all.textContent = (on.length === entries.length) ? '全部禁用' : '全部启用';
   const play = $('btnPlayCollect');
   if (play) play.textContent = `播放全部 (${on.length})`;
-  const addQ = $('btnQueueCollect');
-  if (addQ) addQ.textContent = on.length ? `加入队列 (${on.length})` : '加入队列';
 }
 
 /** 一键全部启用 / 全部禁用（按当前状态决定往哪边切） */
@@ -1393,28 +1391,6 @@ function playCollectEntry(i) {
   if (k < 0) { list.unshift(e); k = 0; }
   playTracks(list, k, collectState.title);
   renderCollectList($('collectSearch').value);   // 刷新"正在播放"高亮
-}
-
-/** 把这条合集里"启用的那几首"塞进播放队列（队列空就直接播） */
-function queueCollection() {
-  if (!collectState) return;
-  const on = enabledEntries(collectState, collectState.entries);
-  const title = collectState.title;
-  if (!on.length) { toast('这条合集里的曲目都被禁用了'); return; }
-
-  if (!queue.tracks.length) {
-    closeCollectPanel();
-    playTracks(on, 0, title);
-    toast(`已开始播放 ${on.length} 首`);
-    return;
-  }
-  let added = 0;
-  on.forEach((e) => {
-    if (!queue.tracks.some((t) => sameTrack(t, e))) { queue.tracks.push(e); added += 1; }
-  });
-  toast(added ? `已追加 ${added} 首到当前队列` : '这些都已经在队列里了');
-  closeCollectPanel();
-  refreshQueueIfOpen();
 }
 
 /** 绑定合集面板的开关与交互（点空白 / Esc 收起，跟歌词浮层一致） */
@@ -1454,7 +1430,6 @@ function bindCollect() {
     renderCollectList($('collectSearch').value);
     toast(`开始播放 ${on.length} 首`);
   });
-  $('btnQueueCollect').addEventListener('click', queueCollection);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && collectState) closeCollectPanel();
   });
@@ -1580,12 +1555,6 @@ function bindQueue() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && mask.classList.contains('show')) closeQueue();
   });
-}
-
-/** 队列变了（比如刚"加入队列"）就把抽屉里看到的内容同步一下 */
-function refreshQueueIfOpen() {
-  const mask = $('queueMask');
-  if (mask && mask.classList.contains('show')) renderQueueList($('queueSearch').value);
 }
 
 /* ============================================================

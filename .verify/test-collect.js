@@ -2,7 +2,8 @@
      · 疑似合集的"长视频"行有没有出现「选集」徽章，普通歌行有没有被误加
      · 点徽章能不能滑出右侧面板，并把 134 个分P 全列出来
      · 点某一集能不能真的切成那一集播放；正在播的那一集有没有高亮
-     · 面板里搜索能不能过滤；「加入队列」能不能把整段塞进队列
+     · 面板里搜索能不能过滤；点某一行能不能把整段塞进队列
+     · v2.4.0：「加入队列」按钮已删（它把搜索框挤成一个字），搜索框要有 ≥150px
      · 点空白 / 按 Esc 能不能收起；徽章点击该不该误触发"整行播放"
      · 一个"标题像合集、其实只有 1P"的假阳性：点徽章要能优雅回退成直接播
    开发期检查脚本，不参与打包。 */
@@ -205,17 +206,44 @@ app.whenReady().then(async () => {
   if (!afterMask) ok('点面板外空白收起面板');
   else bad('点空白没收起面板');
 
-  /* ---- 加入队列：整段 134 首 ---- */
+  /* ---- ★ v2.4.0：删掉「加入队列」之后 ----
+     ① 按钮不该存在（它把搜索框挤成了一个字，Neo 报的）；
+     ② 搜索框要有足够宽度（≥150px）；
+     ③ 整段入队改由"点某一行"承担 —— 队列要变成整段 134 首。 */
   await evalJS(`expandCollection(searchResults[0], { tracks: searchResults, index: 0, name: '' })`);
   await sleep(500);
-  const qc = await centerOf('#btnQueueCollect');
-  await clickAt(qc.x, qc.y);
-  await sleep(400);
+  const bar = await evalJS(`(() => {
+    const q = document.getElementById('btnQueueCollect');
+    const inp = document.getElementById('collectSearch');
+    return { hasBtn: !!q, searchW: Math.round(inp.getBoundingClientRect().width) };
+  })()`);
+  say('\n--- 合集面板按钮（v2.4.0）---');
+  say('  「加入队列」还在吗=' + bar.hasBtn + '；搜索框宽=' + bar.searchW + 'px');
+  if (bar.hasBtn) bad('「加入队列」按钮还在 —— v2.4.0 应该已经删掉');
+  else ok('「加入队列」按钮已删除（v2.4.0）');
+  if (bar.searchW < 150) bad('搜索框只有 ' + bar.searchW + 'px，还是太窄（应该 ≥150）');
+  else ok('搜索框宽度 ' + bar.searchW + 'px（够显示十几个字）');
+
+  const firstRow = await evalJS(`(() => {
+    const r = document.querySelector('#collectList .collect-row');
+    const b = r.getBoundingClientRect();
+    return { x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2) };
+  })()`);
+  await clickAt(firstRow.x, firstRow.y);
+  await sleep(700);
   const queued = await evalJS(`({ len: queue.tracks.length, first: queue.tracks[0] && queue.tracks[0].title })`);
-  say('\n--- 加入队列 ---');
-  say('  队列长度=' + queued.len + '，第一首「' + queued.first + '」');
-  if (queued.len === 134) ok('「加入队列」把整段 134 首塞进队列');
-  else bad('加入队列数量不对：' + queued.len);
+  say('  点第 1 行后：队列长度=' + queued.len + '，第一首「' + queued.first + '」');
+  if (queued.len === 134) ok('点列表里任意一行 = 整段 134 首成为队列（原来的能力没丢）');
+  else bad('点行后队列数量不对：' + queued.len);
+
+  /* ★ 点行之后面板**仍然开着** —— 这是有意的（方便接着挑下一首；旧的「加入队列」会顺手关掉，
+     点行不会）。但下一步要回到搜索结果列表去点徽章，所以这里得先把面板收起来，
+     否则徽章那一下会点在盖在上面的面板上（第一次跑就是这么失败的）。 */
+  await evalJS(`closeCollectPanel()`);
+  await sleep(300);
+  const closedForFb = await evalJS(`document.getElementById('collectMask').classList.contains('show')`);
+  if (closedForFb) bad('点行之后面板没收起来（下一步点徽章会被它挡住）');
+  else ok('点行后面板仍开着、由测试主动收起（不挡住下一步）');
 
   /* ---- 假阳性：标题像合集、其实只有 1P —— 点徽章应优雅回退成直接播 ----
      ★ 队列现在是"当前列表摊平后的结果"：列表里那条 134 集合集会摊成 134 首，

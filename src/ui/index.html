@@ -435,7 +435,13 @@
       <!-- 一键开关：整条合集里"想听的"和"不想听的"一次切完 -->
       <button class="ghost-btn" id="btnCollectToggleAll">全部禁用</button>
       <button class="ghost-btn" id="btnPlayCollect">播放全部</button>
-      <button class="ghost-btn" id="btnQueueCollect">加入队列</button>
+      <!--
+        v2.4.0 删掉了这里的「加入队列」按钮（Neo 报的）：
+          · 它本来就重复 —— 点列表里任意一行、或点「播放全部」，都会把"启用的那几集"
+            整体设成队列并开始播，队列一定会被建好；
+          · 它把搜索框挤到只剩 ~48px（只够显示一个字），面板总共才 400px 宽。
+        删掉之后搜索框有 ~166px。代价是"把整段追加到当前队列、不打断播放"这个能力没了。
+      -->
       <input class="collect-search" id="collectSearch" placeholder="搜索选集…" autocomplete="off" />
     </div>
     <div class="collect-body" id="collectList"></div>

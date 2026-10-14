@@ -1502,7 +1502,7 @@ body.glass-live .lyric-overlay {
   border-bottom: 1px solid var(--line);
 }
 .collect-search {
-  flex: 1; min-width: 0;
+  flex: 1; min-width: 140px;   /* v2.4.0：给个下限 —— 以后按钮再多也不许把它挤成一个字 */
   background: var(--panel); border: 1px solid var(--line);
   border-radius: 9px; padding: 7px 11px;
   color: var(--text); font-family: inherit; font-size: 12.5px;
@@ -1631,7 +1631,8 @@ body.mini .ctrl-row::after { display: none; }
 body.mini .np-cover { width: 48px; height: 48px; border-radius: 9px; }
 
 /* 歌名那一行：原来是"标题 / 作者"上下两行，mini 里压成一行（高度宝贵）。
-   两个都允许省略号，标题先缩。 */
+   两个都允许省略号：**标题先让位**（它是长的那个），作者名尽量保住
+   （作者最多占 45%，超了才省略 —— 不然超长歌名会把作者名挤成一个点）。 */
 body.mini .np-meta {
   display: flex;
   align-items: baseline;
@@ -1639,8 +1640,29 @@ body.mini .np-meta {
   min-width: 0;
   padding-right: 14px;
 }
-body.mini .np-title { font-size: 12.5px; flex: 0 1 auto; min-width: 0; }
-body.mini .np-sub   { margin-top: 0; font-size: 11.5px; flex: 0 1 auto; min-width: 0; }
+body.mini .np-title { font-size: 12.5px; flex: 1 1 auto; min-width: 0; }
+body.mini .np-sub   { margin-top: 0; font-size: 11.5px; flex: 0 0 auto; min-width: 0; max-width: 45%; }
+
+/* ★★ v2.4.0 修的真 bug：歌名一长，右边那排图标就被挤出窗口（Neo 2026-10-14 报的）
+   ------------------------------------------------------------
+   症状：歌名很长时 ♡ 🔊 ☰ ✕ ▢ 一起往右移、跑到窗口外面去了。
+   实测（.verify/test-round13.js）：歌名 50 字时播放条被撑到 **684** 宽、100 字时 **992** 宽，
+   而窗口只有 420 —— 图标当然全在窗外。
+
+   根因是一条链，四个环：
+     ① 上面那句 `body.mini .np { display: contents }` 让 .np 这个盒子消失了，
+        于是它身上的 `min-width: 0`（见 .np 的基础规则）**一起失效** ——
+        CSS 里"盒子没了，约束也没了"。
+     ② .np-title 有 `white-space: nowrap`，所以这首歌名的"最小宽度"= 整首歌名的宽度。
+     ③ .player 是 .app 网格里的一格，而**网格项默认 `min-width: auto`**
+        （= 不许比内容的最小宽度更窄）→ 播放条被内容撑到 684 / 992。
+     ④ .np-meta 的 `flex-basis: 100%` 指的是"父容器的内容宽"，父容器一宽它就跟着宽 →
+        整行都按 684 排 → 右边那排图标全部越界。
+
+   所以修法就是给播放条补上那句被吃掉的 `min-width: 0`（第 ① 环），
+   再把标题 / 作者的分工写清楚（见上面两条）。
+   完整模式为什么没这个毛病：那里 .np 的盒子还在，`min-width: 0` 还在干活。 */
+body.mini .player { min-width: 0; }
 
 /* mini 模式专用的 ✕ / ▢（在播放条最右）。平时（完整模式）必须 display:none ——
    不然它会作为第 4 个格子挤进 .player 那套三列网格，把布局撑坏。 */
