@@ -131,6 +131,35 @@ contextBridge.exposeInMainWorld('neko', {
   // 悬浮窗被拖动后，主进程把新坐标送回来存档
   onLyricMoved: (cb) => ipcRenderer.on('lyric:moved', (_e, pos) => cb(pos)),
 
+  // ---------- 下载（v2.8.0）----------
+  // 任务状态由主进程管（存 downloads.json），界面只负责"下指令"和"看结果"。
+  // downloadAdd 返回 { added, skipped, needDir } —— needDir=true 表示还没选过下载目录，
+  // 界面此时要弹"选下载位置"，选完调 downloadSetDir 再调一次 downloadAdd。
+  downloadAdd: (tracks) => ipcRenderer.invoke('download:add', tracks),
+  downloadList: () => ipcRenderer.invoke('download:list'),
+  downloadPause: (id) => ipcRenderer.invoke('download:pause', id),
+  downloadResume: (id) => ipcRenderer.invoke('download:resume', id),
+  downloadRetry: (id) => ipcRenderer.invoke('download:retry', id),
+  downloadCancel: (id) => ipcRenderer.invoke('download:cancel', id),
+  // deleteFile 默认 false —— 误删一首下载好的歌，比在列表里多留一条记录难受得多
+  downloadRemove: (ids, deleteFile) => ipcRenderer.invoke('download:remove', ids, !!deleteFile),
+  downloadClearFinished: () => ipcRenderer.invoke('download:clearFinished'),
+  downloadPickDir: () => ipcRenderer.invoke('download:pickDir'),
+  downloadSetDir: (dir) => ipcRenderer.invoke('download:setDir', dir),
+  downloadOpenDir: () => ipcRenderer.invoke('download:openDir'),
+  downloadReveal: (file) => ipcRenderer.invoke('download:reveal', file),
+
+  // 进度每 300ms 汇总推一次；changed 是任务增删/状态变化；finished 带一条"可以进本地库"的记录
+  onDownloadProgress: (cb) => ipcRenderer.on('download:progress', (_e, list) => cb(list || [])),
+  onDownloadChanged: (cb) => ipcRenderer.on('download:changed', (_e, tasks) => cb(tasks || [])),
+  onDownloadFinished: (cb) => ipcRenderer.on('download:finished', (_e, payload) => cb(payload || {})),
+
+  // ---------- 本地歌曲（v2.8.0）----------
+  // 主进程只做"文件系统那一半"（选、扫描、问大小）；本地歌曲库本身由界面管。
+  localPickFiles: () => ipcRenderer.invoke('local:pickFiles'),
+  localPickFolder: () => ipcRenderer.invoke('local:pickFolder'),
+  localStat: (paths) => ipcRenderer.invoke('local:stat', paths),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),

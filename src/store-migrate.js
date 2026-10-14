@@ -24,11 +24,21 @@ const path = require('path');
 
 const THEMES = ['pink', 'violet', 'green', 'amber', 'cyan'];
 
+// 下载相关的默认值（v2.8.0）。抽成常量，migrate 和界面两边都从这儿取，避免写两遍写歪。
+const DEFAULT_DOWNLOAD = {
+  dir: null,            // 下载目录的绝对路径。null = 从没选过 → 首次下载时弹窗让选
+  concurrent: 2,        // 同时下载几个。B 站会对短时间大量请求限流，默认别开太大
+  saveCover: true,      // 下载时顺手把封面存到本地（这样离线也能看到封面）
+  autoAddToLocal: true, // 下完自动进「本地歌曲」
+  skipExisting: true,   // 已经在本地库里的跳过，不重复下
+};
+
 const DEFAULT_DATA = {
   playlists: [],  // 歌单列表，每个歌单里有 tracks
   favorites: [],  // 我喜欢的
   history: [],    // 最近播放
   lastTrack: null,// 上次听到的歌（下次打开可以接着播）
+  local: [],      // v2.8.0：本地歌曲库（下载来的 + 从硬盘导入的）
   settings: {     // 外观与习惯
     theme: 'pink',   // pink / violet / green / amber / cyan
     volume: 80,      // 音量记忆，0-100
@@ -36,6 +46,7 @@ const DEFAULT_DATA = {
     glass: { blur: 18, alpha: 0.55 },           // 毛玻璃：模糊半径 / 不透明度
     autoLyric: false,   // 自动加载歌词（默认关，可手动点「词」）
     close: { action: 'ask' },   // 关窗行为（v2.2.0）
+    download: Object.assign({}, DEFAULT_DOWNLOAD),   // v2.8.0：下载设置
   },
 };
 
@@ -55,6 +66,11 @@ function migrate(data, opts) {
   d.favorites = Array.isArray(d.favorites) ? d.favorites : [];
   d.history   = Array.isArray(d.history)   ? d.history   : [];
   d.lastTrack = d.lastTrack || null;
+  // v2.8.0：本地歌曲库。同样是"不是数组就当空数组"，老存档没有这一项。
+  // ★ 注意**没有** downloads —— 下载任务的状态由主进程单独存一个 downloads.json。
+  //   为什么不放这儿：这个文件已经 6MB 了，而下载进度每 300ms 就变一次，
+  //   放进来等于每次进度更新都重写 6MB 的 JSON。任务状态和"用户数据"是两种东西。
+  d.local     = Array.isArray(d.local)     ? d.local     : [];
 
   const old = (d.settings && typeof d.settings === 'object') ? d.settings : {};
 
@@ -73,6 +89,32 @@ function migrate(data, opts) {
   s.close = Object.assign({ action: 'ask' },
     (old.close && typeof old.close === 'object') ? old.close : {});
 
+  // v2.8.0：下载设置。★ 写法必须跟上面一样 —— 从 `old.download` 出发只覆盖认识的字段，
+  //   不能 `s.download = { dir: ..., concurrent: ... }` 那样白名单重建（会被铁律罚）。
+  s.download = Object.assign({}, DEFAULT_DOWNLOAD,
+    (old.download && typeof old.download === 'object') ? old.download : {});
+
+  // 并发数夹到 1~4：存档可能被手改过，也可能是老版本写的怪值。
+  // 小于 1 会让队列永远卡住（pump 一个都起不来），所以这一条是**功能性**的，不只是好看。
+  const cc = Number(s.download.concurrent);
+  s.download.concurrent = Number.isFinite(cc) ? Math.min(4, Math.max(1, Math.round(cc))) : DEFAULT_DOWNLOAD.concurrent;
+
+  // 三个开关强制成布尔：界面拿它们做 if 判断，拿到 undefined 会走成"关"，
+  // 但用户其实没关过 —— 显式归一化，默认值一律是 true。
+  s.download.saveCover      = s.download.saveCover      !== false;
+  s.download.autoAddToLocal  = s.download.autoAddToLocal  !== false;
+  s.download.skipExisting    = s.download.skipExisting    !== false;
+
+  // 下载目录如果已经不在了（换电脑 / 手动删了 / 移动硬盘没插），就降级成 null，
+  // 让它回到"首次下载时弹窗选目录"那条路。否则下载会一直失败在"目录不存在"，
+  // 而用户根本不知道该去哪儿改 —— 设置里显示的还是那个已经不存在的路径。
+  if (s.download.dir) {
+    const dir = String(s.download.dir);
+    let alive = false;
+    try { alive = fs.existsSync(dir) && fs.statSync(dir).isDirectory(); } catch (_) { alive = false; }
+    if (!alive) s.download.dir = null;
+  }
+
   // 背景图如果已经不在硬盘上（比如换过电脑、清过缓存），就悄悄置空，别留个裂图
   if (s.bg.file && bgDir) {
     const ok = /^[\w.\-]+$/.test(s.bg.file) && fs.existsSync(path.join(bgDir, s.bg.file));
@@ -83,4 +125,4 @@ function migrate(data, opts) {
   return d;
 }
 
-module.exports = { DEFAULT_DATA, THEMES, migrate };
+module.exports = { DEFAULT_DATA, DEFAULT_DOWNLOAD, THEMES, migrate };

@@ -20,7 +20,7 @@ const bili = require('./bilibili');
 
 // 读存档时的"补洞"（★ 只许补、不许删 —— 见这个文件顶部的说明，
 // 它原来会悄悄吃掉新加的设置项，是个真 bug）
-const { migrate, DEFAULT_DATA } = require('./store-migrate');
+const { migrate, DEFAULT_DATA, DEFAULT_DOWNLOAD } = require('./store-migrate');
 
 // 固定开发版与安装版共用的本机存储目录，避免 Electron 按不同应用显示名
 // 分配出两个 userData 目录，导致用户感觉设置和歌单“消失”。
@@ -59,6 +59,17 @@ const COOKIE_FILE = path.join(app.getPath('userData'), 'cookie.txt');
 // bg:// 协议的实现（含流式 + Range）抽在 bg-protocol.js 里，方便离线实测直接加载。
 const BG_DIR = path.join(app.getPath('userData'), 'backgrounds');
 const { BG_MIME, BG_VIDEO_MAX_MB, registerBgProtocol, clearBgDir } = require('./bg-protocol');
+
+// ---- 本地歌曲 / 下载（v2.8.0）----
+// 下载下来的封面存这里，**不往用户的音乐文件夹里塞子目录** ——
+// 用户打开自己的音乐目录时，应该只看到歌，不该多出一个不知道是什么的 covers/。
+const COVERS_DIR = path.join(app.getPath('userData'), 'covers');
+// 下载任务的状态单独存一个文件。为什么不塞进 neko-data.json：那个文件已经 6MB 了，
+// 而下载进度每 300ms 就变一次 —— 放进去等于每次进度更新都重写 6MB 的 JSON。
+const DOWNLOADS_FILE = path.join(app.getPath('userData'), 'downloads.json');
+// local:// 协议的实现（含白名单精确匹配）抽在 local-protocol.js 里，方便离线实测。
+const { registerLocalProtocol } = require('./local-protocol');
+const { createDownloader } = require('./downloader');
 
 let mainWindow = null;
 let closeInProgress = false;
@@ -170,6 +181,20 @@ protocol.registerSchemesAsPrivileged([
       corsEnabled: true,
     },
   },
+  {
+    // local:// —— 本地歌曲与封面的专用通道（v2.8.0）
+    // 同样是因为页面没放行 file:。它的安全边界比 bg:// 更要紧 ——
+    // bg:// 只管一个固定目录，local:// 要按"白名单里的任意路径"发文件。
+    // 全部校验都在 local-protocol.js 里（先 resolve 再精确匹配，绝不做前缀匹配）。
+    scheme: 'local',
+    privileges: {
+      supportFetchAPI: true,
+      stream: true,          // <audio> 要边读边播，拖动进度条还要发 Range
+      secure: true,
+      corsEnabled: true,
+      bypassCSP: true,
+    },
+  },
 ]);
 
 function registerBiliProtocol() {
@@ -209,6 +234,164 @@ function registerBiliProtocol() {
 // ============================================================
 //  （实现已抽到 bg-protocol.js：只读 backgrounds/ 目录 + 流式 + 支持 Range。
 //    抽出去是为了让离线实测能直接加载它、真发一个 Range 请求验证"视频边读边传"。）
+
+// ============================================================
+//  第 1.6 部分：本地歌曲库 + 下载引擎（v2.8.0）
+// ============================================================
+//  两件事在这里汇合：
+//    ① 一份"本地歌曲库里都有哪些文件"的内存快照 —— local:// 协议拿它当**唯一**的
+//       放行白名单，下载器拿它判断"这首歌是不是已经下过了"。
+//       快照在界面 load / save 存档时刷新（界面才是 neko-data.json 的 owner）。
+//    ② 一个下载器实例 —— 任务状态由它自己存进 downloads.json。
+//
+//  ★ 为什么任务状态不塞进 neko-data.json：
+//    那个文件已经 6MB（历史 + 合集缓存），而下载进度每 300ms 变一次。
+//    放进去等于每次进度更新都重写 6MB 的 JSON，硬盘和 CPU 都白烧。
+//    所以：**用户数据归界面，任务状态归主进程**，各存各的文件。
+
+let downloadSettings = Object.assign({}, DEFAULT_DOWNLOAD);
+let localWhitelist = new Set();   // 已 resolve 的绝对路径 —— local:// 的唯一放行依据
+let localKeys = new Set();        // `bvid:cid` —— "这首歌已经下过了"
+
+/**
+ * 界面每次 load / save 存档后调一次，把这份快照对齐。
+ * 白名单只在这里被写 —— 别在别处往里面塞路径，那样等于给 local:// 开后门。
+ */
+function refreshLibraryCache(data) {
+  const d = data || {};
+  downloadSettings = Object.assign({}, DEFAULT_DOWNLOAD,
+    (d.settings && d.settings.download) ? d.settings.download : {});
+
+  const paths = new Set();
+  const keys = new Set();
+  for (const e of (Array.isArray(d.local) ? d.local : [])) {
+    if (!e) continue;
+    if (e.path) { try { paths.add(path.resolve(String(e.path))); } catch (_) {} }
+    if (e.key) keys.add(String(e.key));
+  }
+  localWhitelist = paths;
+  localKeys = keys;
+
+  // 设置里改了并发 / 跳过重复 / 存封面 → 立刻生效，不用重启
+  downloaderCfg.concurrent = downloadSettings.concurrent;
+  downloaderCfg.saveCover = downloadSettings.saveCover !== false;
+  downloaderCfg.skipExisting = downloadSettings.skipExisting !== false;
+  if (downloader) downloader.setConcurrent(downloadSettings.concurrent);
+}
+
+function readDownloadsFile() {
+  try {
+    if (!fs.existsSync(DOWNLOADS_FILE)) return [];
+    const j = JSON.parse(fs.readFileSync(DOWNLOADS_FILE, 'utf8'));
+    if (Array.isArray(j)) return j;
+    return Array.isArray(j && j.tasks) ? j.tasks : [];
+  } catch (err) {
+    console.error('[下载] 读取 downloads.json 失败，按空处理：', err.message);
+    return [];
+  }
+}
+
+// 任务状态变化很频繁（排队 / 开始 / 暂停 / 完成…），但没必要每变一次就写盘。
+// 攒 1.5 秒写一次；退出时会强制写一次，所以不会丢。
+let downloadsSaveTimer = null;
+function saveDownloadsSoon() {
+  if (downloadsSaveTimer) return;
+  downloadsSaveTimer = setTimeout(() => { downloadsSaveTimer = null; saveDownloadsNow(); }, 1500);
+  if (downloadsSaveTimer.unref) downloadsSaveTimer.unref();
+}
+function saveDownloadsNow() {
+  try {
+    fs.mkdirSync(path.dirname(DOWNLOADS_FILE), { recursive: true });
+    const tmp = DOWNLOADS_FILE + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(downloader.list(), null, 2), 'utf8');
+    fs.renameSync(tmp, DOWNLOADS_FILE);   // 原子替换，写一半崩了也不会毁掉旧文件
+  } catch (err) {
+    console.error('[下载] 保存 downloads.json 失败：', err.message);
+  }
+}
+
+function sendToUi(channel, payload) {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  } catch (_) {}
+}
+
+// 配置对象要留着引用 —— 下载器是**惰性读** cfg 里的字段的，
+// 所以后面在 refreshLibraryCache 里改它就能立刻生效。
+const downloaderCfg = {
+  getAudioUrl: (bvid, cid) => bili.getAudioUrl(bvid, cid),
+  fetchStream: (url, opts) => net.fetch(url, opts),
+  getDir: () => downloadSettings.dir || null,
+  coversDir: COVERS_DIR,
+  referer: bili.REFERER,
+  userAgent: bili.USER_AGENT,
+  concurrent: DEFAULT_DOWNLOAD.concurrent,
+  saveCover: true,
+  skipExisting: true,
+  isDownloaded: (key) => localKeys.has(key),
+  onProgress: (list) => sendToUi('download:progress', list),
+  onChanged: (tasks) => { saveDownloadsSoon(); sendToUi('download:changed', tasks); },
+  onFinish: (task, info) => {
+    saveDownloadsSoon();
+    // 把"可以进本地歌曲库的一条"一起送过去 —— 库是界面在管，主进程不直接改存档。
+    const dir = downloadSettings.dir;
+    const entry = (info && info.file && dir) ? {
+      path: path.join(dir, info.file),
+      title: task.title || '',
+      author: task.author || '',
+      cover: info.coverFile || '',
+      duration: info.duration || task.duration || 0,
+      size: info.size || 0,
+      key: task.key || '',
+      bvid: task.bvid || '',
+      cid: task.cid || 0,
+      src: 'download',
+    } : null;
+    sendToUi('download:finished', { task, info, entry });
+  },
+};
+
+const downloader = createDownloader(downloaderCfg);
+
+/* ---------- 本地歌曲：扫描一个文件夹 ---------- */
+
+// 认得的音频扩展名。跟 local-protocol.js 的 MIME 表对应 ——
+// 那边管"怎么发出去"，这边管"要不要收进来"，两边都得认同一批后缀。
+const AUDIO_EXT = new Set([
+  '.mp3', '.m4a', '.m4s', '.mp4', '.aac', '.flac',
+  '.wav', '.wave', '.ogg', '.oga', '.opus', '.wma', '.ape', '.aiff',
+]);
+
+// 一次最多收这么多首。防手滑选了个几万文件的盘，界面直接卡死。
+const SCAN_MAX = 5000;
+// 递归深度上限。防目录软链接成环 —— 那种情况下不限深就是无限递归。
+const SCAN_DEPTH = 6;
+
+/**
+ * 递归扫一个文件夹里所有音频文件。
+ * 返回 { paths, truncated } —— truncated=true 表示"撞到 5000 上限被截断了"，
+ * 界面要如实告诉用户"只导入了前 5000 首"，不能假装导完了。
+ */
+function scanAudioFolder(root) {
+  const out = [];
+  let truncated = false;
+  const walk = (dir, depth) => {
+    if (truncated || depth > SCAN_DEPTH) return;
+    let items;
+    try { items = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return; }  // 没权限的目录直接跳过
+    for (const it of items) {
+      if (truncated) return;
+      const full = path.join(dir, it.name);
+      if (it.isDirectory()) { walk(full, depth + 1); continue; }
+      if (!it.isFile()) continue;
+      if (!AUDIO_EXT.has(path.extname(it.name).toLowerCase())) continue;
+      if (out.length >= SCAN_MAX) { truncated = true; return; }
+      out.push(full);
+    }
+  };
+  walk(root, 0);
+  return { paths: out, truncated };
+}
 
 // ============================================================
 //  第 2.5 部分：右上角窗口按钮（自绘）
@@ -817,7 +1000,9 @@ function registerHandlers() {
 
   handle('store:load', () => {
     const saved = readDataFile();
-    return migrate(saved || DEFAULT_DATA, { bgDir: BG_DIR });
+    const data = migrate(saved || DEFAULT_DATA, { bgDir: BG_DIR });
+    refreshLibraryCache(data);   // 刷新 local:// 的白名单 + 下载器设置
+    return data;
   });
 
   // 存档写成"原子操作"：先写临时文件，写完了再改名顶替。
@@ -833,6 +1018,9 @@ function registerHandlers() {
       try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) {}
       throw err;
     }
+    // ★ 存档是 local:// 白名单的来源 —— 存完必须立刻刷新，
+    //   否则新导入的歌要等下一次 load 才能播（表现为"刚加进来点了没反应"）。
+    refreshLibraryCache(data);
     return true;
   });
 
@@ -937,6 +1125,122 @@ function registerHandlers() {
   });
 
   handle('bg:clear', () => { clearBgDir(BG_DIR); return true; });
+
+  // ---- 下载（v2.8.0）----
+  // 任务状态归主进程（downloads.json），界面只负责"下指令"和"看结果"。
+  handle('download:add', (tracks) => {
+    const r = downloader.add(tracks);
+    if (!r.needDir) saveDownloadsSoon();
+    return r;   // needDir=true 时界面会弹"选下载位置"，选完再调一次
+  });
+
+  handle('download:list', () => ({
+    tasks: downloader.list(),
+    stats: downloader.stats(),
+    dir: downloadSettings.dir || null,
+  }));
+
+  handle('download:pause',  (id) => downloader.pause(id));
+  handle('download:resume', (id) => downloader.resume(id));
+  handle('download:retry',  (id) => downloader.retry(id));
+  handle('download:cancel', (id) => { const r = downloader.cancel(id); saveDownloadsSoon(); return r; });
+  handle('download:remove', (ids, deleteFile) => {
+    for (const id of (Array.isArray(ids) ? ids : [ids])) downloader.remove(id, !!deleteFile);
+    saveDownloadsSoon();
+    return true;
+  });
+  handle('download:clearFinished', () => {
+    const r = downloader.clearFinished();
+    saveDownloadsSoon();
+    return r;
+  });
+
+  // 选下载目录。properties 里带 createDirectory，让用户在对话框里就能顺手新建文件夹。
+  handle('download:pickDir', async () => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    const res = await dialog.showOpenDialog(win, {
+      title: '选一个文件夹，下载的歌存这里',
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: downloadSettings.dir || app.getPath('music'),
+    });
+    if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
+    return { dir: res.filePaths[0] };
+  });
+
+  // 界面选完目录后告诉主进程，好让"立刻"就能下。
+  // （真正的持久化还是界面写进 settings.download.dir，主进程不碰存档。）
+  handle('download:setDir', (dir) => {
+    const d = String(dir || '').trim();
+    if (!d) throw new Error('目录不能为空');
+    let ok = false;
+    try { ok = fs.existsSync(d) && fs.statSync(d).isDirectory(); } catch (_) { ok = false; }
+    if (!ok) throw new Error('这个文件夹不存在或打不开');
+    downloadSettings.dir = d;
+    return true;
+  });
+
+  // 打开下载目录。★ 不接受界面传路径，固定用设置里那一个 ——
+  //   否则就等于给了网页一个"打开任意目录"的后门。
+  handle('download:openDir', async () => {
+    const dir = downloadSettings.dir;
+    if (!dir) throw new Error('还没设置下载目录');
+    if (!fs.existsSync(dir)) throw new Error('下载目录不存在了，请在设置里重新选择');
+    const err = await shell.openPath(dir);
+    if (err) throw new Error(err);
+    return true;
+  });
+
+  // 在资源管理器里定位到某个文件。★ 只取 basename，路径里的目录部分一律丢掉，
+  //   所以界面就算传 "../../windows/system32" 也只能落在下载目录里面。
+  handle('download:reveal', (file) => {
+    const dir = downloadSettings.dir;
+    if (!dir) throw new Error('还没设置下载目录');
+    const name = path.basename(String(file || ''));
+    if (!name) throw new Error('文件名不合法');
+    const full = path.join(dir, name);
+    if (!fs.existsSync(full)) throw new Error('文件不在了');
+    shell.showItemInFolder(full);
+    return true;
+  });
+
+  // ---- 本地歌曲：挑文件 / 挑文件夹 / 问文件在不在（v2.8.0）----
+  // ★ 这里只做"文件系统那一半"：选、扫描、读大小。**绝不碰存档** ——
+  //   本地歌曲库是界面在管的（界面才是 neko-data.json 的 owner），
+  //   主进程要是也去写，两边会互相覆盖，用户会看到歌莫名其妙少一批。
+  handle('local:pickFiles', async () => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    const res = await dialog.showOpenDialog(win, {
+      title: '选歌导入（可以按住 Ctrl 多选）',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '音频文件', extensions: [...AUDIO_EXT].map((e) => e.slice(1)) }],
+    });
+    if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
+    return { paths: res.filePaths, truncated: false };
+  });
+
+  handle('local:pickFolder', async () => {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    const res = await dialog.showOpenDialog(win, {
+      title: '选一个文件夹，把里面的歌都导入',
+      properties: ['openDirectory'],
+    });
+    if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
+    return scanAudioFolder(res.filePaths[0]);
+  });
+
+  // 批量问"这些文件还在不在、多大" —— 界面拿它标失效、算总占用
+  handle('local:stat', (paths) => {
+    const arr = Array.isArray(paths) ? paths : [paths];
+    return arr.map((p) => {
+      const s = String(p || '');
+      try {
+        const st = fs.statSync(s);
+        return { path: s, exists: st.isFile(), size: st.size };
+      } catch (_) {
+        return { path: s, exists: false, size: 0 };
+      }
+    });
+  });
 
   // ---- 桌面歌词（第二个窗口） ----
   // 主窗口负责"给内容"，这里负责"转发和操作窗口本身"。
@@ -1160,8 +1464,21 @@ app.whenReady().then(() => {
     /* 没填过就跳过 */
   }
 
+  // 先把本地歌曲库的白名单和下载设置装好 —— local:// 协议从**第一次请求**起就要能判断，
+  // 不能等界面来调 store:load（那时候可能已经有人在播本地歌了，会被误判成 403）。
+  try {
+    refreshLibraryCache(migrate(readDataFile() || DEFAULT_DATA, { bgDir: BG_DIR }));
+  } catch (err) {
+    console.error('[启动] 预读本地歌曲库失败，按空库处理：', err.message);
+    refreshLibraryCache(null);
+  }
+  // 接管上次没下完的任务：downloading / queued 一律先落成"已暂停"，
+  // 等用户点继续 —— 不能一开机就自动放出一堆请求（B 站会限流）。
+  try { downloader.adopt(readDownloadsFile()); } catch (_) {}
+
   registerBiliProtocol();
   registerBgProtocol(BG_DIR);
+  registerLocalProtocol({ getWhitelist: () => localWhitelist, coversDir: COVERS_DIR });
   registerHandlers();
   createWindow();
 
@@ -1179,7 +1496,17 @@ app.whenReady().then(() => {
 
 // 退出前把托盘图标销毁，否则它会**残留在托盘里**，直到鼠标划过去才消失
 // （这条是从参考项目 biu 学来的，见 docs/参考实现研究-biu.md §2.5）
-app.on('will-quit', () => { destroyTray(); });
+app.on('will-quit', () => {
+  // 退出前把下载收干净：进行中的一律落成"已暂停"（保留 .part，下次能接着下），
+  // 并把任务状态强制写一次盘 —— 平时是攒 1.5 秒写的，退出时不补这一下就会丢最近的进度。
+  try {
+    downloader.stopAll();
+    saveDownloadsNow();
+  } catch (err) {
+    console.error('[退出] 收尾下载任务失败：', err.message);
+  }
+  destroyTray();
+});
 
 // 除了 macOS，其他系统关闭所有窗口就退出程序。
 // ★ 注意：选「缩小到任务栏」时窗口是 hide() 而不是 close()，

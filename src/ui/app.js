@@ -92,6 +92,10 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 // 存档数据：歌单、收藏、历史、外观设置
 let DB = {
   playlists: [], favorites: [], history: [], lastTrack: null,
+  // v2.8.0：本地歌曲库。下载完成的会自动进来（受 settings.download.autoAddToLocal 控制），
+  // 手动导入的（导入歌曲 / 导入文件夹）也进这儿。
+  // 条目形状见 renderLocal() 上面的注释 —— 渲染时会被适配成 track 形状。
+  local: [],
   settings: {
     theme: 'pink',
     volume: 80,
@@ -104,6 +108,28 @@ let DB = {
 
 // 当前播放队列
 let queue = { tracks: [], index: -1, name: '' };
+
+/* ---------- 下载的界面侧状态（v2.8.0）----------
+   ★ 任务的**唯一 owner 是主进程**（它把状态写在 downloads.json 里）。
+     下面这几个变量只是一份"用来画面的镜像"：界面从不自己改任务状态，
+     一律发指令 → 等主进程推 download:changed → 再重画。
+     这样即便界面崩溃重开，看到的也永远是主进程那份真状态。 */
+let dlTasks = [];          // 全部任务（镜像）
+let dlStats = null;        // { done, running, failed, queued, paused, bytes, total }
+let dlDir = null;          // 主进程当前的下载目录（null = 还没选过）
+let dlFilter = 'all';      // 下载管理页当前筛的是哪一类：all / doing / done / failed
+
+/* 「已下载」的 key 集合（`bvid:cid`）。trackRow 每画一行都要查一次，
+   如果每次都去遍历 DB.local（可能上万条）+ 任务表，就是 O(n²)。
+   所以只在这些东西变化时重算一次，见 rebuildDlKeys()。 */
+let dlKeys = new Set();
+
+/* 「批量下载」的勾选模式（我喜欢 / 歌单的工具条点进去）。
+   ★ 为什么不复用 impState：那是「导入我的 B 站收藏夹」的状态机，带着 step / folders /
+     source 一整套；这里只要一个选择集。
+     但**选择集的形状故意做成一样的**（Map<bvid, track>），
+     这样 trackRow 里那套"按 bvid 反查勾没勾上"的渲染分支可以原样共用。 */
+let dlPick = null;         // { selected: Map<bvid, track> }；null = 不在勾选模式
 
 /* ★ v2.0.4：给每次"切歌"发一个序号。
    为什么需要它：playAt() 里有两段 await（补 cid、取音频地址），期间用户完全可能
@@ -192,6 +218,24 @@ function persistLater() {
   persistTimer = setTimeout(persist, 300);
 }
 
+/**
+ * 下载设置的默认值（v2.8.0）。
+ *
+ * ★ 这 5 个值必须和主进程 `src/store-migrate.js` 的 `DEFAULT_DOWNLOAD` **逐字一致** ——
+ *   两边都会往存档里补默认值（老存档打开时是 store-migrate 补、设置面板里改是这边补），
+ *   写歪一个就会出现"设置里显示 2、实际跑 3"这种查不出来的怪事。
+ *   `verify.js` 第 56 类会拿两个文件对一遍，防止以后改一边忘了另一边。
+ *
+ * dir 的语义：**null = 从没选过** → 第一次点下载时弹窗让用户选（Neo 明确要的行为）。
+ */
+const DOWNLOAD_DEFAULTS = {
+  dir: null,            // 下载目录的绝对路径
+  concurrent: 2,        // 同时下载几首（1~4）
+  saveCover: true,      // 顺手把封面存到本地（离线也能看到封面）
+  autoAddToLocal: true, // 下完自动进「本地歌曲」
+  skipExisting: true,   // 本地库里已有的跳过，不重复下
+};
+
 /** 外观设置的默认值，用来给老存档补洞 */
 const DEFAULT_SETTINGS = {
   theme: 'pink',
@@ -214,6 +258,8 @@ const DEFAULT_SETTINGS = {
   // v2.3.0：自定义快捷键。★ 只存"和默认不一样的那几条"（空对象 = 全用默认），
   // 所以老存档零迁移：没有这一项就是全默认，行为和以前一模一样。
   keys: {},
+  // v2.8.0：下载。默认值抽在 DOWNLOAD_DEFAULTS 里（理由见那里的注释）。
+  download: Object.assign({}, DOWNLOAD_DEFAULTS),
 };
 
 // 关窗行为的三种取值。★ 必须和主进程 src/app-menus.js 的 CLOSE_ACTIONS 一致
@@ -258,6 +304,27 @@ function isPlayModeId(v) {
   return PLAY_MODES.some((m) => m.id === v);
 }
 
+/**
+ * 补齐 / 夹住 `settings.download`（v2.8.0）。
+ *
+ * ★ 只做"值本身合不合法"，**不查目录在不在** —— 渲染层没有文件系统权限，
+ *   而且同步查盘会卡住界面。目录是否还在，由主进程在真正下载时判（它会回 needDir）。
+ *   主进程那份 store-migrate.js 里才做 `fs.existsSync` 的降级。
+ */
+function sanitizeDownload(raw) {
+  const o = (raw && typeof raw === 'object') ? raw : {};
+  const n = Number(o.concurrent);
+  return {
+    // 空串 / 全是空格 = 没选过，一律归一成 null（不然会被当成一个合法目录传下去）
+    dir: (typeof o.dir === 'string' && o.dir.trim()) ? o.dir.trim() : null,
+    concurrent: Number.isFinite(n) ? Math.min(4, Math.max(1, Math.round(n))) : DOWNLOAD_DEFAULTS.concurrent,
+    // 三个开关都只认"显式写了 false"才算关 —— 老存档没有这一项时必须是开，不能变成关
+    saveCover: o.saveCover !== false,
+    autoAddToLocal: o.autoAddToLocal !== false,
+    skipExisting: o.skipExisting !== false,
+  };
+}
+
 /** 补齐 DB.settings 里缺的字段（老版本存档没有这一项） */
 function migrateSettings() {
   const old = (DB.settings && typeof DB.settings === 'object') ? DB.settings : {};
@@ -286,6 +353,8 @@ function migrateSettings() {
     // v2.3.0：自定义键位。★ 只认识"字符串"，别的（手改坏了的存档）一律丢掉回到默认，
     // 免得一个 null 让 keyOf() 后面的比较全乱套。
     keys: sanitizeKeys(old.keys),
+    // v2.8.0：下载设置。老存档没有这一项 → 全默认（dir 为 null，第一次下载时才问）。
+    download: sanitizeDownload(old.download),
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -776,6 +845,8 @@ async function playAt(index) {
   // ★ 换歌不再先转圈：图标由 updatePlayBtn() 按"当前是否在播"决定。
   //   此刻若上一首还在播就显示 ‖、已停就显示 ▶，都跟真实状态一致。
   updatePlayBtn();
+  // v2.8.0：下载按钮也跟着换歌变（没下过 = 箭头 / 在下 = 环形进度 / 下好 = 绿勾）
+  syncDownloadBtn();
   $('timeTotal').textContent = fmtTime(track.duration);
 
   // 换歌了：清掉上一首的歌词（自动模式开着的话会顺手取新的）
@@ -936,7 +1007,10 @@ function trackRow(track, i, opts = {}) {
 
   // v2.6.0：这一行勾没勾上，从**选择集**反查（不是行自己的状态）——
   //   所以翻页 / 换收藏夹回来，勾选状态照样在，同一个视频也不会被算两次。
-  const picked = !!(opts.pick && impState && track.bvid && impState.selected.has(track.bvid));
+  // v2.8.0：下载的批量勾选复用同一套渲染，只是换了一个选择集（opts.pickSet）。
+  //   不显式传就退回导入页那个 —— 这样导入页那三屏一个字都不用改。
+  const pickSet = opts.pick ? (opts.pickSet || (impState && impState.selected) || null) : null;
+  const picked = !!(pickSet && track.bvid && pickSet.has(track.bvid));
 
   // 作者名：知道 UP 的 mid 就做成可点的（点开看这个 UP 的全部视频），
   // 老数据 / 收藏夹导入来的没有 mid，就还是普通文字，不会点出个空页面。
@@ -960,10 +1034,29 @@ function trackRow(track, i, opts = {}) {
       <div class="ops">
         <button class="op-ic ${liked ? 'on' : ''}" data-act="fav" data-i="${i}" data-tip="${liked ? '取消收藏' : '收藏'}">${ic(liked ? 'i-heart-fill' : 'i-heart')}</button>
         <button class="op-ic" data-act="add" data-i="${i}" data-tip="加入歌单">${ic('i-plus')}</button>
+        ${dlBtnHTML(track, i)}
         ${opts.detail ? `<button class="op-ic" data-act="detail" data-i="${i}" data-tip="详情">${ic('i-info')}</button>` : ''}
         ${opts.remove ? `<button class="op-ic" data-act="remove" data-i="${i}" data-tip="移除">${ic('i-trash')}</button>` : ''}
       </div>
     </div>`;
+}
+
+/**
+ * 行内那个下载按钮（v2.8.0）。
+ *
+ * 三种样子，和播放条上那个按钮一一对应：
+ *   · 没下过   → 向下的箭头
+ *   · 已下载过 → **整体变成绿色的小勾**（Neo 2026-10-15 指定）
+ *   · 下过但没成（失败/暂停）→ 仍然是箭头，具体状态去「下载管理」看
+ *
+ * ★ 绿勾用固定的语义色 `--ok`，**不用主题色 `--accent`** ——
+ *   五套主题里有一套就叫「薄荷绿」，用主题色的话"没下载"的按钮也会是绿的，
+ *   状态就完全分不出来了。理由在 style.css 顶部 `--ok-rgb` 那里有详述。
+ */
+function dlBtnHTML(track, i) {
+  if (!track || !track.bvid) return '';   // 本地歌 / 没有 bvid 的行不给下载入口
+  const done = isDownloaded(track);
+  return `<button class="op-ic ${done ? 'done' : ''}" data-act="download" data-i="${i}" data-tip="${done ? '已下载' : '下载'}">${ic(done ? 'i-check' : 'i-download')}</button>`;
 }
 
 function trackListHTML(tracks, opts = {}) {
@@ -1340,12 +1433,14 @@ function renderCollectList(filter) {
     ? rows.map(({ e, i }) => {
       const liked = isFav(e);
       const off = isEntryOff(collectState.bvid, e);
+      const done = isDownloaded(e);
       return `
         <div class="collect-row ${off ? 'off' : ''} ${sameTrack(e, cur) ? 'on' : ''}" data-ci="${i}">
           <span class="cn">${i + 1}</span>
           <span class="ct" title="${esc(e.title)}">${esc(e.title)}</span>
           <span class="cd">${fmtTime(e.duration)}</span>
           <span class="cops">
+            <button class="op-ic ${done ? 'done' : ''}" data-cact="download" data-ci="${i}" data-tip="${done ? '已下载' : '下载这一集'}">${ic(done ? 'i-check' : 'i-download')}</button>
             <button class="op-ic ${off ? '' : 'on'}" data-cact="toggle" data-ci="${i}" data-tip="${off ? '启用这一集' : '禁用这一集（不参与播放）'}">${ic(off ? 'i-off' : 'i-check')}</button>
             <button class="op-ic ${liked ? 'on' : ''}" data-cact="fav" data-ci="${i}" data-tip="${liked ? '取消收藏' : '收藏'}">${ic(liked ? 'i-heart-fill' : 'i-heart')}</button>
             <button class="op-ic" data-cact="add" data-ci="${i}" data-tip="加入歌单">${ic('i-plus')}</button>
@@ -1359,7 +1454,11 @@ function renderCollectList(filter) {
 
 /**
  * 顶部的三个数字/文案跟当前启用状态对齐：
- * 副标题写"已启用 x/y 集"、一键按钮写"全部禁用/全部启用"、两个批量按钮带上数量。
+ * 副标题写"已启用 x/y 集"、一键按钮写"全部禁用/全部启用"、批量按钮带上数量。
+ *
+ * ★ v2.8.0：「播放全部」换成了「批量下载」（Neo 拍板，见改造计划 §3.4）。
+ *   代价是这一屏不再有一键播全部选集 —— 想整段听，选集行本身点一下就播，
+ *   从那一集开始照样连着往下播。
  */
 function syncCollectBar() {
   if (!collectState) return;
@@ -1368,8 +1467,8 @@ function syncCollectBar() {
   $('collectSub').textContent = `${collectState.baseSub} · 已启用 ${on.length}/${entries.length} 集`;
   const all = $('btnCollectToggleAll');
   if (all) all.textContent = (on.length === entries.length) ? '全部禁用' : '全部启用';
-  const play = $('btnPlayCollect');
-  if (play) play.textContent = `播放全部 (${on.length})`;
+  const dl = $('btnDownloadCollect');
+  if (dl) dl.textContent = `批量下载 (${on.length})`;
 }
 
 /** 一键全部启用 / 全部禁用（按当前状态决定往哪边切） */
@@ -1422,6 +1521,11 @@ function bindCollect() {
         }
         else if (act.dataset.cact === 'fav') { toggleFav(entry); renderCollectList($('collectSearch').value); }
         else if (act.dataset.cact === 'add') addToPlaylist(entry);
+        // v2.8.0：只下这一集。下完要重画面板 —— 那个按钮要变成绿色小勾。
+        else if (act.dataset.cact === 'download') {
+          enqueueDownloads([entry], { jump: false })
+            .then(() => { if (collectState) renderCollectList($('collectSearch').value); });
+        }
       }
       return;
     }
@@ -1429,13 +1533,13 @@ function bindCollect() {
     if (row) playCollectEntry(Number(row.dataset.ci));
   });
   $('btnCollectToggleAll').addEventListener('click', toggleAllEntries);
-  $('btnPlayCollect').addEventListener('click', () => {
+  // v2.8.0：这里原来是「播放全部」，现在是「批量下载」——把**启用中的**整批丢进下载队列。
+  // ★ 不跳转到「下载管理」：面板还开着，跳走等于把用户正在看的选集列表抽掉。
+  $('btnDownloadCollect').addEventListener('click', () => {
     if (!collectState) return;
     const on = enabledEntries(collectState, collectState.entries);
     if (!on.length) { toast('这条合集里的曲目都被禁用了'); return; }
-    playTracks(on, 0, collectState.title);
-    renderCollectList($('collectSearch').value);
-    toast(`开始播放 ${on.length} 首`);
+    enqueueDownloads(on, { jump: false });
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && collectState) closeCollectPanel();
@@ -2201,6 +2305,7 @@ function renderParsed() {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayParsed">${ic('i-play')}<span>播放全部 (${tracks.length})</span></button>
+        <button class="ghost-btn" id="btnDownloadParsed">${ic('i-download')}<span>批量下载 (${tracks.length})</span></button>
         <button class="ghost-btn" id="btnAddParsed">＋ 全部加入歌单</button>
       </div>
     </div>
@@ -2220,6 +2325,7 @@ function renderParsed() {
 /* ---------- 页面 3：我的收藏 ---------- */
 function renderFavorites() {
   currentView = 'favorites';
+  const picking = !!dlPick;   // v2.8.0：正在批量勾选
   content().innerHTML = `
     <div class="block-head">
       <div>
@@ -2228,10 +2334,15 @@ function renderFavorites() {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayFav">${ic('i-play')}<span>播放全部</span></button>
+        <button class="${picking ? 'primary-btn' : 'ghost-btn'}" id="btnDownloadFav">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
       </div>
     </div>
+    ${picking ? dlBarHTML() : ''}
     ${trackListHTML(DB.favorites, {
-      remove: true,
+      // 勾选模式下把「移除」收起来：一行里"点一下是勾选、旁边那个点一下是删掉"太容易点错
+      remove: !picking,
+      pick: picking,
+      pickSet: picking ? dlPick.selected : null,
       emptyIcon: 'i-heart',
       emptyText: '还没有收藏任何歌',
       emptyHint: '在列表里点「收藏」，或者按播放条上的小爱心',
@@ -2259,6 +2370,7 @@ function renderPlaylist(playlistId) {
   const pl = DB.playlists.find((p) => p.id === playlistId);
   if (!pl) { currentView = 'discovery'; return renderAll(); }   // 歌单没了（被删）→ 回「发现」首页
   currentView = 'playlist:' + playlistId;
+  const picking = !!dlPick;   // v2.8.0：正在批量勾选
   content().innerHTML = `
     <div class="block-head">
       <div>
@@ -2267,12 +2379,16 @@ function renderPlaylist(playlistId) {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayPl">${ic('i-play')}<span>播放全部</span></button>
+        <button class="${picking ? 'primary-btn' : 'ghost-btn'}" id="btnDownloadPl">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
         <button class="ghost-btn" id="btnRenamePl">重命名</button>
         <button class="ghost-btn" id="btnDelPl">删除歌单</button>
       </div>
     </div>
+    ${picking ? dlBarHTML() : ''}
     ${trackListHTML(pl.tracks, {
-      remove: true,
+      remove: !picking,
+      pick: picking,
+      pickSet: picking ? dlPick.selected : null,
       emptyIcon: 'i-note',
       emptyText: '这个歌单还是空的',
       emptyHint: '去搜索页面，用「＋歌单」把歌加进来',
@@ -2877,6 +2993,519 @@ async function importPicked() {
   renderAll();
 }
 
+/* ============================================================
+   第 4.7 部分：下载（v2.8.0）
+   ------------------------------------------------------------
+   四个下载入口（歌曲行内 / 播放条 / 歌单与喜欢的批量 / 合集选集）都汇到
+   enqueueDownloads() 这一个函数，再由它调主进程的 download:add。
+
+   任务状态、进度、完成通知**全部由主进程推回来**
+   （download:changed / download:progress / download:finished），这边只维护一份镜像 + 重画。
+
+   ★ 为什么任务状态不放 DB（neko-data.json）：那个文件已经 6MB 了，而进度每 300ms 变一次，
+     写进去等于每 300ms 序列化并落盘 6MB。任务状态归主进程的 downloads.json。
+   ============================================================ */
+
+/** 字节数 → "1.2 MB"。下载管理页显示速度、体积都用它。 */
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+/** 目录 + 文件名 → 完整路径。渲染层没有 path 模块，自己拼（本项目只跑 Windows）。 */
+function joinPath(dir, name) {
+  const d = String(dir || '').replace(/[\\/]+$/, '');
+  return d + '\\' + String(name || '');
+}
+
+/** 重画当前页但**保留滚动位置** —— 勾选 / 全选这种不该把人弹回顶部 */
+function rerenderKeepScroll() {
+  const top = content().scrollTop;
+  renderAll();
+  content().scrollTop = top;
+}
+
+/** 重算「已下载」的 key 集合。DB.local 或任务表一变就得调一次。 */
+function rebuildDlKeys() {
+  const s = new Set();
+  for (const e of (DB.local || [])) if (e && e.key) s.add(String(e.key));
+  for (const t of dlTasks) if (t && t.key && t.status === 'done') s.add(String(t.key));
+  dlKeys = s;
+}
+
+/** 这首歌是不是已经在本地库里了（行内按钮 / 播放条按钮据此变成绿勾）。 */
+function isDownloaded(track) {
+  if (!track || !track.bvid || !track.cid) return false;
+  return dlKeys.has(track.bvid + ':' + String(track.cid));
+}
+
+/** 这首歌对应的下载任务（没有就 null）。cid 还没补齐时判不出来 —— 那就当没有。 */
+function taskForTrack(track) {
+  if (!track || !track.bvid || !track.cid) return null;
+  const key = track.bvid + ':' + String(track.cid);
+  return dlTasks.find((x) => x.key === key) || null;
+}
+
+/**
+ * 按任务表算统计。
+ * ★ 用"自己算"而不是取主进程返回的 stats：`download:changed` 那条推送只带任务表、
+ *   不带 stats，两处各留一份迟早会漂。规则和主进程 downloader.stats() 一致。
+ */
+function computeDlStats() {
+  const st = { done: 0, running: 0, failed: 0, queued: 0, paused: 0, bytes: 0, total: dlTasks.length };
+  for (const t of dlTasks) {
+    if (t.status === 'done')             { st.done++;    st.bytes += t.received || 0; }
+    else if (t.status === 'downloading') { st.running++; st.bytes += t.received || 0; }
+    else if (t.status === 'failed')      st.failed++;
+    else if (t.status === 'paused')      { st.paused++;  st.bytes += t.received || 0; }
+    else if (t.status === 'queued')      st.queued++;
+  }
+  return st;
+}
+
+/** 侧栏「下载管理」上的角标：还有几个没下完（0 个就藏起来）。 */
+function syncDlBadge() {
+  const el = $('dlBadge');
+  if (!el) return;
+  const n = dlStats ? (dlStats.running + dlStats.queued + dlStats.paused) : 0;
+  el.textContent = n > 99 ? '99+' : String(n);
+  el.hidden = n <= 0;
+}
+
+/** 拉一次全量任务列表（打开下载管理页 / 每次操作之后调） */
+async function refreshDownloads() {
+  try {
+    const r = await api('downloadList');
+    dlTasks = Array.isArray(r.tasks) ? r.tasks : [];
+    dlDir = r.dir || null;
+  } catch (err) {
+    console.error('读取下载列表失败', err);
+  }
+  dlStats = computeDlStats();
+  rebuildDlKeys();
+  syncDlBadge();
+}
+
+/**
+ * 弹"选个文件夹存下载"。返回 true = 选好了可以继续下；false = 用户取消 / 目录用不了。
+ *
+ * ★ 选完必须**同时**告诉两边，漏一边就会出现"设置里显示对了、下载还是报没目录"：
+ *   · 界面写进 DB.settings.download.dir（存档归界面管，主进程不碰 neko-data.json）
+ *   · 主进程收到 downloadSetDir，好让**这一次**立刻就能下（它不读存档，只看内存里那份）
+ */
+async function openDownloadPicker() {
+  let res;
+  try { res = await api('downloadPickDir'); }
+  catch (err) { toast('选目录失败：' + (err.message || '')); return false; }
+  if (!res || !res.dir) return false;                     // 用户点了取消
+  try { await api('downloadSetDir', res.dir); }
+  catch (err) { toast('这个文件夹用不了：' + (err.message || '')); return false; }
+
+  if (!DB.settings.download) DB.settings.download = Object.assign({}, DOWNLOAD_DEFAULTS);
+  DB.settings.download.dir = res.dir;
+  dlDir = res.dir;
+  await persist();          // 存了 → 主进程 refreshLibraryCache 也会跟着对齐
+  syncSettingsUI();         // 设置面板里那个"当前下载目录"跟着变（面板没开着也无害）
+  toast('下载位置已设为 ' + res.dir);
+  return true;
+}
+
+/**
+ * 把一批曲目丢进下载队列 —— 四个下载入口的唯一汇合点。
+ *
+ * ★ 为什么必须先逐首补齐 cid：下载引擎要 `bvid + cid` 两个都在才肯排，
+ *   而收藏夹 / 歌单里的歌经常只有 bvid（搜出来直接加歌单、从没播过，cid 一直是空的）。
+ *   补 cid 一首一次网络请求，所以串行做，并如实报出"有几首取不到"——
+ *   不能让一首失败把整批带崩，也不能假装全都排上了。
+ *
+ * @param {Array} tracks
+ * @param {{jump?:boolean}} [opts] jump=false 时不跳到「下载管理」（合集面板里下载时用）
+ */
+async function enqueueDownloads(tracks, opts = {}) {
+  const jump = opts.jump !== false;
+  const list = (Array.isArray(tracks) ? tracks : [tracks]).filter((t) => t && t.bvid);
+  if (!list.length) { toast('这里没有可以下载的曲目'); return; }
+
+  // ① 还没选过下载目录 → 先弹窗选。Neo 定的行为：不预设目录，第一次下载时才问。
+  if (!(DB.settings.download && DB.settings.download.dir)) {
+    const ok = await openDownloadPicker();
+    if (!ok) return;
+  }
+
+  // ② 补齐 cid（已经有了的直接跳过）
+  const ready = [];
+  let failed = 0;
+  if (list.length > 1) toast(`正在准备 ${list.length} 首…`);
+  for (const t of list) {
+    if (!t.cid) {
+      try { await ensureCid(t); } catch (_) { /* 视频被删 / 是番剧 → 算取不到 */ }
+    }
+    if (t.cid) ready.push(t); else failed++;
+  }
+  if (!ready.length) { toast('这些曲目都取不到下载地址'); return; }
+
+  // ③ 交给主进程排队
+  let res;
+  try {
+    res = await api('downloadAdd', ready);
+  } catch (err) { toast('加入下载失败：' + (err.message || '')); return; }
+
+  if (res.needDir) {
+    // 目录在两次调用之间被删了 → 再给用户一次机会
+    const ok = await openDownloadPicker();
+    if (!ok) return;
+    try { res = await api('downloadAdd', ready); }
+    catch (err) { toast('加入下载失败：' + (err.message || '')); return; }
+  }
+
+  const parts = [];
+  if (res.added)      parts.push(`已加入下载 ${res.added} 首`);
+  if (res.skipped)    parts.push(`${res.skipped} 首本地已有`);
+  if (res.duplicates) parts.push(`${res.duplicates} 首已在队列`);
+  if (failed)         parts.push(`${failed} 首取不到`);
+  toast(parts.length ? parts.join(' · ') : '没有新的可下载曲目');
+
+  if (dlPick) dlPick = null;                     // 批量勾选干完了 → 退出勾选模式
+  await refreshDownloads();
+  if (jump && res.added) currentView = 'downloads';
+  renderAll();
+}
+
+/**
+ * 播放条上"当前这一首"。
+ * ★ 队列里没有时（刚启动、还没播过）退回 `DB.lastTrack` —— 播放条上的歌名/作者
+ *   本来就是从 lastTrack 恢复出来的（见 boot 第 5 步），下载按钮要跟它对齐，
+ *   不然会出现"歌名显示着、下载按钮却是灰的"。
+ */
+function currentBarTrack() {
+  return queue.tracks[queue.index] || DB.lastTrack || null;
+}
+
+/**
+ * 播放条上那个下载按钮（index.html:405）。三种样子，和行内按钮一一对应：
+ *   · 没下过 → 向下箭头，点一下把当前这首加进下载队列
+ *   · 在队列 / 正在下 → 环形进度，点一下跳到「下载管理」
+ *   · 已下好 → 绿色小勾，点一下在资源管理器里定位到那个文件
+ * ★ 绿用固定的 --ok，不跟主题色走（理由同 dlBtnHTML 的注释）。
+ */
+function syncDownloadBtn() {
+  const btn = $('btnDownload');
+  if (!btn) return;
+  const t = currentBarTrack();
+  if (!t || !t.bvid) {
+    btn.className = 'ico-btn disabled';
+    btn.innerHTML = ic('i-download');
+    btn.title = '下载这首歌';
+    return;
+  }
+  const task = taskForTrack(t);
+  if (task && task.status === 'done') {
+    btn.className = 'ico-btn done';
+    btn.innerHTML = ic('i-check');
+    btn.title = '已下载 · 点一下打开所在文件夹';
+  } else if (task && (task.status === 'downloading' || task.status === 'queued')) {
+    const pct = task.total ? Math.min(100, Math.round((task.received / task.total) * 100)) : 0;
+    btn.className = 'ico-btn';
+    btn.innerHTML = `<span class="dl-ring" style="--p:${pct}"></span>`;
+    btn.title = task.status === 'queued' ? '排队中 · 点一下看下载管理' : `正在下载 ${pct}% · 点一下看下载管理`;
+  } else {
+    btn.className = 'ico-btn';
+    btn.innerHTML = ic('i-download');
+    btn.title = (task && task.status === 'paused') ? '下载已暂停 · 点一下继续'
+              : (task && task.status === 'failed') ? '上次下载失败 · 点一下重试'
+              : '下载这首歌';
+  }
+}
+
+/* ---------------- 批量勾选模式 ---------------- */
+
+/** 工具条上「批量下载」：进入 / 退出勾选模式（我喜欢、歌单两个视图共用） */
+function toggleDlPick() {
+  if (dlPick) { dlPick = null; renderAll(); return; }
+  // 把"从哪个视图进来的"记下来：换页就自动退出，不然跑到「发现」会发现每行都带勾选框
+  dlPick = { view: currentView, selected: new Map() };
+  renderAll();
+}
+
+/** 勾选模式下那条「已选 N 首 · 全选 · 清空 · 开始下载」（复用导入页 .imp-bar 的样式） */
+function dlBarHTML() {
+  const n = dlPick ? dlPick.selected.size : 0;
+  return `
+    <div class="imp-bar">
+      <span class="imp-count">已选 <b>${n}</b> 首</span>
+      <span class="imp-bar-actions">
+        <button class="ghost-btn" id="btnDlPickAll">全选</button>
+        <button class="ghost-btn" id="btnDlPickNone"${n ? '' : ' disabled'}>清空选择</button>
+        <button class="primary-btn" id="btnDlPickDo"${n ? '' : ' disabled'}>下载选中的 ${n} 首</button>
+      </span>
+    </div>`;
+}
+
+/** 点整行 = 勾 / 取消（和导入页 impToggle 一套逻辑，只是换了个选择集） */
+function dlToggle(i) {
+  if (!dlPick) return;
+  const t = currentTracks()[i];
+  if (!t || !t.bvid) return;
+  if (dlPick.selected.has(t.bvid)) dlPick.selected.delete(t.bvid);
+  else dlPick.selected.set(t.bvid, t);
+  rerenderKeepScroll();
+}
+
+function dlPickAll() {
+  if (!dlPick) return;
+  for (const t of currentTracks()) if (t && t.bvid) dlPick.selected.set(t.bvid, t);
+  rerenderKeepScroll();
+}
+
+function dlPickNone() {
+  if (!dlPick) return;
+  dlPick.selected.clear();
+  rerenderKeepScroll();
+}
+
+async function dlDoPicked() {
+  if (!dlPick) return;
+  const list = Array.from(dlPick.selected.values());
+  if (!list.length) return;
+  await enqueueDownloads(list);
+}
+
+/* ---------------- 下载管理页（页面 7） ---------------- */
+
+const DL_FILTERS = [
+  { id: 'all',    name: '全部' },
+  { id: 'doing',  name: '下载中' },
+  { id: 'done',   name: '已完成' },
+  { id: 'failed', name: '失败' },
+];
+
+function dlMatch(t, f) {
+  if (f === 'doing') return t.status === 'downloading' || t.status === 'queued' || t.status === 'paused';
+  if (f === 'done') return t.status === 'done';
+  if (f === 'failed') return t.status === 'failed';
+  return true;
+}
+
+function dlCountOf(f) { return dlTasks.filter((t) => dlMatch(t, f)).length; }
+
+/** 任务行的操作按钮。图标 + 悬停提示（跟列表行内那套 .op-ic 一致）。 */
+function dlOpBtn(act, tip, icon, id) {
+  return `<button class="op-ic" data-dlact="${act}" data-dlid="${esc(id)}" data-tip="${esc(tip)}">${ic(icon)}</button>`;
+}
+
+function dlRowHTML(t) {
+  const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : 0;
+  const cover = t.cover
+    ? `<div class="dl-cover" style="background-image:url('${esc(t.cover)}')"></div>`
+    : `<div class="dl-cover"></div>`;
+
+  let status = '';
+  let sub = '';                 // ★ 一律存**纯文本**，由下面模板统一 esc 一次，别在这儿先转义
+  let ops = '';
+  if (t.status === 'downloading') {
+    status = `${pct}% · ${fmtBytes(t.speed)}/s`;
+    sub = `${t.author ? t.author + ' · ' : ''}${fmtBytes(t.received)}${t.total ? ' / ' + fmtBytes(t.total) : ''}`;
+    ops = dlOpBtn('pause', '暂停', 'i-pause', t.id) + dlOpBtn('cancel', '取消并删掉临时文件', 'i-off', t.id);
+  } else if (t.status === 'queued') {
+    status = '等待中';
+    sub = `${t.author ? t.author + ' · ' : ''}前面还有任务在排队`;
+    ops = dlOpBtn('cancel', '取消', 'i-off', t.id);
+  } else if (t.status === 'paused') {
+    status = `已暂停 · ${pct}%`;
+    sub = `${t.author ? t.author + ' · ' : ''}${fmtBytes(t.received)}${t.total ? ' / ' + fmtBytes(t.total) : ''}`;
+    ops = dlOpBtn('resume', '继续下载', 'i-play', t.id) + dlOpBtn('cancel', '取消并删掉临时文件', 'i-off', t.id);
+  } else if (t.status === 'done') {
+    status = '已完成';
+    sub = `${t.author ? t.author + ' · ' : ''}${fmtBytes(t.received)}`;
+    ops = dlOpBtn('reveal', '打开所在位置', 'i-reveal', t.id) + dlOpBtn('remove', '删除这条记录', 'i-trash', t.id);
+  } else {
+    status = '失败';
+    sub = `${t.author ? t.author + ' · ' : ''}${t.error || '下载失败'}`;
+    ops = dlOpBtn('retry', '重试', 'i-retry', t.id) + dlOpBtn('remove', '删除这条记录', 'i-trash', t.id);
+  }
+
+  return `
+    <div class="dl-row" data-dlid="${esc(t.id)}">
+      ${cover}
+      <div class="dl-meta">
+        <div class="dl-line1">
+          <span class="dl-title" title="${esc(t.title)}">${esc(t.title || t.bvid)}</span>
+          <span class="dl-status${t.status === 'done' ? ' ok' : (t.status === 'failed' ? ' err' : '')}">${esc(status)}</span>
+        </div>
+        <div class="dl-sub">${esc(sub)}</div>
+        ${(t.status === 'downloading' || t.status === 'paused')
+          ? `<div class="dl-bar"><i style="width:${pct}%"></i></div>` : ''}
+      </div>
+      <div class="dl-ops">${ops}</div>
+    </div>`;
+}
+
+function dlEmptyHTML() {
+  const txt = {
+    all:    ['还没有下载任务', '在歌曲行、播放条或歌单里点「下载」就会出现在这里'],
+    doing:  ['没有正在下载的任务', ''],
+    done:   ['还没有下完的歌', ''],
+    failed: ['没有失败的任务', ''],
+  }[dlFilter] || ['', ''];
+  return `<div class="empty">
+    <div class="big">${ic('i-download')}</div>
+    <div class="msg">${esc(txt[0])}</div>
+    <div class="hint">${esc(txt[1])}</div>
+  </div>`;
+}
+
+function renderDownloads() {
+  currentView = 'downloads';
+  const st = dlStats || computeDlStats();
+  const doing = st.running + st.queued + st.paused;
+  const rows = dlTasks.filter((t) => dlMatch(t, dlFilter));
+
+  content().innerHTML = `
+    <div class="block-head">
+      <div>
+        <div class="block-title">下载管理</div>
+        <div class="block-sub dl-stats">
+          已完成 ${st.done} · 下载中 ${doing} · 失败 ${st.failed} · 共占用 ${fmtBytes(st.bytes)}
+        </div>
+      </div>
+      <div class="block-actions">
+        <button class="ghost-btn" id="btnDlOpenDir"${dlDir ? '' : ' disabled'}>${ic('i-folder')}<span>打开下载文件夹</span></button>
+        <button class="ghost-btn" id="btnDlClearDone"${st.done ? '' : ' disabled'}>清空已完成</button>
+      </div>
+    </div>
+
+    ${dlDir ? '' : `
+      <div class="local-warn">
+        ${ic('i-info')}
+        <span>还没设置下载位置 —— 点任意一首歌的下载按钮，会先让你选一个文件夹。</span>
+        <span class="spacer"></span>
+        <button class="ghost-btn" id="btnDlSetDir">去设置</button>
+      </div>`}
+
+    <div class="dl-tabs">
+      ${DL_FILTERS.map((f) => `<button class="dl-tab${dlFilter === f.id ? ' on' : ''}" data-dlf="${f.id}">${f.name} ${dlCountOf(f.id)}</button>`).join('')}
+      <span class="spacer"></span>
+      <button class="ghost-btn" id="btnDlPauseAll"${st.running || st.queued ? '' : ' disabled'}>全部暂停</button>
+      <button class="ghost-btn" id="btnDlRetryAll"${st.failed ? '' : ' disabled'}>重试失败项</button>
+    </div>
+
+    ${rows.length ? `<div class="dl-list">${rows.map(dlRowHTML).join('')}</div>` : dlEmptyHTML()}`;
+}
+
+/**
+ * 进度是每 300ms 一条的高频推送：**只改那一小块宽度和文字，不重画整页** ——
+ * 重画会把滚动位置和按钮的悬停状态一起打断，列表长了还会掉帧。
+ */
+function patchDlProgress(list) {
+  for (const t of list) {
+    const row = content().querySelector(`.dl-row[data-dlid="${t.id}"]`);
+    if (!row) continue;
+    const pct = t.total ? Math.min(100, Math.round((t.received / t.total) * 100)) : 0;
+    const bar = row.querySelector('.dl-bar > i');
+    if (bar) bar.style.width = pct + '%';
+    const st = row.querySelector('.dl-status');
+    if (st && t.status === 'downloading') st.textContent = `${pct}% · ${fmtBytes(t.speed)}/s`;
+  }
+}
+
+/* ---------------- 任务操作 ---------------- */
+
+/** 「删除记录」确认框。★ 默认**不勾**"同时删磁盘文件"——
+ *  删记录可逆（重下就有），删文件不可逆，所以危险的那一半必须用户主动勾。 */
+function askRemoveTask(title) {
+  const p = openPrompt('删除下载记录',
+    `<div class="pl-empty" style="padding:0">「${esc(title || '这首歌')}」会从下载列表里移掉。</div>` +
+    `<label class="dl-del-chk"><input type="checkbox" id="promptDelFile" /><span>同时删掉磁盘上的文件（不可恢复）</span></label>`,
+    `<button class="ghost-btn" id="promptCancel">取消</button>` +
+    `<button class="primary-btn" id="promptOk">删除</button>`);
+  $('promptOk').addEventListener('click', () => {
+    const c = $('promptDelFile');
+    closePrompt({ deleteFile: !!(c && c.checked) });
+  });
+  $('promptCancel').addEventListener('click', () => closePrompt(null));
+  return p;
+}
+
+async function dlRemoveOne(t) {
+  const res = await askRemoveTask(t.title);
+  if (!res) return;                       // 用户取消 / 直接关掉了弹窗
+  try { await api('downloadRemove', [t.id], !!res.deleteFile); }
+  catch (err) { toast(err.message || '删除失败'); return; }
+
+  // 连磁盘文件一起删了 → 本地库里那条也该走，否则「本地歌曲」会留一条失效项
+  if (res.deleteFile && t.file && dlDir) {
+    const full = joinPath(dlDir, t.file);
+    const before = (DB.local || []).length;
+    DB.local = (DB.local || []).filter((e) => !e || e.path !== full);
+    if (DB.local.length !== before) { rebuildDlKeys(); persistLater(); }
+  }
+  await refreshDownloads();
+  renderAll();
+}
+
+async function dlClearFinished() {
+  try { await api('downloadClearFinished'); }
+  catch (err) { toast(err.message || '清空失败'); return; }
+  await refreshDownloads();
+  renderAll();
+  toast('已清空完成记录（磁盘上的文件没动）');
+}
+
+async function dlPauseAll() {
+  const ids = dlTasks.filter((t) => t.status === 'downloading' || t.status === 'queued').map((t) => t.id);
+  if (!ids.length) return;
+  for (const id of ids) { try { await api('downloadPause', id); } catch (_) {} }
+  await refreshDownloads();
+  renderAll();
+  toast(`已暂停 ${ids.length} 个任务`);
+}
+
+async function dlRetryAll() {
+  const ids = dlTasks.filter((t) => t.status === 'failed').map((t) => t.id);
+  if (!ids.length) return;
+  for (const id of ids) { try { await api('downloadRetry', id); } catch (_) {} }
+  await refreshDownloads();
+  renderAll();
+  toast(`正在重试 ${ids.length} 个任务`);
+}
+
+async function handleDlAction(act, id) {
+  const t = dlTasks.find((x) => x.id === id);
+  if (!t) return;
+  try {
+    if (act === 'pause')       await api('downloadPause', id);
+    else if (act === 'resume') await api('downloadResume', id);
+    else if (act === 'retry')  await api('downloadRetry', id);
+    else if (act === 'cancel') await api('downloadCancel', id);
+    else if (act === 'reveal') { await api('downloadReveal', t.file); return; }
+    else if (act === 'remove') { await dlRemoveOne(t); return; }
+    else return;
+  } catch (err) {
+    toast(err.message || '操作失败');
+    return;
+  }
+  await refreshDownloads();
+  renderAll();
+}
+
+/**
+ * 下载完成 → 把这条并进本地歌曲库。
+ * ★ 去重键用**路径**：下载器已经保证同一首歌不会重复下，但用户可能删过记录又重下，
+ *   所以这里再兜一道（同一条路径只会留一条）。
+ */
+function addLocalEntry(entry) {
+  if (!entry || !entry.path) return;
+  DB.local = Array.isArray(DB.local) ? DB.local : [];
+  DB.local = DB.local.filter((e) => e && e.path !== entry.path);
+  DB.local.unshift(Object.assign({ id: uid(), addedAt: Date.now(), src: 'download' }, entry));
+  if (DB.local.length > 20000) DB.local.length = 20000;   // 兜底，别让存档无限长
+  rebuildDlKeys();
+  persistLater();
+}
+
 /* ---------- 侧边栏：歌单列表 ---------- */
 function renderPlaylistSidebar() {
   const ul = $('playlistList');
@@ -2894,13 +3523,21 @@ function renderPlaylistSidebar() {
   ul.querySelectorAll('[data-pl]').forEach((el) => {
     el.addEventListener('click', (e) => {
       if (e.target.dataset.del) { deletePlaylist(e.target.dataset.del); return; }
-      renderPlaylist(el.dataset.pl);
+      // ★ 走 renderAll（而不是直接 renderPlaylist）：这样"批量勾选模式绑定在某个视图上"
+      //   那条清理规则只在 renderAll 里有一处，从这个入口进来也能被清掉。
+      currentView = 'playlist:' + el.dataset.pl;
+      renderAll();
     });
   });
 }
 
 /** 根据 currentView 重新画整个界面 */
 function renderAll() {
+  // v2.8.0：批量勾选模式是**绑定在某个视图上**的（进的时候记下了 dlPick.view）。
+  //   换到别的页面就自动退出 —— 不然跑到「发现」会发现每行都带着勾选框、
+  //   点一下还会弹出下载，看着像界面坏了。
+  if (dlPick && dlPick.view !== currentView) dlPick = null;
+
   renderPlaylistSidebar();
   syncNavHighlight();   // 侧栏高亮永远跟着"当前在哪一页"走（不再只在点侧栏时才更新）
   if (currentView === 'search') renderSearch();
@@ -2910,6 +3547,7 @@ function renderAll() {
   }
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'history') renderHistory();
+  else if (currentView === 'downloads') renderDownloads();
   else if (currentView === 'up') renderUp();
   else if (currentView === 'importMine') renderImportMine();   // v2.6.0：导入我的 B 站收藏夹
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
@@ -3385,6 +4023,20 @@ function closeSettings() {
   $('modalMask').classList.remove('show');
 }
 
+/**
+ * 打开设置面板并直接停在某一页（tab）。
+ * ★ 抽出来是为了让"从别处跳到设置某页"（比如下载管理页那条「去设置」）
+ *   和"点 tab"走同一条路 —— 两处各写一遍 toggle 逻辑，迟早会有一处忘了同步。
+ */
+function showSettingsTab(name) {
+  openSettings();
+  const tabs = $('modalTabs');
+  if (tabs) {
+    tabs.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+  }
+  document.querySelectorAll('.pane').forEach((p) => p.classList.toggle('active', p.dataset.pane === name));
+}
+
 /** 打开面板前，先把存档里的值回填到各个控件上 */
 function syncSettingsUI() {
   const s = DB.settings;
@@ -3472,6 +4124,25 @@ function syncSettingsUI() {
 
   // v2.3.0：快捷键页的列表（每次打开面板都重画一遍，改过的键位才会在框里显示出来）
   renderKeyList();
+
+  // v2.8.0：下载页
+  const dls = DB.settings.download || DOWNLOAD_DEFAULTS;
+  const dirBox = $('dlDirBox');
+  if (dirBox) {
+    dirBox.textContent = dls.dir || '还没选过 —— 第一次点下载时会弹窗让你选';
+    dirBox.classList.toggle('empty', !dls.dir);
+  }
+  const rngC = $('rngDlConcurrent');
+  if (rngC) {
+    rngC.value = dls.concurrent;
+    $('valDlConcurrent').textContent = dls.concurrent;
+  }
+  const cCover = $('chkDlCover');
+  if (cCover) cCover.checked = dls.saveCover !== false;
+  const cAuto = $('chkDlAutoAdd');
+  if (cAuto) cAuto.checked = dls.autoAddToLocal !== false;
+  const cSkip = $('chkDlSkip');
+  if (cSkip) cSkip.checked = dls.skipExisting !== false;
 }
 
 /**
@@ -3507,11 +4178,7 @@ function bindSettings() {
   /* ---- 左右两个 Tab ---- */
   $('modalTabs').addEventListener('click', (e) => {
     const tab = e.target.closest('.tab');
-    if (!tab) return;
-    $('modalTabs').querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t === tab));
-    document.querySelectorAll('.pane').forEach((p) => {
-      p.classList.toggle('active', p.dataset.pane === tab.dataset.tab);
-    });
+    if (tab) showSettingsTab(tab.dataset.tab);
   });
 
   /* ---- 快捷键页（v2.3.0） ---- */
@@ -3679,6 +4346,45 @@ function bindSettings() {
       forceReportUiState();   // ★ 必须强推：见 forceReportUiState 的说明（去重会把这一次吞掉）
     });
   });
+
+  /* ---- v2.8.0：下载分页 ----
+     ★ 这几个设置**不用额外通知主进程**：改完 persist() → 主进程 store:save 里会跑
+       refreshLibraryCache()，它把 settings.download 抄进内存那份并调 downloader.setConcurrent()。
+       所以"改完立刻生效"是这么来的，别在这儿再补一次 IPC（补了反而两处打架）。 */
+  const dlCfg = () => {
+    if (!DB.settings.download) DB.settings.download = Object.assign({}, DOWNLOAD_DEFAULTS);
+    return DB.settings.download;
+  };
+
+  $('btnPickDlDir').addEventListener('click', async () => {
+    // 换目录：openDownloadPicker 会把结果同时写给界面和主进程，并 toast 出来
+    await openDownloadPicker();
+  });
+
+  $('btnOpenDlDir').addEventListener('click', async () => {
+    try { await api('downloadOpenDir'); }
+    catch (err) { toast(err.message || '打不开下载目录'); }
+  });
+
+  $('rngDlConcurrent').addEventListener('input', (e) => {
+    const v = Math.min(4, Math.max(1, Math.round(Number(e.target.value) || DOWNLOAD_DEFAULTS.concurrent)));
+    $('valDlConcurrent').textContent = v;
+    dlCfg().concurrent = v;
+    persistLater();
+  });
+
+  // 三个开关。★ 都写成"显式布尔"再存 —— 拖动过程中反复 persistLater 不会把值写歪。
+  const bindDlSwitch = (id, field) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener('change', () => {
+      dlCfg()[field] = !!el.checked;
+      persist();   // 立刻存：这三个是"行为开关"，用户勾完可能马上就去下载了
+    });
+  };
+  bindDlSwitch('chkDlCover',   'saveCover');
+  bindDlSwitch('chkDlAutoAdd', 'autoAddToLocal');
+  bindDlSwitch('chkDlSkip',    'skipExisting');
 }
 
 /* ============================================================
@@ -3747,6 +4453,83 @@ function bindEvents() {
     if (!item) return;
     currentView = item.dataset.view;
     renderAll();   // 高亮由 renderAll → syncNavHighlight() 统一刷，这里不再手动改 class
+  });
+
+  /* ---- 侧栏底部「下载管理」（v2.8.0）----
+     每次点都重新拉一遍任务表：主进程才是真状态，界面这份可能已经过时
+     （比如上个页面刚点过"暂停"）。 */
+  $('btnDownloads').addEventListener('click', async () => {
+    currentView = 'downloads';
+    await refreshDownloads();
+    renderAll();
+  });
+
+  /* ---- 播放条上的下载按钮（v2.8.0）----
+     行为随当前状态变：没下过 → 排队下载；在下 → 跳「下载管理」；已下好 → 打开所在文件夹。
+     和按钮的 title 一一对应（见 syncDownloadBtn）。 */
+  $('btnDownload').addEventListener('click', async () => {
+    const t = currentBarTrack();
+    if (!t || !t.bvid) { toast('先选一首歌吧'); return; }
+    const task = taskForTrack(t);
+
+    if (task && task.status === 'done') {
+      // 已下好 → 在资源管理器里定位。★ 主进程只取 basename，界面传什么都不会跑出下载目录
+      try { await api('downloadReveal', task.file); }
+      catch (err) { toast(err.message || '找不到这个文件'); }
+      return;
+    }
+    if (task && (task.status === 'downloading' || task.status === 'queued')) {
+      currentView = 'downloads';
+      dlFilter = 'doing';
+      await refreshDownloads();
+      renderAll();
+      return;
+    }
+    if (task && (task.status === 'paused' || task.status === 'failed')) {
+      try {
+        await api(task.status === 'paused' ? 'downloadResume' : 'downloadRetry', task.id);
+      } catch (err) { toast(err.message || '操作失败'); return; }
+      await refreshDownloads();
+      renderAll();
+      return;
+    }
+    enqueueDownloads([t]);
+  });
+
+  /* ---- v2.8.0：下载状态的三条推送 ----
+     ★ 三条的分工：changed = 任务增删/状态变化（低频，重画整页）；
+       progress = 每 300ms 一次的进度（高频，只改进度条那一小块）；
+       finished = 下完一首（要顺手写进本地歌曲库，所以单独一条）。 */
+  window.neko.onDownloadChanged((tasks) => {
+    dlTasks = Array.isArray(tasks) ? tasks : [];
+    dlStats = computeDlStats();
+    rebuildDlKeys();
+    syncDlBadge();
+    syncDownloadBtn();
+    if (currentView === 'downloads') renderAll();
+  });
+  window.neko.onDownloadProgress((list) => {
+    for (const t of list) {
+      const cur = dlTasks.find((x) => x.id === t.id);
+      if (cur) { cur.received = t.received; cur.total = t.total; cur.speed = t.speed; cur.status = t.status; }
+      else dlTasks.push(t);
+    }
+    dlStats = computeDlStats();
+    syncDlBadge();
+    syncDownloadBtn();
+    if (currentView === 'downloads') patchDlProgress(list);
+  });
+  window.neko.onDownloadFinished(({ task, info, entry }) => {
+    // ★ 「下完自动进本地歌曲」是界面这边的开关（主进程不读存档），所以判断放这儿
+    const auto = !(DB.settings.download && DB.settings.download.autoAddToLocal === false);
+    if (entry && auto) addLocalEntry(entry);
+    dlTasks = dlTasks.map((x) => (x.id === task.id ? Object.assign({}, x, task) : x));
+    dlStats = computeDlStats();
+    rebuildDlKeys();
+    syncDlBadge();
+    syncDownloadBtn();
+    renderAll();   // 行内 / 播放条上的绿勾要跟着变（任何列表页都可能正显示这首歌）
+    toast(`已下载：${(task && task.title) || ''}`);
   });
 
   /* ---- 设置面板（外观 + Cookie） ---- */
@@ -3827,6 +4610,14 @@ function bindEvents() {
       return;
     }
 
+    // ---- v2.8.0：下载管理页 ----
+    // ★ 必须放在下面 `.op-ic` 那条**之前**：任务行的操作按钮也是 .op-ic，
+    //   不先拦下就会走到"按 data-i 去当前列表里找曲目"那条路，拿到 undefined 静默什么都不做。
+    const dlActBtn = e.target.closest('[data-dlact]');
+    if (dlActBtn) { handleDlAction(dlActBtn.dataset.dlact, dlActBtn.dataset.dlid); return; }
+    const dlTabBtn = e.target.closest('[data-dlf]');
+    if (dlTabBtn) { dlFilter = dlTabBtn.dataset.dlf; renderAll(); return; }
+
     // 行内的小按钮（现在都画成图标了，类名是 .op-ic；.op-btn 是旧写法，一起兼容）
     const btn = e.target.closest('.op-ic, .op-btn');
     if (btn) {
@@ -3839,6 +4630,18 @@ function bindEvents() {
       if (act === 'fav') { toggleFav(track); return; }
       if (act === 'add') { addToPlaylist(track); return; }
       if (act === 'remove') { removeFromCurrent(track); return; }
+      // v2.8.0：下载这一首。已下载的再点一次 → 打开所在文件夹（和播放条那个按钮一致）
+      if (act === 'download') {
+        const task = taskForTrack(track);
+        if (task && task.status === 'done') {
+          api('downloadReveal', task.file).catch((err) => toast(err.message || '找不到这个文件'));
+        } else if (task && (task.status === 'downloading' || task.status === 'queued')) {
+          currentView = 'downloads'; dlFilter = 'doing'; refreshDownloads().then(renderAll);
+        } else {
+          enqueueDownloads([track]);
+        }
+        return;
+      }
       if (act === 'detail') {
         // 记下"来路"再跳走，详情页左上角才有得返回（连滚动位置一起还原）
         parsedOrigin = { view: currentView, label: viewLabel(), scroll: content().scrollTop };
@@ -3916,6 +4719,26 @@ function bindEvents() {
       if (pl) startFromView(pl.tracks, 0);
       return;
     }
+
+    // ---- v2.8.0：批量下载 ----
+    // 我喜欢 / 歌单：点一下进勾选模式（再点退出）；详情页：整批直接排（那一页本来就是一个视频的全部曲目）
+    if (id === 'btnDownloadFav' || id === 'btnDownloadPl') { toggleDlPick(); return; }
+    if (id === 'btnDlPickAll') { dlPickAll(); return; }
+    if (id === 'btnDlPickNone') { dlPickNone(); return; }
+    if (id === 'btnDlPickDo') { dlDoPicked(); return; }
+    if (id === 'btnDownloadParsed') {
+      if (parsedView) enqueueDownloads(parsedView.tracks);
+      return;
+    }
+    // 下载管理页的几个块级按钮
+    if (id === 'btnDlOpenDir') {
+      api('downloadOpenDir').catch((err) => toast(err.message || '打不开下载目录'));
+      return;
+    }
+    if (id === 'btnDlClearDone') { dlClearFinished(); return; }
+    if (id === 'btnDlPauseAll') { dlPauseAll(); return; }
+    if (id === 'btnDlRetryAll') { dlRetryAll(); return; }
+    if (id === 'btnDlSetDir') { showSettingsTab('download'); return; }
     if (id === 'btnRenamePl') {
       const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
       if (!pl) return;
@@ -3945,9 +4768,11 @@ function bindEvents() {
 
     // 挑歌模式（v2.6.0）：点整行 = 勾选 / 取消，**不播放**。
     // ★ 必须放在下面"点整行 = 播放"之前 —— 否则在导入页点一下行就把歌播了。
+    // v2.8.0：下载的批量勾选复用了同一套行渲染（.track.pickable），靠 dlPick 分辨是谁在用。
     const pickRow = e.target.closest('.track.pickable');
     if (pickRow) {
-      impToggle(Number(pickRow.dataset.i));
+      const i = Number(pickRow.dataset.i);
+      if (dlPick) dlToggle(i); else impToggle(i);
       return;
     }
 
@@ -4926,6 +5751,10 @@ function currentTracks() {
   if (currentView === 'discovery') return discoveryResults;
   if (currentView === 'favorites') return DB.favorites;
   if (currentView === 'history') return DB.history;
+  // v2.8.0：下载管理页的行是任务行（.dl-row），不是曲目行，没有"当前曲目"这回事。
+  //   返回空数组而不是落到底下的 searchResults —— 否则在下载页点空白处
+  //   有可能误触"播放搜索结果里的第 N 首"。
+  if (currentView === 'downloads') return [];
   if (currentView === 'up' && upState) return upState.list;
   if (currentView === 'parsed' && parsedView) return parsedView.tracks;
   if (currentView.startsWith('playlist:')) {
@@ -4944,6 +5773,7 @@ function viewLabel() {
   if (currentView === 'discovery') return '发现';
   if (currentView === 'favorites') return '我喜欢';
   if (currentView === 'history') return '最近播放';
+  if (currentView === 'downloads') return '下载管理';   // v2.8.0
   if (currentView === 'up' && upState) return `${upState.name} 的视频`;
   if (currentView === 'parsed' && parsedView) return parsedView.info.title;
   if (currentView.startsWith('playlist:')) {
@@ -5016,6 +5846,9 @@ async function boot() {
     DB.playlists = DB.playlists || [];
     DB.favorites = DB.favorites || [];
     DB.history = DB.history || [];
+    // ★ v2.8.0：本地歌曲库。老存档没有这一项 → 补成空数组（不是 null），
+    //   否则后面每一处 `DB.local.filter/for...of` 都要先判一次空。
+    DB.local = Array.isArray(DB.local) ? DB.local : [];
     // 合集的"单集开关"与"曲目表缓存"：老存档没有这两项，补成空的（= 全部启用）
     DB.collectOff = (DB.collectOff && typeof DB.collectOff === 'object') ? DB.collectOff : {};
     DB.collectParts = (DB.collectParts && typeof DB.collectParts === 'object') ? DB.collectParts : {};
@@ -5045,6 +5878,13 @@ async function boot() {
 
   // 3) 绑事件
   bindEvents();
+
+  // 3.5) v2.8.0：下载。先把「已下载」的 key 集合算出来（行内绿勾要用），
+  //   再拉一次任务表（环形进度、侧栏角标要用）。
+  //   ★ 必须排在 renderAll 前面 —— 否则第一次画出来的列表里，所有下载按钮
+  //     都是"没下过"的样子，要等下一次重画才会变成绿勾。
+  rebuildDlKeys();
+  await refreshDownloads();
 
   // 4) 画界面
   renderAll();
@@ -5093,6 +5933,11 @@ async function boot() {
   // 7) v2.2.0：把界面状态告诉主进程（托盘菜单 / 任务栏按钮要用）。
   //    放在最后 —— 这时歌名、播放状态、mini 状态、歌词开关都已经定了。
   reportUiState();
+
+  // 7.5) v2.8.0：下载按钮的最后一次对齐。
+  //   ★ 放在最后：上面第 5 步刚把 lastTrack 贴到播放条上，下载按钮要跟着它
+  //     （绿勾 / 环形进度），不然"歌名有了、按钮还是灰的"。
+  syncDownloadBtn();
 }
 
 boot();

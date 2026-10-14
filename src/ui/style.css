@@ -30,6 +30,16 @@
   --accent-2: rgb(var(--accent-2-rgb));
   --radius:    14px;
 
+  /* ---- 语义色：成功 / 已完成（v2.8.0）----
+     ★ 这个色**不跟主题走**，五套主题都不改它。
+       为什么不用 --accent：五套主题里有一套就叫「薄荷绿」，--accent 本身就是绿的 ——
+       那样"已下载"的绿勾和"没下载"的按钮会长得一样，状态就分不清了。
+       语义色（成功/警告/失败）表达的是"状态"，不是"品牌"，本来就不该跟着主题变。
+     注意它跟 --glass-rgb 一样是"空格分隔的 RGB 三分量"，用的时候必须配斜杠语法：
+       写 rgb(var(--ok-rgb) / 0.14) ✅   写 rgba(var(--ok-rgb), .14) ❌ */
+  --ok-rgb: 74 222 128;
+  --ok:     rgb(var(--ok-rgb));
+
   /* ---- 自定义背景 ---- */
   --bg-image: none;    /* 背景图，由 JS 设成 url("bg://local/xxx.png") */
   --bg-dim:   0.55;    /* 压暗：0 = 原图，1 = 全黑。太亮会盖住文字 */
@@ -424,7 +434,20 @@ body.glass-prebake.has-imgbg .player {
 .playlist-row:hover .del { opacity: 1; }
 .playlist-row .del:hover { color: var(--accent); }
 
-.sidebar-foot { padding: 10px 10px 2px; }
+.sidebar-foot { padding: 10px 10px 2px; display: flex; gap: 8px; }
+/* v2.8.0：底部从"一个满宽设置按钮"改成"设置 + 下载管理"两个并排。
+   各占一半（flex:1 + min-width:0 才能让长文字被压缩而不是把按钮撑破）。 */
+.sidebar-foot .ghost-btn { flex: 1 1 0; min-width: 0; padding-left: 8px; padding-right: 8px; }
+.sidebar-foot .ghost-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「下载管理」右上角的小角标：有进行中的任务时显示数量 */
+.foot-badge {
+  position: absolute; top: -5px; right: -5px;
+  min-width: 16px; height: 16px; padding: 0 4px; border-radius: 9px;
+  background: var(--accent); color: #fff;
+  font-size: 10px; line-height: 16px; text-align: center; font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+.sidebar-foot .ghost-btn { position: relative; }
 
 /* ============================================================
    右侧主区域
@@ -1857,3 +1880,98 @@ body.mini.mini-open .mini-list {
    只是左右内边距小一点，配 mini 窗的宽度 */
 body.mini .mini-list .collect-row { padding: 9px 12px; border-radius: 8px; }
 
+
+/* ============================================================
+   v2.8.0：下载 + 本地歌曲
+   ============================================================ */
+
+/* ---------- 「已下载」的绿勾态 ----------
+   ★ 用固定的语义色 --ok，**不用 --accent** —— 五套主题里有一套就叫「薄荷绿」，
+     用 --accent 的话"没下载"的按钮也会是绿的，状态就分不清了。
+     理由详见文件顶部 --ok-rgb 的注释。 */
+.op-ic.done { background: rgb(var(--ok-rgb) / 0.16); color: var(--ok); }
+.op-ic.done:hover { background: rgb(var(--ok-rgb) / 0.3); color: var(--ok); }
+.ico-btn.done { color: var(--ok); }
+.ico-btn.done:hover { background: rgb(var(--ok-rgb) / 0.18); color: var(--ok); }
+
+/* 播放条上「正在下载」的环形进度。用 conic-gradient 画，不引第三方库。
+   中间那个洞用 mask 抠，而不是盖一个同色的圆 —— 盖色块的话，
+   一旦播放条的底色变了（换主题 / 换背景），圆环里就会露出一块对不上的补丁。 */
+.dl-ring {
+  width: 17px; height: 17px; border-radius: 50%;
+  background: conic-gradient(var(--ok) calc(var(--p, 0) * 1%), rgb(255 255 255 / 0.16) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 3.5px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 3.5px), #000 calc(100% - 3.5px));
+}
+
+/* ---------- 下载管理页 ---------- */
+.dl-stats { font-size: 12.5px; color: var(--muted); }
+.dl-tabs { display: flex; gap: 6px; align-items: center; margin: 16px 0 8px; flex-wrap: wrap; }
+.dl-tab {
+  font-size: 12.5px; padding: 5px 12px; border-radius: 99px;
+  color: var(--muted); border: 1px solid transparent; transition: all 0.15s;
+}
+.dl-tab:hover { color: var(--text); background: var(--panel-2); }
+.dl-tab.on { background: var(--panel-2); color: var(--text); font-weight: 600; }
+.dl-tabs .spacer { flex: 1; }
+
+.dl-list { display: flex; flex-direction: column; gap: 2px; }
+.dl-row {
+  display: grid; grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 12px; align-items: center; padding: 10px 10px; border-radius: 10px;
+}
+.dl-row:hover { background: var(--panel-2); }
+.dl-cover {
+  width: 38px; height: 38px; border-radius: 7px;
+  background: var(--panel-2); background-size: cover; background-position: center;
+}
+.dl-meta { min-width: 0; }
+.dl-line1 { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.dl-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-status { font-size: 12px; color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+.dl-status.ok { color: var(--ok); }
+.dl-status.err { color: #f09595; }
+.dl-sub {
+  font-size: 12px; color: var(--muted-2); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dl-bar { height: 3px; border-radius: 2px; background: rgb(255 255 255 / 0.1); margin-top: 7px; overflow: hidden; }
+.dl-bar > i { display: block; height: 3px; border-radius: 2px; background: var(--ok); transition: width 0.25s linear; }
+.dl-ops { display: flex; gap: 6px; flex: none; }
+/* 任务行的操作按钮复用列表行内那套 .op-ic（28×28 的图标按钮 + data-tip 悬停提示），
+   这里只把它压小一点 —— 一行里最多三个，太大会把标题挤没。 */
+.dl-ops .op-ic { width: 26px; height: 26px; }
+
+/* ---------- 本地歌曲页 ---------- */
+.local-warn {
+  display: flex; align-items: center; gap: 8px; margin: 12px 0 4px;
+  padding: 9px 12px; border-radius: 9px;
+  background: rgb(255 176 82 / 0.12); color: #ffb052; font-size: 12.5px;
+}
+.local-warn .ic { width: 15px; height: 15px; flex: none; }
+.local-warn .spacer { flex: 1; }
+.local-warn .ghost-btn { padding: 4px 10px; font-size: 12px; }
+
+/* 失效条目：整行压暗 + 一个红色小标，一眼能看出"这首找不到了" */
+.track.missing .cover, .track.missing .info { opacity: 0.42; }
+.miss-chip {
+  font-size: 11px; padding: 2px 7px; border-radius: 99px; flex: none;
+  background: rgb(240 149 149 / 0.16); color: #f09595;
+}
+
+/* 设置页里的"当前下载目录"显示框 */
+.dl-dir-box {
+  font-size: 12.5px; padding: 8px 11px; border-radius: 9px;
+  background: var(--panel-2); color: var(--text-2);
+  word-break: break-all; line-height: 1.5;
+}
+.dl-dir-box.empty { color: var(--muted-2); }
+
+/* 「删除下载记录」弹窗里那个复选框。
+   ★ 默认不勾 —— 删记录可逆、删文件不可逆，所以危险的那一半必须用户主动勾。
+     这里给它一整行、跟上面那行说明拉开距离，避免被当成"顺手勾上也无所谓"。 */
+.dl-del-chk {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 12px; font-size: 12.5px; color: var(--text-2); cursor: pointer;
+}
+.dl-del-chk input { accent-color: var(--accent); width: 14px; height: 14px; flex: none; }

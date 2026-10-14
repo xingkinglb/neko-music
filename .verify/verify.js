@@ -31,6 +31,10 @@ const appmenus = stripLine(stripBlock(read('src/app-menus.js')));
 const storemigrate = stripLine(stripBlock(read('src/store-migrate.js')));
 const mainCode = stripLine(stripBlock(read('src/main.js')));
 const gitignore = read('.gitignore');
+/* v2.8.0 新增的两个模块。同样用"去注释"版本 —— 它们的注释里会大量提到
+   `local://get` / 白名单 / Range 这些词，不去注释就会把说明文字当成代码（假阳性）。 */
+const downloaderjs = stripLine(stripBlock(read('src/downloader.js')));
+const localproto  = stripLine(stripBlock(read('src/local-protocol.js')));
 
 /* ---- v2.3.0：KEY_ACTIONS 那张表（快捷键的唯一准绳）----
    以前断言是直接找 `ctrl && (e.key === 'd' ...)` 这种字面量；
@@ -72,10 +76,19 @@ else ok(`closest('#...') 引用的 ${closestIds.length} 个 id 都存在`);
 /* ---- 3) CSS 里所有 var(--x) 是否都有定义 ---- */
 const cssVars = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
 const usedVars = new Set([...css.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]));
+/* ★ v2.8.0：有一类变量是**运行时由 JS 填进行内 style** 的（比如环形进度的 --p），
+   它们本来就不该在 CSS 里出现定义。把这类单独认出来：
+   只从 `style="..."` 这种行内写法里取，别把 app.js 里普通字符串中的 `--x:` 也算上。
+   ★ 白名单是"从真实的赋值处"推出来的，所以拼错的名字（CSS 写 var(--pp)、JS 写 --p）
+     仍然会被下面这条查出来 —— 这正是它还有判别力的原因。 */
+const inlineVars = new Set();
+for (const m of appjs.matchAll(/style="([^"]*)"/g)) {
+  for (const v of m[1].matchAll(/(--[\w-]+)\s*:/g)) inlineVars.add(v[1]);
+}
 console.log('\n[2] CSS 变量引用是否都定义过：');
-const undef = [...usedVars].filter((v) => !cssVars.has(v));
+const undef = [...usedVars].filter((v) => !cssVars.has(v) && !inlineVars.has(v));
 if (undef.length) undef.forEach((v) => err(`用了 ${v} 但没定义（会被当成无效值）`));
-else ok(`全部 ${usedVars.size} 个 var() 都有对应定义`);
+else ok(`全部 ${usedVars.size} 个 var() 都有对应定义（其中 ${inlineVars.size} 个由 JS 运行时填行内值）`);
 
 /* 特别注意 --track-bg 不是自引用 */
 if (/\-\-track-bg:\s*var\(\s*--track-bg/.test(css)) err('--track-bg 仍是自引用（封面占位会失效）');
@@ -783,10 +796,20 @@ if (!/^\s*syncTopbarHeight\(\);$/m.test(appjs)) {
 console.log('\n[27] 合集 / 分P 展开：徽章入口 + 右侧抽屉 + 点空白/Esc 收起：');
 {
   const need = ['collectMask', 'collectTitle', 'collectSub', 'collectSearch', 'collectList',
-                'btnCloseCollect', 'btnPlayCollect'];
+                'btnCloseCollect', 'btnDownloadCollect'];
   const miss = need.filter((id) => !htmlIds.has(id));
   if (miss.length) err(`index.html 缺少合集面板元素：${miss.join(', ')}`);
   else ok('合集面板的遮罩 / 标题 / 搜索框 / 列表 / 两个按钮都在 index.html');
+
+  /* ★ v2.8.0：合集工具条的「播放全部」换成了「批量下载」（Neo 拍板，见改造计划 §3.4）。
+     这条是**反向**断言 —— 防它哪天又被加回来，那样这一屏会同时挂两个"整批操作"按钮，
+     而「播放全部」的语义已经被"选集行点一下就播"覆盖了。 */
+  if (htmlIds.has('btnPlayCollect')) err('v2.8.0 换掉的「播放全部」又回来了 —— 合集工具条上会多出一个重复语义的按钮');
+  else ok('合集工具条上没有退回「播放全部」（v2.8.0 已换成「批量下载」）');
+
+  if (!/id="btnDownloadCollect"/.test(html) || !/btnDownloadCollect'\)\.addEventListener/.test(appjs))
+    err('合集工具条的「批量下载」没接上点击');
+  else ok('合集工具条的「批量下载」绑上了点击（整批 enqueueDownloads）');
 
   /* ★ v2.4.0：删掉「加入队列」之后，这里改成**反向**断言 —— 防它哪天又被加回来 */
   if (htmlIds.has('btnQueueCollect')) err('v2.4.0 删掉的「加入队列」又回来了 —— 搜索框会被重新挤成一个字');
@@ -2073,8 +2096,14 @@ console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
   if (!/isEmpty\(\)/.test(mainCode)) err('没有 isEmpty() 检查 —— 图标路径写错时托盘会静默不出现，非常难查');
   else ok('图标加载失败会吭声（isEmpty 检查）');
 
-  if (!/will-quit'[\s\S]{0,80}destroyTray\(\)/.test(mainCode)) err('退出前没有销毁托盘图标 —— 它会残留在托盘里直到鼠标划过去');
-  else ok('退出前销毁托盘图标');
+  /* ★ v2.8.0：这条以前写成"will-quit' 之后 80 字符内必须出现 destroyTray()"——
+     距离式断言，中间多插一行收尾代码（这次是下载收尾：停任务 + 强制落盘）就会误报。
+     改成把 will-quit 的处理体整块抠出来，断言它**确实**调了 destroyTray()。
+     判别力反而更强：以前只要 80 字符内出现过就算过，现在是"在处理体里"。 */
+  const wqBlock = (mainCode.match(/app\.on\(\s*'will-quit'[\s\S]*?\n\}\);/) || [])[0] || '';
+  if (!wqBlock) err("main.js 里找不到 app.on('will-quit', ...) 的处理体");
+  else if (!/destroyTray\(\)/.test(wqBlock)) err('退出前没有销毁托盘图标 —— 它会残留在托盘里直到鼠标划过去');
+  else ok('退出前会销毁托盘图标（不会残留到鼠标划过去）');
 
   if (!/tray\.setContextMenu\(/.test(mainCode)) err('托盘没有设置右键菜单');
   else ok('托盘挂上了右键菜单（状态一变就整个重建）');
@@ -2527,18 +2556,26 @@ console.log('\n[52] 导入我的 B 站收藏夹（v2.6.0）：');
   if (!/selected:\s*new Map\(\)/.test(appjs)) {
     err('★ impState.selected 不是 Map —— 同一个视频出现在两个收藏夹里会被算两次');
   } else ok('★ 选择集是 Map（用 bvid 当键，天然去重）');
-  if (!/selected\.has\(track\.bvid\)/.test(appjs)) {
+  if (!/selected\.has\(track\.bvid\)/.test(appjs) && !/pickSet\.has\(track\.bvid\)/.test(appjs)) {
     err('★ 行的勾选状态没有"从选择集反查" —— 换收藏夹 / 翻页回来勾就丢了');
   } else ok('★ 行的勾选状态从选择集反查（翻页 / 换收藏夹都不丢）');
+  /* ★ v2.8.0：勾选渲染被抽成了 pickSet（下载的批量勾选复用了同一套行渲染）。
+     必须保证 opts.pickSet 为空时**回落到 impState.selected** ——
+     否则导入页那三屏会渲染成"一个都勾不上"，而这是条很容易被漏掉的分支。 */
+  if (!/opts\.pickSet \|\| \(impState && impState\.selected\)/.test(appjs)) {
+    err('★ opts.pickSet 没有回落到 impState.selected —— 导入页的勾选会整片失效');
+  } else ok('★ 导入页仍走 impState.selected（opts.pickSet 为空时自动回落）');
   // 返回键不许顺手清空选择 —— 这是"跨收藏夹累积"能成立的前提
   const backBody = (appjs.match(/function impBack\(\)[\s\S]*?\n}/) || [''])[0];
   if (/selected\.clear\(\)/.test(backBody)) {
     err('★ impBack 里清了选择集 —— 跨收藏夹累积会当场失效（返回一次就白挑了）');
   } else ok('★ 返回不清空选择（跨收藏夹累积的前提）');
-  // 只有"导入成功"和"清空选择"两处能清
-  const clearCount = (appjs.match(/selected\.clear\(\)/g) || []).length;
+  /* 只有"导入成功"和"清空选择"两处能清。
+     ★ v2.8.0：这里以前数的是全局 `selected.clear()` —— 下载的批量勾选也有一处，
+       会把计数顶到 3。计数要**限定在导入页那个选择集**上，否则断言测的就不是它想测的东西了。 */
+  const clearCount = (appjs.match(/impState\.selected\.clear\(\)/g) || []).length;
   if (clearCount !== 2) {
-    err(`★ 清空选择集的地方有 ${clearCount} 处，应该正好 2 处（导入成功 + 清空选择）`);
+    err(`★ 清空导入选择集的地方有 ${clearCount} 处，应该正好 2 处（导入成功 + 清空选择）`);
   } else ok('★ 只有 2 处会清空选择集（导入成功 / 清空选择）');
 
   /* ---- ⑧ 四屏渲染与按钮都在 ---- */
@@ -2794,5 +2831,140 @@ console.log('\n[55] 歌词碎句合并（v2.7.0）：');
   } else err('实测未覆盖 to 缺失边界');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 55 大类检查）');
+/* ---- 56) 下载与本地歌曲（v2.8.0）----
+   这一类的重点是三件"静默出错、上线后极难查"的事：
+     ① 两处下载默认值写歪（设置里显示 2、实际跑 3）
+     ② local:// 的白名单写成了可绕过的形式（任意文件读取）
+     ③ 下载任务被塞回 6MB 的 neko-data.json（界面每 300ms 卡一次）
+   所以它们各自都有一条**反向断言**在盯着。 */
+console.log('\n[56] 下载与本地歌曲（v2.8.0）：');
+{
+  /* ---- ① 下载设置的 5 个默认值，两个文件必须逐项一致 ---- */
+  const dlKeys = ['dir', 'concurrent', 'saveCover', 'autoAddToLocal', 'skipExisting'];
+  const dlDefaults = (storemigrate.match(/const DEFAULT_DOWNLOAD = \{([\s\S]*?)\n\};/) || [])[1] || '';
+  const missKeys = dlKeys.filter((k) => !new RegExp('\\b' + k + '\\s*:').test(dlDefaults));
+  if (missKeys.length) err(`store-migrate.js 的 DEFAULT_DOWNLOAD 缺字段：${missKeys.join(', ')}`);
+  else ok('DEFAULT_DOWNLOAD 五个字段齐全（dir / concurrent / saveCover / autoAddToLocal / skipExisting）');
+
+  const appDl = (appjs.match(/const DOWNLOAD_DEFAULTS = \{([\s\S]*?)\n\};/) || [])[1] || '';
+  if (!appDl) {
+    err('app.js 里没有 DOWNLOAD_DEFAULTS —— 设置面板补默认值时没得参照');
+  } else {
+    const pick = (src, k) => String((src.match(new RegExp('\\b' + k + '\\s*:\\s*([^,\\n]+)')) || [])[1] || '').trim();
+    const bad = dlKeys.filter((k) => pick(dlDefaults, k) !== pick(appDl, k));
+    if (bad.length) err(`★ 两处下载默认值不一致：${bad.join(', ')} —— 会出现"设置里显示 2、实际跑 3"这种查不出来的怪事`);
+    else ok('★ app.js 与 store-migrate.js 的下载默认值逐项一致');
+  }
+
+  /* ---- ② 存档字段：必须有 local / settings.download，且**不能**有 downloads ---- */
+  if (!/d\.local\s*=\s*Array\.isArray\(d\.local\)/.test(storemigrate))
+    err('store-migrate 没有补 DB.local —— 老存档打开时本地库是 undefined，遍历就崩');
+  else ok('老存档会补出 DB.local');
+  if (!/s\.download\s*=\s*Object\.assign\(\{\},\s*DEFAULT_DOWNLOAD/.test(storemigrate))
+    err('store-migrate 没有补 settings.download');
+  else ok('老存档会补出 settings.download');
+  if (!/existsSync\(dir\)[\s\S]{0,80}isDirectory\(\)/.test(storemigrate) || !/s\.download\.dir\s*=\s*null/.test(storemigrate))
+    err('★ 下载目录不存在时没有降级成 null —— 换电脑 / 删目录之后下载会一直失败在"目录不存在"');
+  else ok('★ 下载目录不存在会降级成 null（下次下载重新问）');
+
+  /* ★ 反向断言：下载任务**不许**进 neko-data.json。
+     那个文件已经 6MB，而进度每 300ms 变一次 —— 写进去等于每 300ms 序列化并落盘 6MB。 */
+  if (/d\.downloads\s*=/.test(storemigrate) || /downloads\s*:\s*\[\]/.test(storemigrate))
+    err('★ 下载任务被塞回了 neko-data.json —— 6MB 的存档每 300ms 写一次，界面会卡死');
+  else ok('★ 下载任务没有进 neko-data.json（归主进程的 downloads.json）');
+  if (!/downloads\.json/.test(mainCode)) err('主进程没有 downloads.json —— 任务状态没地方落盘');
+  else ok('主进程单独存 downloads.json');
+
+  /* ---- ③ local:// 的安全闸：必须是"折叠后精确匹配"，不能是拼接 + startsWith ---- */
+  if (!/wl\.has\(target\)/.test(localproto))
+    err('★ local:// 没有用 Set.has 做精确匹配 —— 拼接 + startsWith 可以被 .. 绕过，等于任意文件读取');
+  else ok('★ local:// 只放行白名单里的精确路径（Set.has，不是 startsWith）');
+  if (!/path\.resolve\(raw\)/.test(localproto))
+    err('★ local:// 没有先 path.resolve 再比对 —— D:\\库\\..\\..\\秘密.txt 会以"库里的路径"身份蒙混过关');
+  else ok('★ 先 path.resolve 把 .. 折叠掉再比对（顺序不能反）');
+  if (!/本地歌曲库是空的/.test(localproto) || !/status:\s*403/.test(localproto))
+    err('local:// 白名单为空时没有 fail-closed（应返回 403）');
+  else ok('白名单为空时 fail-closed（403，不是放行）');
+
+  /* ---- ④ 两个入口的字符串 / 封面校验 / CSP / 协议注册 ---- */
+  if (!/'get'/.test(localproto) || !/'cover'/.test(localproto))
+    err('local:// 的 get / cover 两个入口字符串不见了');
+  else ok('local:// 有 get（音频）和 cover（封面）两个入口');
+  if (!/COVER_NAME_RE/.test(localproto) || !/function safeCoverName/.test(localproto))
+    err('封面文件名没有统一的白名单校验（safeCoverName / COVER_NAME_RE）');
+  else ok('封面文件名有统一校验（safeCoverName + COVER_NAME_RE）');
+  /* ★ 断言必须查**调用**（带括号），不能只查名字 ——
+     downloader.js 顶部那句 `require('./local-protocol.js')` 里就带着 safeCoverName，
+     只查名字的话，把真正的调用换成自己一套实现，这条也照样"通过"（实测踩到过）。 */
+  if (!/safeCoverName\(/.test(downloaderjs))
+    err('★ 下载器没有调用 safeCoverName —— 两边各写一套，会生成出中文封面名又被校验拒掉（实际就是这么翻的车）');
+  else ok('★ 下载器调用同一个 safeCoverName（生成与校验是同一套规则）');
+  if (!/img-src[^;]*local:/.test(html) || !/media-src[^;]*local:/.test(html))
+    err('★ CSP 里没有 local: —— 本地歌曲的封面 / 音频会被 CSP 直接拦掉');
+  else ok('★ CSP 的 img-src / media-src 都放行了 local:');
+  if (!/scheme:\s*'local'/.test(mainCode) || !/registerLocalProtocol\(/.test(mainCode))
+    err('main.js 没有注册 local:// 协议（registerSchemesAsPrivileged + protocol.handle）');
+  else ok('main.js 注册了 local:// 协议');
+
+  /* ---- ⑤ 侧栏底部两个按钮 ---- */
+  const footBlock = (html.match(/<div class="sidebar-foot">([\s\S]*?)\n\s*<\/div>/) || [])[1] || '';
+  const footBtns = [...footBlock.matchAll(/id="(btn[\w]+)"/g)].map((m) => m[1]);
+  if (footBtns.length !== 2 || !footBtns.includes('btnSettings') || !footBtns.includes('btnDownloads'))
+    err(`.sidebar-foot 里应该是「设置」+「下载管理」两个按钮，实际是 [${footBtns.join(', ')}]`);
+  else ok('侧栏底部是「设置」+「下载管理」两个并排按钮');
+  if (!/\.sidebar-foot\s*\{[^}]*display:\s*flex/.test(css))
+    err('.sidebar-foot 没有 display:flex —— 两个按钮不会并排');
+  else ok('.sidebar-foot 是 flex 布局（两个按钮各占一半）');
+  if (!/id="dlBadge"/.test(html)) err('「下载管理」按钮上没有角标元素 #dlBadge');
+  else ok('「下载管理」按钮带角标 #dlBadge（有任务时才显示）');
+
+  /* ---- ⑥ 绿勾必须是固定语义色，不能跟主题色走 ---- */
+  if (!/--ok-rgb:\s*\d+\s+\d+\s+\d+/.test(css) || !/--ok:\s*rgb\(var\(--ok-rgb\)\)/.test(css))
+    err('style.css 没有定义固定语义色 --ok-rgb / --ok');
+  else ok('style.css 有固定语义色 --ok（成功 / 已完成，五套主题都不改它）');
+  const doneRules = [...css.matchAll(/\.(?:op-ic|ico-btn)\.done[^{]*\{([^}]*)\}/g)].map((m) => m[1]).join('\n');
+  if (!doneRules) err('style.css 没有 .op-ic.done / .ico-btn.done 的绿勾态');
+  else if (/var\(--accent/.test(doneRules)) {
+    err('★ 绿勾用了 var(--accent) —— 「薄荷绿」主题下没下载的按钮也是绿的，状态当场分不清');
+  } else if (!/var\(--ok\)/.test(doneRules)) {
+    err('★ 绿勾没有用 var(--ok)');
+  } else ok('★ 绿勾用 var(--ok)，且**没有**混进 var(--accent)（反向断言：薄荷绿主题下仍能一眼分辨）');
+
+  /* ---- ⑦ 四个下载入口都在 ---- */
+  if (!/data-act="download"/.test(appjs)) err('歌曲行内没有下载按钮（data-act="download"）');
+  else ok('入口①：歌曲行内有下载按钮');
+  if (!/id="btnDownload"/.test(html) || !/btnDownload'\)\.addEventListener/.test(appjs))
+    err('播放条上没有下载按钮 / 没绑事件');
+  else ok('入口②：播放条上有下载按钮');
+  if (!/id="btnDownloadFav"/.test(appjs) || !/id="btnDownloadPl"/.test(appjs))
+    err('「我喜欢」/「歌单」工具条上没有「批量下载」按钮');
+  else ok('入口③：「我喜欢」和「歌单」都有「批量下载」（点进去是勾选模式，能全选）');
+  if (!/data-cact="download"/.test(appjs) || !/btnDownloadCollect'\)\.addEventListener/.test(appjs))
+    err('合集面板没有下载入口（选集行内按钮 / 工具条）');
+  else ok('入口④：合集面板的选集行 + 工具条都能下');
+
+  /* ---- ⑧ 任务状态的 owner 是主进程，界面只维护镜像 ---- */
+  if (!/onDownloadChanged/.test(preload) || !/onDownloadProgress/.test(preload) || !/onDownloadFinished/.test(preload))
+    err('preload 没有把下载的三条推送接出来');
+  else ok('preload 接出了 changed / progress / finished 三条推送');
+  if (!/function rebuildDlKeys\(\)/.test(appjs))
+    err('app.js 没有 rebuildDlKeys —— 行内绿勾要每行查一次，不预先把 key 集合算好就是 O(n²)');
+  else ok('app.js 有 rebuildDlKeys（预先把"已下载"的 key 算成集合）');
+  if (!/function enqueueDownloads\(/.test(appjs))
+    err('app.js 没有 enqueueDownloads —— 四个入口没有汇合点');
+  else ok('四个下载入口汇到同一个 enqueueDownloads（先补 cid 再排队）');
+
+  /* ---- ⑨ 离线实测 ---- */
+  [['test-round18.js', '下载引擎（续传 / 并发 / 文件名）'],
+   ['test-round19.js', 'local:// 白名单']].forEach(([f, name]) => {
+    if (fs.existsSync(path.join(ROOT, '.verify', f))) ok(`有 .verify/${f}（${name} 离线实测）`);
+    else err(`缺少 .verify/${f} —— ${name} 必须打桩实测`);
+  });
+  const p19 = path.join(ROOT, '.verify', 'test-round19.js');
+  const t19 = fs.existsSync(p19) ? fs.readFileSync(p19, 'utf8') : '';
+  if (/白名单外/.test(t19)) ok('test-round19 覆盖了"白名单外必须 403"这条头号断言');
+  else err('test-round19 没有把"白名单外必须 403"写成断言');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 56 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

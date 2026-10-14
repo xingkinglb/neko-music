@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' bili:; img-src 'self' bg: https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili: bg:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+        content="default-src 'self' bili:; img-src 'self' bg: local: https: data: http://*.hdslb.com http://*.bilibili.com; media-src 'self' bili: bg: local:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
   <title>Neko Music</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -208,6 +208,31 @@
       <path d="M7.9 9.8 12 13.9l4.1-4.1"/>
       <path d="M4.2 15.6v2.6a2 2 0 0 0 2 2h11.6a2 2 0 0 0 2-2v-2.6"/>
     </symbol>
+
+    <!-- ---- 下载（v2.8.0）：箭头朝下 + 底下一道横线 ---- -->
+    <symbol id="i-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3.8v10.8"/>
+      <path d="M7.7 10.5 12 14.8l4.3-4.3"/>
+      <path d="M4.6 19.6h14.8"/>
+    </symbol>
+
+    <!-- ---- 文件夹：本地歌曲 / 下载目录 ---- -->
+    <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.4 7a1.8 1.8 0 0 1 1.8-1.8h4l2.1 2.5h8.3A1.8 1.8 0 0 1 21.4 9.5v8A1.8 1.8 0 0 1 19.6 19.3H5.2A1.8 1.8 0 0 1 3.4 17.5z"/>
+    </symbol>
+
+    <!-- ---- 重试：环形箭头 ---- -->
+    <symbol id="i-retry" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19.6 12a7.6 7.6 0 1 1-2.3-5.4"/>
+      <path d="M19.9 4.2v4.4h-4.4"/>
+    </symbol>
+
+    <!-- ---- 在资源管理器里定位文件：方框 + 朝外的小箭头 ---- -->
+    <symbol id="i-reveal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M13.6 4.6h5.8v5.8"/>
+      <path d="M19.4 4.6 11.6 12.4"/>
+      <path d="M18 14.2v3.4a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 17.6V7.2a1.8 1.8 0 0 1 1.8-1.8h3.4"/>
+    </symbol>
   </defs>
 </svg>
 
@@ -284,7 +309,10 @@
     </div>
 
     <div class="sidebar-foot">
-      <button class="ghost-btn" id="btnSettings" style="width:100%"><svg class="ic"><use href="#i-settings"/></svg><span>设置</span></button>
+      <!-- v2.8.0：底部由"一个满宽设置按钮"改成"两个并排按钮"。
+           设置缩窄到一半，「下载管理」占另一半；有进行中的任务时它右上角会冒一个小角标。 -->
+      <button class="ghost-btn" id="btnSettings"><svg class="ic"><use href="#i-settings"/></svg><span>设置</span></button>
+      <button class="ghost-btn" id="btnDownloads" title="下载管理"><svg class="ic"><use href="#i-download"/></svg><span>下载管理</span><i class="foot-badge" id="dlBadge" hidden></i></button>
     </div>
   </aside>
 
@@ -361,6 +389,15 @@
         <button class="lyric-btn" id="btnLyric" title="歌词"><svg class="ic"><use href="#i-lyric"/></svg><span>词</span></button>
         <div class="lyric-tip" id="lyricTip"></div>
       </div>
+      <!--
+        v2.8.0：下载当前这一首。三种状态：
+          · 没下过 → 箭头朝下（点一下就下）
+          · 正在下 → 环形进度（点一下跳到「下载管理」）
+          · 已下好 → 绿色小勾（点一下打开所在文件夹）
+        ★ 那个绿是固定的语义色，**不跟主题色走** —— 否则在「薄荷绿」主题下
+          没下载的按钮也是绿的，状态就分不清了。
+      -->
+      <button class="ico-btn" id="btnDownload" title="下载这首歌"><svg class="ic"><use href="#i-download"/></svg></button>
       <!-- 用默认浏览器打开当前这首的 B 站页面。字幕不对时最直接的核对办法 -->
       <button class="ico-btn" id="btnOpenBili" title="在浏览器里打开这个视频">
         <svg class="ic"><use href="#i-open-bili"/></svg>
@@ -444,7 +481,13 @@
     <div class="collect-bar">
       <!-- 一键开关：整条合集里"想听的"和"不想听的"一次切完 -->
       <button class="ghost-btn" id="btnCollectToggleAll">全部禁用</button>
-      <button class="ghost-btn" id="btnPlayCollect">播放全部</button>
+      <!--
+        ★ v2.8.0：这里原来是「播放全部 (N)」，Neo 拍板**直接换成「批量下载 (N)」**。
+          代价是这一屏不再有一键播全部选集 —— 想整段听，得自己勾选后点播放；
+          不过选集行本身点一下就播，从某一集开始连着播仍然正常。
+          下载范围跟着"启用中"的那几集走，和原来"播放全部"的口径完全一致。
+      -->
+      <button class="ghost-btn" id="btnDownloadCollect">批量下载</button>
       <!--
         v2.4.0 删掉了这里的「加入队列」按钮（Neo 报的）：
           · 它本来就重复 —— 点列表里任意一行、或点「播放全部」，都会把"启用的那几集"
@@ -500,6 +543,7 @@
       <button class="tab" data-tab="bilibili">B 站</button>
       <button class="tab" data-tab="window">窗口</button>
       <button class="tab" data-tab="keys">快捷键</button>
+      <button class="tab" data-tab="download">下载</button>
     </div>
 
     <div class="modal-body">
@@ -803,6 +847,73 @@
 
         <div class="btn-row">
           <button class="ghost-btn" id="btnResetKeys">全部恢复默认</button>
+        </div>
+      </div>
+
+      <!-- ========== 下载（v2.8.0） ==========
+           下载位置默认是**空的** —— 第一次点下载时才弹窗让用户选，
+           之后记住；想换就来这儿。这是 Neo 明确要的行为：
+           不预设一个"我自己觉得合适"的目录，免得用户不知道歌下到哪儿去了。 -->
+      <div class="pane" data-pane="download">
+
+        <div class="field">
+          <div class="field-label">下载位置</div>
+          <div class="dl-dir-box" id="dlDirBox">还没选过 —— 第一次点下载时会弹窗让你选</div>
+          <div class="btn-row">
+            <button class="ghost-btn" id="btnPickDlDir">选择文件夹</button>
+            <button class="ghost-btn" id="btnOpenDlDir">打开文件夹</button>
+          </div>
+          <div class="field-hint">
+            下载的歌按 <b>歌手 - 歌名.m4a</b> 命名存进去。封面单独存在软件的配置目录里，
+            不会往你的音乐文件夹里塞额外的子目录。
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">同时下载 <b id="valDlConcurrent">2</b> 首</div>
+          <input type="range" id="rngDlConcurrent" min="1" max="4" value="2" />
+          <div class="field-hint">
+            一次同时下几首。<b>不建议调到 4</b> —— B 站对短时间的大量请求会限流，
+            排着队下反而更快、也更不容易失败。
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">把封面存到本地</span>
+            <input type="checkbox" id="chkDlCover" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">开着的话，断网也能在「本地歌曲」里看到封面。</div>
+        </div>
+
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">下完自动加入「本地歌曲」</span>
+            <input type="checkbox" id="chkDlAutoAdd" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">
+            关掉的话文件照样下载，但不会出现在「本地歌曲」里，得自己去导入一次。
+          </div>
+        </div>
+
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">已下载过的跳过</span>
+            <input type="checkbox" id="chkDlSkip" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">批量下载时，本地已有的歌不再重复下一遍。关掉就会重下并覆盖。</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">本地歌曲</div>
+          <div class="field-hint" style="margin-top:0">
+            「本地歌曲」页里可以<b>导入歌曲</b>（选文件）或<b>导入文件夹</b>（递归扫描里面的音频）。<br />
+            导入只是<b>记录路径</b>，不复制也不移动你的文件 —— 原文件被挪走或删掉后，
+            那首歌会标成"失效"，可以重新定位或清理。
+          </div>
         </div>
       </div>
 

@@ -81,6 +81,11 @@ ipcMain.on('win:mini', (_e, opts) => {
 const TOL = 2;
 const near = (a, b) => Math.abs(a - b) <= TOL;
 
+/* v2.8.0：下载 / 本地歌曲的 IPC 桩。★ 这个脚本会**把"页面有报错"直接判 FAIL**，
+   不打桩的话，"桩缺了"会被当成"产品坏了"，一眼分不出。
+   详见 stub-download-ipc.js 顶部的说明。 */
+require('./stub-download-ipc.js')();
+
 app.whenReady().then(async () => {
   win = new BrowserWindow({
     width: 1180, height: 760, show: false,

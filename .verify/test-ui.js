@@ -74,6 +74,24 @@ ipcMain.handle('bili:upVideos', (_e, mid, pn) => {
   };
 });
 
+/* ★ v2.8.0：下载 / 本地歌曲那两组 IPC 的桩。
+   渲染层启动时就会拉一次任务表（rebuildDlKeys + refreshDownloads），
+   不打桩的话控制台会挂一条 "No handler registered for 'download:list'" ——
+   那是**桩缺了**，不是产品出错。桩上之后，"页面里的报错"那一栏才重新有意义，
+   顺便也让下载管理页有数据可画（一条已完成 + 一条下载中）。 */
+const DL_TASKS = [
+  { id: 'dl_test1', key: 'BV1song0001:7', bvid: 'BV1song0001', cid: 7, page: 1,
+    title: '大鱼', author: '周深', cover: '', duration: 312,
+    status: 'done', received: 4211000, total: 4211000, speed: 0,
+    file: '周深 - 大鱼.m4a', coverFile: '', error: '', createdAt: 1, finishedAt: 2 },
+  { id: 'dl_test2', key: 'BV1song0002:7', bvid: 'BV1song0002', cid: 7, page: 1,
+    title: '起风了', author: '买辣椒也用券', cover: '', duration: 325,
+    status: 'downloading', received: 1000000, total: 4000000, speed: 524288,
+    file: '', coverFile: '', error: '', createdAt: 3, finishedAt: 0 },
+];
+require('./stub-download-ipc.js')({ tasks: DL_TASKS, dir: 'C:\\测试\\下载' });
+const dlStub = require('./stub-download-ipc.js');
+
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
     width: 1180, height: 760, show: false,
@@ -367,6 +385,137 @@ app.whenReady().then(async () => {
   const img4 = await win.webContents.capturePage();
   fs.writeFileSync(path.join(__dirname, 'shot-queue.png'), img4.toPNG());
   say('\n已保存 shot-up.png / shot-pick.png / shot-rows.png / shot-queue.png');
+
+  /* ================= v2.8.0：下载入口 + 下载管理页 + 绿勾 ================= */
+  say('\n--- v2.8.0 下载 ---');
+
+  /* ① 侧栏底部：设置 + 下载管理，两个并排 */
+  const foot = await evalJS(`(() => {
+    const a = document.getElementById('btnSettings'), b = document.getElementById('btnDownloads');
+    if (!a || !b) return null;
+    const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+    return { n: document.querySelectorAll('.sidebar-foot button').length,
+             sameRow: Math.abs(ra.top - rb.top) < 2, leftFirst: ra.left < rb.left,
+             aw: Math.round(ra.width), bw: Math.round(rb.width),
+             hasBadge: !!document.getElementById('dlBadge') };
+  })()`);
+  if (foot && foot.n === 2 && foot.sameRow && foot.leftFirst && foot.hasBadge)
+    ok(`侧栏底部是「设置」+「下载管理」两个并排按钮（${foot.aw}px / ${foot.bw}px），带角标`);
+  else bad('侧栏底部布局不对：' + JSON.stringify(foot));
+
+  /* ② 播放条：下载按钮紧挨着「词」（Neo 的原话是"在歌词按钮边上"）。
+     ★ 断言的是"挨着"，不是"在左边" —— 具体在哪一侧是版式选择，
+       真正要守住的是"它跟「词」在同一排、中间不夹别的按钮、一眼能看出是一对"。 */
+  const bar = await evalJS(`(() => {
+    const d = document.getElementById('btnDownload'), l = document.getElementById('btnLyric');
+    if (!d || !l) return null;
+    const rd = d.getBoundingClientRect(), rl = l.getBoundingClientRect();
+    // 两个按钮之间的净间距（不论谁在左，重叠时为负）
+    const gap = Math.round(Math.max(rd.left - rl.right, rl.left - rd.right));
+    return { sameRow: Math.abs((rd.top + rd.height / 2) - (rl.top + rl.height / 2)) < 6,
+             gap, icon: (d.querySelector('use') || {}).getAttribute('href'),
+             w: Math.round(rd.width) };
+  })()`);
+  if (bar && bar.sameRow && bar.gap >= 0 && bar.gap <= 30 && bar.icon === '#i-download')
+    ok(`播放条上有下载按钮，紧挨着「词」（同一排、间距 ${bar.gap}px、宽 ${bar.w}px）`);
+  else bad('播放条的下载按钮没有紧挨着「词」：' + JSON.stringify(bar));
+
+  /* ③ 下载管理页：2 条任务 / 4 个筛选 / 进度条 / 「已完成」 */
+  await evalJS(`(async () => { currentView = 'downloads'; await refreshDownloads(); renderAll(); return true; })()`);
+  await sleep(400);
+  const dlPage = await evalJS(`({
+    view: currentView,
+    rows: document.querySelectorAll('#content .dl-row').length,
+    tabs: [...document.querySelectorAll('#content .dl-tab')].map((t) => t.textContent.trim()),
+    bars: document.querySelectorAll('#content .dl-bar > i').length,
+    done: document.querySelectorAll('#content .dl-status.ok').length,
+    badge: (document.getElementById('dlBadge') || {}).textContent || '',
+  })`);
+  if (dlPage.rows === 2 && dlPage.tabs.length === 4 && dlPage.bars === 1 && dlPage.done === 1)
+    ok('下载管理页画出了 2 条任务 / 4 个筛选胶囊 / 1 条进度条 / 1 条「已完成」');
+  else bad('下载管理页渲染不对：' + JSON.stringify(dlPage));
+  say(`  侧栏角标 = "${dlPage.badge}"（1 个进行中）`);
+
+  /* ★ 截图前一定要 sleep：offscreen 合成是异步的，紧接着 capturePage 会拿到**上一帧**
+     （第一次跑就是这样截到了一张过期的画面，白折腾一轮）。 */
+  await sleep(400);
+  fs.writeFileSync(path.join(__dirname, 'shot-downloads.png'), (await win.webContents.capturePage()).toPNG());
+
+  /* ④ 绿勾：必须是**固定语义绿**，在「薄荷绿」主题下也不能跟成主题色。
+     ★ 这条是本次最容易出错的地方：--accent 在 green 主题下是 rgb(90,214,154)，
+       和 --ok 的 rgb(74,222,128) 非常接近 —— 一旦写错，肉眼几乎分不出来，只能靠断言拦。 */
+  const green = await evalJS(`(() => {
+    document.documentElement.dataset.theme = 'green';
+    currentView = 'search'; searchKeyword = '测试';
+    const t = searchResults[0]; t.cid = 7;      // 与桩里 dl_test1 的 key 对上 → 视为已下载
+    renderAll();
+    const row = document.querySelector('#content .track');
+    const btn = row && row.querySelector('[data-act="download"]');
+    if (!btn) return null;
+    return { cls: btn.className,
+             icon: (btn.querySelector('use') || {}).getAttribute('href'),
+             color: getComputedStyle(btn).color,
+             accent: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() };
+  })()`);
+  if (green && /\bdone\b/.test(green.cls) && green.icon === '#i-check' && green.color === 'rgb(74, 222, 128)')
+    ok(`已下载的行内按钮变成绿勾，颜色 ${green.color} —— 薄荷绿主题下也不会跟主题色混（主题色是 ${green.accent}）`);
+  else bad('绿勾状态不对（薄荷绿主题下会不会混成主题色？）：' + JSON.stringify(green));
+  await evalJS(`(() => { document.documentElement.dataset.theme = 'pink'; return true; })()`);
+
+  /* ⑤ 批量下载的勾选模式：进得去、每行有勾选框、能全选 */
+  const pick = await evalJS(`(() => {
+    DB.favorites = searchResults.slice();
+    currentView = 'favorites';
+    renderAll();
+    document.getElementById('btnDownloadFav').click();
+    return { picking: !!dlPick,
+             pickable: document.querySelectorAll('#content .track.pickable').length,
+             bar: !!document.querySelector('#content .imp-bar') };
+  })()`);
+  await sleep(200);
+  const pick2 = await evalJS(`(() => {
+    document.getElementById('btnDlPickAll').click();
+    return { n: dlPick ? dlPick.selected.size : -1,
+             doText: (document.getElementById('btnDlPickDo') || {}).textContent || '' };
+  })()`);
+  if (pick && pick.picking && pick.pickable === 2 && pick.bar && pick2.n === 2 && /下载选中的 2 首/.test(pick2.doText))
+    ok('「我喜欢」点「批量下载」进入勾选模式；全选后工具条写着「下载选中的 2 首」');
+  else bad('批量勾选模式不对：' + JSON.stringify(pick) + ' / ' + JSON.stringify(pick2));
+  await evalJS(`(() => { if (dlPick) { dlPick = null; renderAll(); } return true; })()`);
+
+  /* ⑥ 闭环：点行内下载按钮 → 主进程真的收到了这首歌（这才是"能下"的实质）。
+     ★ 光断言"按钮点得动"是不够的 —— 真正要守住的是"点了以后发出去的是哪首"。
+       第二首的 cid 故意换成一个桩里没有的（999）→ 它变成"没下过"的那一行。
+       同时顺带验证"没设过下载目录时会先弹选目录框"（Neo 明确要的行为）。 */
+  await evalJS(`(() => {
+    DB.settings.download.dir = null;              // 回到"从没选过"的状态
+    currentView = 'search'; searchKeyword = '测试';
+    searchResults[0].cid = 7; searchResults[1].cid = 999;
+    renderAll();
+    return true;
+  })()`);
+  const addBefore = dlStub.calls.add.length;
+  const pickBefore = dlStub.calls.pickDir;
+  await evalJS(`document.querySelectorAll('#content .track')[1]
+    .querySelector('[data-act="download"]').click()`);
+  await sleep(700);
+  const sent = dlStub.calls.add.slice(addBefore);
+  const last = sent.length ? sent[sent.length - 1] : null;
+  const pickedDir = dlStub.calls.pickDir > pickBefore;
+  const dirSaved = (await evalJS(`(DB.settings.download || {}).dir || ''`)) || '';
+  if (last && last.length === 1 && last[0].bvid === 'BV1song0002' && last[0].cid === 999 && pickedDir && dirSaved)
+    ok(`点行内下载按钮 → 主进程收到 ${last[0].bvid}:${last[0].cid}；且首次下载先弹了选目录框（已记住 ${dirSaved}）`);
+  else bad('下载链路没有闭环：' + JSON.stringify({ last, pickedDir, dirSaved }));
+
+  /* 勾选模式的那张图：要的是"已选 2 首"的样子，所以先重进一次勾选模式再截 */
+  await evalJS(`(() => { closeQueue(); if (dlPick) dlPick = null;
+    currentView = 'favorites'; renderAll();
+    document.getElementById('btnDownloadFav').click();
+    document.getElementById('btnDlPickAll').click();
+    return true; })()`);
+  await sleep(400);
+  fs.writeFileSync(path.join(__dirname, 'shot-dl-pick.png'), (await win.webContents.capturePage()).toPNG());
+  say('已保存 shot-downloads.png / shot-dl-pick.png');
 
   if (errors.length) say('\n页面里的报错：\n  ' + errors.slice(0, 6).join('\n  '));
   say(fail === 0 ? '\n新交互实测全部通过' : `\n发现 ${fail} 处问题`);
