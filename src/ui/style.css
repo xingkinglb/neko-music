@@ -670,6 +670,16 @@ body.perf-idle .spinner {
   width: 100%; aspect-ratio: 16/10; border-radius: 10px;
   background: var(--track-bg) center/cover no-repeat; margin-bottom: 9px;
 }
+/* ★ v2.6.1：B 站自己没给封面的收藏夹（cover_type:0），用淡淡的音符占位，
+   而不是一块空色块。跟播放条的 .np-cover.no-art 同一套做法（内联 SVG，
+   CSP 的 img-src 已放行 data:）。app.js 里 cover 为空时加 .no-cover 类，
+   并且**不给行内 background-image**，这条 CSS 才生效。 */
+.card .thumb.no-cover {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238f8fa8' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'><path d='M9 18V5l12-2v13'/><circle cx='6' cy='18' r='3'/><circle cx='18' cy='16' r='3'/></svg>");
+  background-size: 26px 26px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
 .card .c-title {
   font-size: 13px; line-height: 1.45;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;

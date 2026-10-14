@@ -476,15 +476,42 @@ async function getMyInfo() {
   }
 }
 
+/** 收藏夹列表每页拉多少个（一次最多 100，实测 ps=100 有效） */
+const FAV_FOLDER_PAGE_SIZE = 100;
+
 /**
- * 列出某个 UP 主的所有公开收藏夹
+ * 列出某个 UP 主的所有收藏夹
+ *
+ * ★ v2.6.1：接口从 `/folder/created/list-all` 换成**分页版** `/folder/created/list`。
+ *
+ *   为什么要换：`list-all` 的返回里**根本没有 cover 字段** —— 每个收藏夹只有
+ *   id / fid / mid / attr / title / fav_state / media_count 这几个（实测 69 个
+ *   收藏夹一个封面都没有），所以界面上的封面全是空白。分页版才带 `cover`
+ *   （还顺带带 attr_desc / intro / view_count / cover_type 等）。
+ *
+ *   实测同一账号：`list-all` → 0/69 有封面；`list` → 59/69 有封面。
+ *   两个接口的 `attr` 值**逐条完全一致**，所以「私密」判断不受影响。
+ *
+ *   剩下那 10 个是 B 站自己就没给封面（`cover_type: 0`，多为夹子里的内容
+ *   已失效），界面用「音符占位」兜底，不再是一块空色块。
+ *
+ * @param {number} mid 用户的 uid
+ * @returns {Promise<Array<{id:number,title:string,count:number,cover:string,private:boolean}>>}
  */
 async function getFavFolders(mid) {
-  const json = await requestJSON(
-    `https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${mid}`
-  );
-  const list = (json.data && json.data.list) || [];
-  return list.map((f) => ({
+  const all = [];
+  for (let pn = 1; pn <= 10; pn++) {
+    const json = await requestJSON(
+      `https://api.bilibili.com/x/v3/fav/folder/created/list?up_mid=${mid}&pn=${pn}&ps=${FAV_FOLDER_PAGE_SIZE}`
+    );
+    const d = json.data || {};
+    const list = d.list || [];
+    all.push(...list);
+    // 拿满了就收工（d.count 是总数；万一没给 count 就退化成"这一页没满即最后一页"）
+    const total = typeof d.count === 'number' ? d.count : all.length;
+    if (!list.length || all.length >= total) break;
+  }
+  return all.map((f) => ({
     id: f.id,
     title: f.title,
     count: f.media_count,

@@ -6,7 +6,7 @@
 
 把 B 站视频里的音频在线播放出来 —— 搜歌、合集、歌单、收藏、歌词、动态背景，一个不少。
 
-![version](https://img.shields.io/badge/version-2.6.0-ff6fa5)
+![version](https://img.shields.io/badge/version-2.6.1-ff6fa5)
 ![license](https://img.shields.io/badge/license-MIT-7c5cff)
 ![platform](https://img.shields.io/badge/platform-Windows-4c8dff)
 ![electron](https://img.shields.io/badge/Electron-33-37d6c0)
@@ -102,7 +102,7 @@
 
 <img src="docs/images/import-folders.png" alt="收藏夹列表：每个收藏夹一张卡，带封面、名字、视频数，右下角有「整个导入」，已挑过的卡片显示「已选 3」" width="880">
 
-收藏夹列表：右下角「整个导入」一键整夹选中，卡片上的「已选 3」是**跨收藏夹累积**的角标（私密收藏夹带「私密」小标）。
+收藏夹列表：右下角「整个导入」一键整夹选中，卡片上的「已选 3」是**跨收藏夹累积**的角标（私密收藏夹带「私密」小标；最后一张「很久没听」是 B 站没给封面的，显示一个音符占位）。
 
 <img src="docs/images/import-pick.png" alt="挑视频：每行左边一个复选框，勾上的行整行泛粉，顶部显示「已选 3 个」" width="880">
 
@@ -353,7 +353,18 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 
 ## 更新日志
 
-### 最近更新（v2.6.0）
+### 最近更新（v2.6.1）
+
+上一版的「导入我的 B 站收藏夹」里，**收藏夹卡片一个封面都没有**，全是空色块 —— 这一版修好了：
+
+- 🖼 **收藏夹封面回来了**：你的 69 个收藏夹，实测 **59 个**能正常显示封面
+- 🎵 **B 站自己没给封面的（实测 10 个）显示一个淡淡的音符**，不再是一块什么都没有的深色方块 —— 一眼能分清是"本来就没有"还是"没加载出来"
+- 🔍 **原因不是样式，是接口选错了**：原来用的 `/folder/created/list-all` 返回里**根本不带 `cover` 字段**，换成分页版 `/folder/created/list` 才有（实测 0/69 → 59/69）。同一个问题在「点作者名 → 看他的公开收藏夹」那一屏也一起修好了
+- 📦 **顺手给安装包瘦了 36 MB**：以前打包没设白名单，`.tmp/`（61MB）、`.verify/`（100 个开发期脚本）、`docs/`（截图）、甚至**项目笔记**全被打进了 `app.asar`。加了白名单后 **119.6 MB → 81.8 MB（省 31.6%）**，功能一个没少（旧包 313 项 vs 新包 53 项逐条比对过，被排除的里面没有一条 `src/`）
+- ✅ 静态自检 **54 大类全过**（新增第 53 类 13 条，含反向断言"不许退回 `list-all`"；第 54 类守打包白名单）；**新写 `test-round16.js`（8 组：打桩 `https` 直验"请求打的是哪个接口" + 离屏真点验封面与占位）**；把源码回退到 v2.6.0 时该组报 **11 处失败**
+
+<details>
+<summary>上一个版本（v2.6.0）改了什么</summary>
 
 侧栏「我的歌单」那一行、＋ 左边多了一个 **⬇ 按钮** —— 点进去可以**把自己 B 站的收藏夹搬进来**，整夹导入或者一个一个挑：
 
@@ -366,8 +377,10 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 - 🚧 **没填 Cookie 不会白跑**：页面上直接给引导「去左下角『设置 → B 站』填一下 Cookie」，**而且不会去发请求**；Cookie 过期（B 站回 `-101`）会明确说「好像过期了，重新粘一次」，而不是丢个看不懂的报错
 - ✅ 静态自检 **52 大类全过**（新增第 52 类 33 条，含"选择集必须是 Map""返回不许清空选择""只有 2 处能清空"这类**反向断言**）；**新写 `test-round15.js`（14 组，离屏真点：跨收藏夹累积到 5 个、翻页不丢选择、重复视频只算一次、整夹导入 86 再取消、命名框默认名 + 建歌单 + 跳转 + 写盘）**；回归 round13 / round14 / ui / keys / collect / README / 图标体检 **全过**
 
+</details>
+
 <details>
-<summary>上一个版本（v2.5.0）改了什么</summary>
+<summary>更早（v2.5.0）改了什么</summary>
 
 作者主页的翻页**整个重做了**。你反馈「默认只给 30 条、要看更多得一直点右上角的『加载更多』，体验很不好」—— 这一版照着你画的样子改成了**真正的分页**：
 
@@ -382,7 +395,7 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 </details>
 
 <details>
-<summary>更早（v2.4.0）改了什么</summary>
+<summary>更早一点（v2.4.0）改了什么</summary>
 
 真机上试用后报的几个问题，**全部修好了**。三条都很具体，改动也都很小 —— 但每条都挖到了真正的根因：
 
@@ -410,7 +423,7 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 </details>
 
 <details>
-<summary>更早一点（v2.2.1）改了什么</summary>
+<summary>再往前一点（v2.2.1）改了什么</summary>
 
 真机上试用 v2.2.0 后报的四个问题，**全部修好**了（这一版没有新功能）：
 

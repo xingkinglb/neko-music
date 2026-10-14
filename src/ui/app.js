@@ -2306,7 +2306,7 @@ async function doImportFav(text) {
       <div class="card-grid">
         ${folders.map((f, i) => `
           <div class="card" data-fav="${f.id}">
-            <div class="thumb" style="background-image:url('${esc(f.cover || '')}')"></div>
+            <div class="thumb${f.cover ? '' : ' no-cover'}"${f.cover ? ` style="background-image:url('${esc(f.cover)}')"` : ''}></div>
             <div class="c-title">${esc(f.title)}</div>
             <div class="c-sub">${f.count} 个视频</div>
           </div>`).join('')}
@@ -2579,7 +2579,7 @@ function impFolderCardHTML(f) {
   const isWhole = (f.count || 0) > 0 && picked >= f.count;
   return `
     <div class="card" data-imp-folder="${esc(from)}">
-      <div class="thumb" style="background-image:url('${esc(f.cover || '')}')"></div>
+      <div class="thumb${f.cover ? '' : ' no-cover'}"${f.cover ? ` style="background-image:url('${esc(f.cover)}')"` : ''}></div>
       <div class="c-title">${esc(f.title)}${f.private ? '<span class="c-priv">私密</span>' : ''}</div>
       <div class="c-sub">${f.count} 个视频</div>
       <div class="c-foot">

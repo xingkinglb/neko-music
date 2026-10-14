@@ -2606,5 +2606,120 @@ console.log('\n[52] 导入我的 B 站收藏夹（v2.6.0）：');
   } else ok('有 .verify/test-round15.js（离屏真点，含跨收藏夹累积）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 52 大类检查）');
+/* ============================================================
+   53) 收藏夹封面（v2.6.1）
+   ------------------------------------------------------------
+   Neo 报「收藏夹封面展示没有」。根因不是 CSS，是**接口选错了**：
+   `/folder/created/list-all` 的返回里压根没有 cover 字段（实测 69 个
+   收藏夹一个封面都没有），换成分页版 `/folder/created/list` 才有。
+   这类"数据源字段缺失"的 bug 静态查不出来，但**"用了哪个接口"**能查 ——
+   所以这里钉死接口，再加一条反向断言防止退回 list-all。
+   ============================================================ */
+console.log('\n[53] 收藏夹封面（v2.6.1）：');
+{
+  const bilijs = read('src/bilibili.js');
+  const appjs = read('src/ui/app.js');
+  const css = read('src/ui/style.css');
+
+  /* ---- ① 接口必须是分页版（带 cover 的那个） ---- */
+  if (!/created\/list\?up_mid=\$\{mid\}/.test(bilijs)) {
+    err('getFavFolders 没打分页版 /x/v3/fav/folder/created/list');
+  } else ok('getFavFolders 打的是分页版 /folder/created/list（带 cover）');
+
+  /* 反向断言：不许退回 list-all —— 那个接口的返回里没有 cover 字段，
+     退回去 = 封面全空（这正是 v2.6.0 的 bug）。 */
+  if (/created\/list-all\?up_mid=/.test(bilijs)) {
+    err('★ 又用回 list-all 了 —— 那个接口不返回 cover，封面必然全空');
+  } else ok('★ 没有退回 list-all（反向断言：退回去封面就全没了）');
+
+  /* ---- ② 要分页（收藏夹可能上百个） ---- */
+  if (!/FAV_FOLDER_PAGE_SIZE/.test(bilijs)) err('没有 FAV_FOLDER_PAGE_SIZE —— 分页尺寸写死在 URL 里了');
+  else ok('分页尺寸是具名常量 FAV_FOLDER_PAGE_SIZE');
+  if (!/pn=\$\{pn\}&ps=\$\{FAV_FOLDER_PAGE_SIZE\}/.test(bilijs)) {
+    err('分页参数没接上（pn / ps 至少少一个）');
+  } else ok('pn / ps 都接上了');
+  if (!/all\.length >= total/.test(bilijs)) {
+    err('分页没有"拿满就收工"的判据 —— 会一直翻到第 10 页白跑请求');
+  } else ok('拿到 count 个就收工（不会白翻页）');
+  if (!/typeof d\.count === 'number'/.test(bilijs)) {
+    err('没有对 d.count 缺失的兜底 —— 拿不到 count 时会死循环翻页');
+  } else ok('count 拿不到时有兜底（不会死循环）');
+
+  /* ---- ③ cover 必须过 toHttps（CSP 只放行 https:） ---- */
+  if (!/cover:\s*toHttps\(f\.cover\)/.test(bilijs)) {
+    err('cover 没过 toHttps —— B 站给的是 http://，会被 CSP 的 img-src 拦掉');
+  } else ok('cover 走了 toHttps（http → https，CSP 才放行）');
+
+  /* ---- ④ 换接口不能把「私密」判断弄坏 ---- */
+  if (!/private:\s*f\.attr === 1/.test(bilijs)) {
+    err('private 判断不是 attr === 1 了 —— 换接口后「私密」小标会失效');
+  } else ok('私密判断仍是 attr === 1（两个接口的 attr 实测逐条一致）');
+
+  /* ---- ⑤ 没封面时不给行内 background-image，好让 CSS 占位生效 ---- */
+  if (/background-image:url\('\$\{esc\(f\.cover \|\| ''\)\}'\)'/.test(appjs)) {
+    err('★ 还在无条件写行内 background-image —— 空封面会把 CSS 占位盖掉（一块空色块）');
+  } else ok('★ 没封面时不再写行内 background-image（占位才盖得住）');
+  const noCoverUses = (appjs.match(/f\.cover \? '' : ' no-cover'/g) || []).length;
+  if (noCoverUses < 2) {
+    err(`只有 ${noCoverUses} 处加了 .no-cover —— 导入页和"别人的收藏夹"两处都要加`);
+  } else ok(`${noCoverUses} 处卡片都加了 .no-cover（导入页 + 别人的收藏夹）`);
+
+  /* ---- ⑥ 占位样式 ---- */
+  if (!/\.card\s+\.thumb\.no-cover\s*\{/.test(css)) {
+    err('style.css 少了 .card .thumb.no-cover —— 没封面时还是一块空色块');
+  } else ok('有 .card .thumb.no-cover 规则（音符占位，跟播放条 .no-art 同一套做法）');
+  if (!/background-image:\s*url\("data:image\/svg\+xml/.test(css)) {
+    err('.no-cover 的底图不是内联 SVG —— 又要多一个图片文件，还会被 CSP 拦');
+  } else ok('占位底图是内联 SVG data-URI（CSP 的 img-src 已放行 data:）');
+
+  /* ---- ⑦ 必须有离屏实测（这次还要打桩 https 验"打了哪个接口"） ---- */
+  if (!fs.existsSync(path.join(ROOT, '.verify', 'test-round16.js'))) {
+    err('少了 .verify/test-round16.js —— 接口选错这种 bug 必须实测才抓得住');
+  } else ok('有 .verify/test-round16.js（打桩 https 验接口 + 离屏验封面/占位）');
+}
+
+/* ============================================================
+   54) 打包内容白名单（v2.6.1）
+   ------------------------------------------------------------
+   以前 build 里没有 files，electron-builder 走默认的"整个目录全收"，于是
+   .tmp/（61MB，含 winCodeSign 镜像）/ .verify/（100 个开发期脚本）/
+   docs/（README 截图）/ .workbuddy*（项目笔记）全被打进 app.asar。
+   加上白名单后安装包从 119.6MB 降到 81.8MB。
+   JSON 不支持注释，所以**只能靠断言把这条规矩守住**。
+   ============================================================ */
+console.log('\n[54] 打包内容白名单（v2.6.1）：');
+{
+  let pkg = null;
+  try { pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')); }
+  catch (e) { err('package.json 解析不了：' + e.message); }
+
+  if (pkg) {
+    const files = pkg.build && pkg.build.files;
+    if (!Array.isArray(files) || !files.length) {
+      err('★ build.files 是空的 —— 又回到"把整个工程都打进去"了（.tmp 61MB 会跟着进包）');
+    } else ok('build.files 白名单在（' + files.length + ' 条）');
+
+    /* 必须有的三样 */
+    ['src/**', 'package.json', 'LICENSE'].forEach((need) => {
+      if (!files.includes(need)) err(`白名单少了 "${need}" —— 运行时会缺东西`);
+      else ok(`白名单里有 "${need}"`);
+    });
+
+    /* 反向断言：不许出现"全部打包"的写法 */
+    ['**/*', '.', '*'].forEach((bad) => {
+      if (files.includes(bad)) err(`★ 白名单里出现了 "${bad}" —— 等于没设白名单`);
+    });
+    ok('★ 没有 "**/*" / "." 这种等于没设的写法');
+
+    /* 反向断言：开发期的东西不许进包 */
+    ['.tmp', 'docs', '.verify', '.workbuddy', '.workbuddy-ai'].forEach((junk) => {
+      if (files.some((f) => f === junk || f.startsWith(junk + '/'))) {
+        err(`★ 白名单里混进了 "${junk}" —— 那是开发期/笔记文件，不该发给用户`);
+      }
+    });
+    ok('★ .tmp / docs / .verify / .workbuddy* 都没进包（这些是开发期文件和项目笔记）');
+  }
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 54 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

@@ -34,6 +34,9 @@ const FOLDERS = [
   { id: 1002, title: '游戏音乐', count: 5,  cover: cover(205), private: false },
   { id: 1003, title: '学习白噪音', count: 41, cover: cover(150), private: false },
   { id: 1004, title: '私藏小曲', count: 12, cover: cover(20), private: true },
+  // ★ v2.6.1：故意留一个**没封面**的（B 站 cover_type:0 的情况），
+  //   用来肉眼确认「音符占位」长什么样，别又是一块空色块。
+  { id: 1005, title: '很久没听', count: 7,  cover: '', private: false },
 ];
 
 ipcMain.handle('store:load', () => ({ ok: true, data: { playlists: [], favorites: [], history: [], settings: {}, lastTrack: null } }));
