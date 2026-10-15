@@ -32,7 +32,7 @@ function computeStats(tasks) {
  * 光断言"按钮点得动"是不够的，真正要守住的是"点了以后主进程收到了正确的曲目"。
  * 形状：{ add: Array<曲目数组>, pickDir: number, setDir: Array<目录>, remove: Array<[ids, deleteFile]> }
  */
-const calls = { add: [], pickDir: 0, setDir: [], remove: [] };
+const calls = { add: [], pickDir: 0, setDir: [], remove: [], reveal: 0 };
 
 module.exports = function stubDownloadIpc(opts = {}) {
   const tasks = Array.isArray(opts.tasks) ? opts.tasks : [];
@@ -78,17 +78,36 @@ module.exports = function stubDownloadIpc(opts = {}) {
 
   // 其余都是"发指令"型：离屏测试不关心主进程真去下什么，回个成功即可。
   ['download:pause', 'download:resume', 'download:retry', 'download:cancel',
-   'download:openDir', 'download:reveal'].forEach((ch) => {
+   'download:openDir'].forEach((ch) => {
     ipcMain.handle(ch, () => ({ ok: true, data: true }));
+  });
+  /* ★ reveal 单列：问题 A 要断言"文件在时点绿勾 = 开文件夹；文件不在时 = 不开，改重下"，
+     所以得数它被调了几次。 */
+  ipcMain.handle('download:reveal', () => {
+    calls.reveal++;
+    return { ok: true, data: true };
   });
 
   // 本地歌曲那三个（批次 B 会用到，先一起桩上，免得下次又要回来改一遍）
+  // ★ 返回要包成 { ok:true, data } —— 界面 api() 解的就是这层壳（真实 main.js 的
+  //   handle() 也这么包）；返回裸值会被 api() 当成失败。
   ipcMain.handle('local:pickFiles', () => ({ ok: true, data: null }));
   ipcMain.handle('local:pickFolder', () => ({ ok: true, data: null }));
+  /* ★ local:stat 默认"文件都在"。但问题 A 要测"外部把文件删了"，
+     所以给一个**可切换开关**：测试里 `setLocalMissing(true)` → 一律回 exists:false。
+     用开关而不是让每个测试各写一份 handler：改一处就够了，别的测试也不受影响。 */
   ipcMain.handle('local:stat', (_e, paths) => ({
     ok: true,
-    data: (Array.isArray(paths) ? paths : []).map((p) => ({ path: p, exists: true, size: 0 })),
+    data: (Array.isArray(paths) ? paths : []).map((p) => ({
+      path: p,
+      exists: !module.exports.localMissing,
+      size: module.exports.localMissing ? 0 : 4211000,
+    })),
   }));
 };
+
+/* 测试用开关：true = 所有本地文件都"不存在"（模拟外部删除） */
+module.exports.localMissing = false;
+module.exports.setLocalMissing = (v) => { module.exports.localMissing = !!v; };
 
 module.exports.calls = calls;

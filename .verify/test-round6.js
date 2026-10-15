@@ -59,6 +59,9 @@ ipcMain.handle('bili:videoInfo', (_e, bvid) => {
   return { ok: true, data: { bvid, aid: 2, title: '普通歌', cover: '', owner: { mid: UP_MID, name: '测试UP' }, duration: 312, pages: [{ bvid, cid: 7, page: 1, title: '普通歌', duration: 312 }], season: null } };
 });
 ipcMain.handle('bili:upVideos', () => ({ ok: true, data: { list: [], hasMore: false } }));
+/* v2.8.0：下载 / 本地歌曲 IPC 桩。★ boot() 里的 refreshDownloads 一定要打 download:list，
+   缺了会挂 "No handler registered"；另外本脚本现在会点合集面板的「批量下载」，也要这组桩。 */
+require('./stub-download-ipc.js')();
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
@@ -241,10 +244,12 @@ app.whenReady().then(async () => {
     toggles: document.querySelectorAll('#collectList [data-cact="toggle"]').length,
     sub: document.getElementById('collectSub').textContent,
     allBtn: document.getElementById('btnCollectToggleAll').textContent,
-    playBtn: document.getElementById('btnPlayCollect').textContent,
+    // ★ v2.8.0 批次 A：合集面板的「播放全部」已按 Neo 的决定**换成「批量下载」**
+    //   （id 也从 btnPlayCollect 改成 btnDownloadCollect）。这里读新按钮。
+    dlBtn: document.getElementById('btnDownloadCollect').textContent,
   })`);
   say(`  面板打开=${panel.open}，${panel.rows} 行，${panel.toggles} 个开关，「${panel.sub}」`);
-  say(`  顶部按钮：「${panel.allBtn}」「${panel.playBtn}」`);
+  say(`  顶部按钮：「${panel.allBtn}」「${panel.dlBtn}」`);
   if (panel.open && panel.rows === TOTAL && panel.toggles === TOTAL) ok('每一集都有一个启用/禁用开关');
   else bad('开关数量不对：' + JSON.stringify(panel));
   if (/已启用 134\/134 集/.test(panel.sub) && panel.allBtn === '全部禁用') ok('副标题与一键按钮状态正确（默认全部启用）');
@@ -257,11 +262,11 @@ app.whenReady().then(async () => {
     off: (DB.collectOff['${COLLECT_BVID}'] || []).length,
     sub: document.getElementById('collectSub').textContent,
     allBtn: document.getElementById('btnCollectToggleAll').textContent,
-    playBtn: document.getElementById('btnPlayCollect').textContent,
+    dlBtn: document.getElementById('btnDownloadCollect').textContent,
     offRows: document.querySelectorAll('#collectList .collect-row.off').length,
   })`);
   const offSaved = lastSaved && lastSaved.collectOff && (lastSaved.collectOff[COLLECT_BVID] || []).length;
-  say(`  禁用 3 集后：禁用表 ${afterOff.off} 条，暗淡行 ${afterOff.offRows}，「${afterOff.sub}」，按钮「${afterOff.allBtn}」「${afterOff.playBtn}」`);
+  say(`  禁用 3 集后：禁用表 ${afterOff.off} 条，暗淡行 ${afterOff.offRows}，「${afterOff.sub}」，按钮「${afterOff.allBtn}」「${afterOff.dlBtn}」`);
   if (afterOff.off === 3 && afterOff.offRows === 3 && /已启用 131\/134 集/.test(afterOff.sub))
     ok('禁用 3 集：开关状态、暗淡行、副标题计数三方一致');
   else bad('禁用状态没对齐：' + JSON.stringify(afterOff));
@@ -321,14 +326,24 @@ app.whenReady().then(async () => {
     ok('一键「全部禁用」生效，134 集全部关掉，按钮自动变成「全部启用」');
   else bad('一键全部禁用不对：' + JSON.stringify(allOff));
 
-  // 全部禁用时点播放：要给出明确提示，不静默
-  const qLenBefore = await evalJS(`queue.tracks.length`);
-  await clickSel('#btnPlayCollect');
+  // ★ v2.8.0 批次 A：合集面板原来那颗「播放全部」已换成「批量下载」（id 也改了）。
+  //   "全禁用时点播放全部要给提示"这条语义随之失效 —— 现在这颗按钮进的是**下载勾选态**，
+  //   跟"启用/禁用"是两回事（下载勾选态由 test-collect.js 专门覆盖）。
+  //   这里只守住"启用/禁用不会把这颗按钮弄坏、点它不会静默无反应"这一条。
+  const dlBtnBefore = await evalJS(`document.getElementById('btnDownloadCollect').textContent`);
+  await clickSel('#btnDownloadCollect');
   await sleep(400);
-  const allOffPlay = await evalJS(`({ qlen: queue.tracks.length, toast: document.getElementById('toast').textContent })`);
-  say(`  全禁用后点「播放全部」：队列还是 ${allOffPlay.qlen} 首，提示「${allOffPlay.toast}」`);
-  if (allOffPlay.qlen === qLenBefore && /都被禁用/.test(allOffPlay.toast)) ok('全禁用时给明确提示，不会静默什么也不发生');
-  else bad('全禁用时的提示不对：' + JSON.stringify(allOffPlay));
+  const dlPickOn = await evalJS(`({
+    btn: document.getElementById('btnDownloadCollect').textContent,
+    rows: document.querySelectorAll('#collectList .collect-row').length,
+    hasPick: document.querySelectorAll('#collectList .pick').length,
+  })`);
+  say(`  全禁用后点「批量下载」：按钮「${dlBtnBefore}」→「${dlPickOn.btn}」，${dlPickOn.hasPick} 个勾选框`);
+  if (/退出批量下载/.test(dlPickOn.btn) && dlPickOn.hasPick === TOTAL)
+    ok('全禁用状态下「批量下载」仍能进勾选态（不会因为全禁用就失灵）');
+  else bad('全禁用时「批量下载」行为不对：' + JSON.stringify(dlPickOn));
+  await clickSel('#btnDownloadCollect');   // 退出勾选态
+  await sleep(300);
 
   await clickSel('#btnCollectToggleAll');   // 还原成全部启用
   await sleep(500);

@@ -1784,7 +1784,14 @@ body.mini .player {
      第一行要放下：封面 48 + 控制键 128 + ♡ 30 + 🔊 28 + ☰ 28 + ✕▢ 68 = 330，
      加上 5 个 9px 的间隔（45）和 ✕▢ 左边那 8px = 383，还剩 23px 余量。
      余量必须留够 —— flex-wrap 是**按"假设尺寸"先断行、再收缩**的，
-     一旦第一行超宽，✕▢ 会被整个挤到第二行去（离线实测第 3 组踩到过）。 */
+     一旦第一行超宽，✕▢ 会被整个挤到第二行去（离线实测第 3 组踩到过）。
+
+     ★★ v2.8.0 又踩了一次（batch A 的 #btnDownload）：
+     .volume 在 mini 下是 display:contents，它的**每个直接子元素**都会顶上来参与这一行 ——
+     新加一个图标却忘了在 mini 下收起，它就会以默认 order:0 插到封面**前面**，
+     整行右移 28+9=37px，✕▢ 立刻越界被挤到第二行。
+     所以：**往 .volume 里加新元素，必须同时在 mini 下给它 display:none 或显式 order**
+     （static 哨兵见 verify.js 第 48 类「.volume 的直接子元素在 mini 下都已归位」）。 */
   gap: 4px 9px;
   padding: 12px 0 12px 14px;   /* 右边不留内边距：让 ✕ ▢ 贴到窗口右边缘（和标题栏一个规矩） */
   border-top: 0;               /* 只剩一块面板了，别再画那条分隔线 */
@@ -1793,7 +1800,9 @@ body.mini .player {
 
 /* ★ .np / .volume 这两个"分组盒"在 mini 下让位：display:contents 让盒子本身消失，
    它们的子元素（封面 / 歌名 / ♡ / 🔊 / ☰）直接参与上面那条 flex 布局。
-   这样不用改动 HTML 结构，就能把"歌名"从封面那一组里拆出来、单独放第二行。 */
+   这样不用改动 HTML 结构，就能把"歌名"从封面那一组里拆出来、单独放第二行。
+   ⚠️ 副作用：.volume 里**任何一个**直接子元素都会上浮到这一行 —— 新增按钮时
+   别忘了在 mini 下收起它（否则以 order:0 插队，会把 ✕▢ 挤到第二行，见上面注释）。 */
 body.mini .np,
 body.mini .volume { display: contents; }
 
@@ -1812,12 +1821,16 @@ body.mini .np-meta      { order: 7; flex: 0 0 100%; }
    · 播放模式按钮（图2 只有 ⏮⏸⏭ 三个）
    · 进度条（那条小窗里放不下，展开态也不用 —— 列表里"正在播放"那行会高亮）
    · 「词」和「在浏览器打开」（mini 窗太小，整页歌词铺不开；要歌词回完整模式）
+   · 下载键（v2.8.0 批次 A 加的。它和 ☰ 一样是 .volume 的直接子元素，
+     而 .volume 在 mini 下是 display:contents —— 不显式收起来的话它会以默认 order:0
+     排到封面**前面**，把整行右移 37px，✕▢ 直接被挤到第二行去。见下面 mini-actions 那段）
    · 音量滑杆（120px 高的竖滑杆在 132px 的小窗里会被窗口边缘裁掉；
      喇叭图标本身还能点=静音、滚轮=调音量，功能没丢） */
 body.mini #btnMode,
 body.mini .progress-row,
 body.mini .lyric-wrap,
 body.mini #btnOpenBili,
+body.mini #btnDownload,
 body.mini .vol-pop { display: none; }
 /* 收起态里封面不再进歌词页（app.js 里同步做了拦截），那"歌词"两个字也别再浮出来 */
 body.mini .np-cover::after { display: none; }
@@ -2005,6 +2018,17 @@ body.mini .mini-list .collect-row { padding: 9px 12px; border-radius: 8px; }
   font-size: 11px; padding: 2px 7px; border-radius: 99px; flex: none;
   background: rgb(240 149 149 / 0.16); color: #f09595;
 }
+
+/* 本地歌曲页的"空"状态（一首都没有时）。比通用的 .empty 多两个导入按钮。 */
+.local-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 52px 20px; color: var(--muted);
+  border: 1px dashed rgb(255 255 255 / 0.1); border-radius: 12px; margin-top: 14px;
+}
+.local-empty .ic { width: 30px; height: 30px; color: var(--muted-2); margin-bottom: 4px; }
+.local-empty-title { font-size: 14px; color: var(--text); }
+.local-empty-sub { font-size: 12.5px; color: var(--muted); max-width: 340px; text-align: center; line-height: 1.6; }
+.local-empty-actions { display: flex; gap: 8px; margin-top: 10px; }
 
 /* 设置页里的"当前下载目录"显示框 */
 .dl-dir-box {
