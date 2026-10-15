@@ -2603,7 +2603,9 @@ console.log('\n[52] 导入我的 B 站收藏夹（v2.6.0）：');
   if (!/selected:\s*new Map\(\)/.test(appjs)) {
     err('★ impState.selected 不是 Map —— 同一个视频出现在两个收藏夹里会被算两次');
   } else ok('★ 选择集是 Map（用 bvid 当键，天然去重）');
-  if (!/selected\.has\(track\.bvid\)/.test(appjs) && !/pickSet\.has\(track\.bvid\)/.test(appjs)) {
+  /* ★ v2.8.0 修订：身份键从写死的 bvid 抽成了 pickKey（本地歌没有 bvid，要按 localPath 查）。
+     断言改成认"用某个身份键去选择集里查"这件事本身 —— 不再绑死 bvid。 */
+  if (!/(pickSet|selected)\.has\((track\.bvid|pickId)\)/.test(appjs)) {
     err('★ 行的勾选状态没有"从选择集反查" —— 换收藏夹 / 翻页回来勾就丢了');
   } else ok('★ 行的勾选状态从选择集反查（翻页 / 换收藏夹都不丢）');
   /* ★ v2.8.0：勾选渲染被抽成了 pickSet（下载的批量勾选复用了同一套行渲染）。
@@ -3312,7 +3314,9 @@ console.log('\n[58] 批次 B：本地歌曲视图与导入（v2.8.0）：');
   if (!/else if \(currentView === 'local'\) renderLocal\(\);/.test(appjs))
     err('★ renderAll 里没有 local 分支 —— 切到本地歌曲页会画成空/上一页');
   else ok('★ renderAll 已接 local 分支');
-  if (!/if \(currentView === 'local'\) return localTracks\(\);/.test(appjs))
+  // ★ v2.8.0 修订：local 分支从 localTracks() 改成了 localFilteredTracks()（跟着左栏筛选走）。
+  //   这里只要求"有 local 分支"；"必须走 localFilteredTracks"由第 [59] 类断言。
+  if (!/if \(currentView === 'local'\) return (localFilteredTracks|localTracks)\(\);/.test(appjs))
     err('★ currentTracks 里没有 local 分支 —— 点本地歌行不会播它（走不到正确队列）');
   else ok('★ currentTracks 已接 local 分支（点行 = 播这首本地歌）');
   if (!/if \(currentView === 'local'\) return '本地歌曲';/.test(appjs))
@@ -3397,5 +3401,225 @@ console.log('\n[58] 批次 B：本地歌曲视图与导入（v2.8.0）：');
   else err('缺少 .verify/test-round20.js —— 本地库（导入/同曲判定/去重/missing）必须有离线实测');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 58 大类检查）');
+/* ============================================================
+   [59] 本地歌曲：左栏文件夹列表 + 批量选择（v2.8.0 修订）
+   ------------------------------------------------------------
+   两个新交互：
+     · 左栏把本地库按"来源"分组（本地下载 / 各导入文件夹 / 导入的歌曲）
+     · 右栏「批量选择」→ 复用 .track.pickable 渲染，但选择集按 **localPath** 记
+   这一类盯四件容易静默失效的事：
+     · 分组信息的来源（folderRoot 必须由主进程给，界面不许自己反推）
+     · 批量选择的身份键（本地歌没有 bvid，用 bvid 当 key 会永远勾不上）
+     · 移除只动记录不动磁盘文件
+     · 左栏渲染/点击绑定在不在
+   ============================================================ */
+console.log('\n[59] 本地歌曲：文件夹列表 + 批量选择（v2.8.0 修订）：');
+{
+  /* ---- ① 分组：编译期信息 ---- */
+  if (!/function localGroups\(\)/.test(appjs))
+    err('★ 没有 localGroups() —— 左栏文件夹列表没有数据源');
+  else ok('★ 有 localGroups()（左栏分组）');
+  if (!/function folderNameOf\(p\)/.test(appjs))
+    err('★ 没有 folderNameOf() —— 文件夹分组标题取不到目录名');
+  else ok('★ 有 folderNameOf()（取目录名当分组标题）');
+  if (!/function localGroupById\(id\)/.test(appjs))
+    err('★ 没有 localGroupById()');
+  else ok('★ 有 localGroupById()');
+  if (!/function localFilteredTracks\(\)/.test(appjs))
+    err('★ 没有 localFilteredTracks() —— 右栏不会跟着左栏筛选');
+  else ok('★ 有 localFilteredTracks()（右栏跟着左栏筛选）');
+  // ★ currentTracks 的 local 分支必须走 localFilteredTracks（否则点行播的是"全部"而不是"当前分组"）
+  if (!/if \(currentView === 'local'\) return localFilteredTracks\(\);/.test(appjs))
+    err('★ currentTracks 的 local 分支没走 localFilteredTracks —— 点行播放的顺序会和右栏看到的对不上');
+  else ok('★ currentTracks 的 local 分支走 localFilteredTracks（播放顺序 = 右栏看到的顺序）');
+  // 分组规则：下载来的归 download；有 folderRoot 的按根目录；其余归 imported
+  {
+    const fn = (appjs.match(/function localGroups\(\)[\s\S]*?\n\}/) || [''])[0];
+    if (!/e\.src === 'download' \|\| e\.bvid \|\| e\.key/.test(fn))
+      err("★ localGroups 没把\"下载落地\"的判出来 —— 下载来的歌会掉进别的组");
+    else ok('★ 下载落地（src===\'download\' / 带 bvid.key）归「本地下载」组');
+    if (!/if \(e\.folderRoot\) \{ bump\('folder:' \+ e\.folderRoot/.test(fn))
+      err('★ localGroups 没按 folderRoot 分导入文件夹的组');
+    else ok('★ 导入文件夹的按 folderRoot 分组（每个文件夹一组）');
+    if (!/bump\('imported', '导入的歌曲'/.test(fn))
+      err('★ localGroups 没有"单曲导入"的兜底组');
+    else ok('★ 单曲导入的归「导入的歌曲」组');
+  }
+
+  /* ---- ② folderRoot 的唯一来源：主进程 ---- */
+  // 主进程 local:pickFolder 必须把 root 带回来
+  if (!/return Object\.assign\(\{ root \}, scanAudioFolder\(root\)\);/.test(mainjs))
+    err('★ 主进程 local:pickFolder 没带回 root —— 界面拿不到"用户选的根目录"，分组必然错（多级子目录/同名文件夹会分错）');
+  else ok('★ 主进程 local:pickFolder 把 root 一起返回（folderRoot 的唯一来源）');
+  // 界面必须用 main 给的 root，不许自己 path.dirname 反推
+  {
+    const fn = (appjs.match(/async function importLocal\(kind\)[\s\S]*?\n\}/) || [''])[0];
+    if (!/const root = \(kind === 'folder' && res\.root\) \? String\(res\.root\) : null;/.test(fn))
+      err('★ importLocal 没用主进程给的 res.root 当 folderRoot —— 分组信息来路不明');
+    else ok('★ importLocal 用主进程给的 res.root（不从每首歌的路径反推）');
+    if (!/folderRoot: root,/.test(fn))
+      err('★ importLocal 没把 folderRoot 写进条目 —— 导入的文件夹在左栏分不出组');
+    else ok('★ importLocal 把 folderRoot 写进新条目');
+    // 反向断言：界面不许自己从路径反推分组
+    if (/folderRoot:\s*[^\n]*path\.dirname|folderRoot:\s*[^\n]*split\(/.test(fn))
+      err('★ importLocal 在从路径反推 folderRoot —— 必须用主进程给的 root（多级子目录会分错）');
+    else ok('★ 反向断言：importLocal 不自行反推 folderRoot');
+  }
+
+  /* ---- ③ 迁移：老条目补 folderRoot（只补不删） ---- */
+  {
+    const mig = fs.readFileSync(path.join(ROOT, 'src', 'store-migrate.js'), 'utf8');
+    if (!/d\.local\.forEach\(\(e\) => \{[\s\S]*?e\.folderRoot = null/.test(mig))
+      err('★ store-migrate 没给老 local 条目补 folderRoot —— 老用户升级后左栏分不出组（一律 null 归"其他"）');
+    else ok('★ store-migrate 给老条目补 folderRoot（缺失→null）');
+    if (!/e\.src = 'file'/.test(mig))
+      err("★ store-migrate 没给老条目补 src 兜底");
+    else ok("★ store-migrate 给老条目补 src 兜底（认不出的来源当 'file'）");
+    // 反向断言：不许用 filter/map **替换** d.local（那等于"删掉不认识的条目"）
+    if (/d\.local\s*=\s*d\.local\.filter/.test(mig))
+      err('★ store-migrate 在 filter 替换 d.local —— 违反"只补不删"，坏条目会被悄悄吞掉');
+    else ok('★ 反向断言：store-migrate 原地补字段，不 filter / 不丢条目');
+  }
+
+  /* ---- ④ 批量选择：选择集的键必须是 localPath ---- */
+  if (!/let localPick = null;/.test(appjs))
+    err('★ 没有 localPick 状态 —— 批量选择模式没地方存');
+  else ok('★ 有 localPick 状态（本地歌曲的批量选择）');
+  if (!/function toggleLocalPick\(\)/.test(appjs))
+    err('★ 没有 toggleLocalPick() —— 「批量选择」按钮点了没反应');
+  else ok('★ 有 toggleLocalPick()');
+  if (!/function localBarHTML\(\)/.test(appjs))
+    err('★ 没有 localBarHTML() —— 批量工具条画不出来');
+  else ok('★ 有 localBarHTML()（批量工具条）');
+  if (!/function localToggle\(i\)/.test(appjs))
+    err('★ 没有 localToggle() —— 点行勾不上');
+  else ok('★ 有 localToggle()');
+  // ★ 核心：选择集按 localPath 存（本地歌没有 bvid）
+  {
+    const fn = (appjs.match(/function localToggle\(i\)[\s\S]*?\n\}/) || [''])[0];
+    if (!/if \(!t \|\| !t\.localPath\) return;/.test(fn))
+      err('★ localToggle 没有"没有 localPath 就早退" —— 会往选择集里塞空 key');
+    else ok('★ localToggle 用 localPath 当身份（本地歌没有 bvid）');
+    if (!/localPick\.selected\.has\(t\.localPath\)/.test(fn) || !/localPick\.selected\.set\(t\.localPath, t\)/.test(fn))
+      err('★ localToggle 的键不是 localPath —— 用 bvid 的话本地歌永远勾不上（bvid 是 null）');
+    else ok('★ localToggle 按 localPath 存取选择集');
+    // 反向断言：不许用 bvid
+    if (/localPick\.selected\.[a-z]+\(t\.bvid/.test(fn))
+      err('★ localToggle 里用了 t.bvid 当键 —— 本地歌 bvid 恒为 null，勾选会串成一锅粥');
+    else ok('★ 反向断言：localToggle 不用 bvid 当键');
+  }
+  // trackRow 必须支持按指定键反查勾选（pickKey）
+  {
+    const fn = (appjs.match(/function trackRow\(track, i, opts = \{\}\)[\s\S]*?\n\}/) || [''])[0];
+    if (!/const pickKey = opts\.pickKey \|\| 'bvid';/.test(fn))
+      err('★ trackRow 不支持 opts.pickKey —— 本地歌的勾选状态查不到（会永远显示未勾）');
+    else ok('★ trackRow 支持 opts.pickKey（默认 bvid，本地歌传 localPath）');
+    if (!/const pickId = track\[pickKey\];/.test(fn) || !/pickSet\.has\(pickId\)/.test(fn))
+      err('★ trackRow 没用 pickKey 取身份键去查选择集');
+    else ok('★ trackRow 按 pickKey 取身份键查选择集');
+  }
+  // localTrackOpts 必须把 pickKey 传成 localPath
+  if (!/function localTrackOpts\(\)/.test(appjs))
+    err('★ 没有 localTrackOpts()');
+  else {
+    const fn = (appjs.match(/function localTrackOpts\(\)[\s\S]*?\n\}/) || [''])[0];
+    if (!/pickKey: 'localPath'/.test(fn))
+      err('★ localTrackOpts 没传 pickKey:\'localPath\' —— 本地歌的勾选态渲染不出来');
+    else ok("★ localTrackOpts 给批量选择传 pickKey:'localPath'");
+  }
+
+  /* ---- ⑤ 移除：只动记录、不动磁盘文件 ---- */
+  if (!/function removeLocalPaths\(paths\)/.test(appjs))
+    err('★ 没有 removeLocalPaths()');
+  else ok('★ 有 removeLocalPaths()');
+  {
+    const fn = (appjs.match(/function removeLocalPaths\(paths\)[\s\S]*?\n\}/) || [''])[0];
+    if (/unlink|rmdir|copyFile|localDelete/.test(fn))
+      err('★ removeLocalPaths 里出现了删文件的操作 —— 移出库必须**只删记录**（文件是用户自己的）');
+    else ok('★ 反向断言：removeLocalPaths 只删记录，不碰磁盘文件');
+  }
+  if (!/async function localDoRemovePicked\(\)/.test(appjs))
+    err('★ 没有 localDoRemovePicked() —— 「移出库」按钮点了没反应');
+  else ok('★ 有 localDoRemovePicked()');
+  if (!/async function localRemoveFolder\(root\)/.test(appjs))
+    err('★ 没有 localRemoveFolder() —— 左栏文件夹行的 ✕ 点了没反应');
+  else ok('★ 有 localRemoveFolder()（左栏 ✕ 移除整组）');
+  {
+    const fn = (appjs.match(/async function localRemoveFolder\(root\)[\s\S]*?\n\}/) || [''])[0];
+    if (!/if \(localFilter === 'folder:' \+ r\) localFilter = 'all';/.test(fn))
+      err("★ localRemoveFolder 没处理\"删掉正在看的分组\" —— 用户会停在一个已经不存在的分组上，右栏空白");
+    else ok('★ 删掉正在看的分组 → 自动退回「全部歌曲」');
+    if (/unlink|rmdir|copyFile/.test(fn))
+      err('★ localRemoveFolder 里出现了删文件的操作');
+    else ok('★ 反向断言：localRemoveFolder 只动记录');
+  }
+
+  /* ---- ⑥ 退出勾选态的三条路（换分组 / 离开页面 / 干完） ---- */
+  if (!/if \(localPick && currentView !== 'local'\) localPick = null;/.test(appjs))
+    err('★ renderAll 里没有"离开本地页就退出勾选态" —— 跑到别的页面还会带着勾选框');
+  else ok('★ 离开本地页自动退出勾选态');
+  if (!/localFilter = gid;[\s\S]{0,80}localPick = null;/.test(appjs))
+    err('★ 换分组时没有清 localPick —— 选择集是按上一个分组选的，留着会串');
+  else ok('★ 换分组时自动退出勾选态');
+
+  /* ---- ⑦ 左栏渲染与点击绑定 ---- */
+  if (!/class="local-side"/.test(appjs))
+    err('★ renderLocal 里没有 .local-side —— 左栏没画出来');
+  else ok('★ renderLocal 画出左栏（.local-side）');
+  if (!/class="local-folder-row[^"]*" data-lgroup=/.test(appjs))
+    err('★ 左栏行没有 data-lgroup —— 点了不切换');
+  else ok('★ 左栏行带 data-lgroup（可点切换）');
+  if (!/data-lrmfolder=/.test(appjs))
+    err('★ 文件夹行没有 data-lrmfolder —— 文件夹的 ✕ 点了不生效');
+  else ok('★ 文件夹行带 data-lrmfolder（✕ 可点）');
+  if (!/const folderRow = e\.target\.closest\('\[data-lgroup\]'\);/.test(appjs))
+    err('★ 点击分发里没有接 [data-lgroup] —— 点左栏没反应');
+  else ok('★ 点击分发已接左栏（[data-lgroup]）');
+  // ★ 顺序：✕ 必须在"切分组"之前判（✕ 在行里面，不先拦会被整行点击吃掉）
+  {
+    const iRm = appjs.indexOf("const rmFolder = e.target.closest('[data-lrmfolder]')");
+    const iRow = appjs.indexOf("const folderRow = e.target.closest('[data-lgroup]')");
+    if (iRm < 0 || iRow < 0 || iRm > iRow)
+      err('★ 点击分发里 ✕ 没排在"切分组"之前 —— 点 ✕ 会先被整行点击吃掉（删不掉）');
+    else ok('★ ✕ 排在整行点击之前（点 ✕ 不会被切换分组吃掉）');
+  }
+  if (!/id === 'btnLocalPick'\) \{ toggleLocalPick\(\); return; \}/.test(appjs))
+    err('★ 「批量选择」按钮没绑定 —— 点了没反应');
+  else ok('★ 「批量选择」按钮已绑定');
+  if (!/id === 'btnLocalPickAll'\) \{ localPickAll\(\); return; \}/.test(appjs) || !/id === 'btnLocalPickNone'\) \{ localPickNone\(\); return; \}/.test(appjs))
+    err('★ 「全选 / 清空选择」没绑定');
+  else ok('★ 「全选 / 清空选择」已绑定');
+  // 点行：本地批量选择要排在"点整行 = 播放"之前
+  if (!/if \(dlPick\) dlToggle\(i\);[\s\S]{0,120}else if \(localPick\) localToggle\(i\);/.test(appjs))
+    err('★ 点行分发里没有 localPick 分支 —— 在本地页点行会直接播放，勾不上');
+  else ok('★ 点行分发已接 localPick（在"点整行=播放"之前）');
+  {
+    // ★ 注意 appjs 是**去注释**过的，所以不能拿注释文字当锚点。
+    //   也不能用 `const tracks = currentTracks();`（别处出现过多次）——
+    //   用**紧跟播放那一句**的 startFromView 当锚点才唯一。
+    const iPick = appjs.indexOf("const pickRow = e.target.closest('.track.pickable')");
+    const iPlay = appjs.lastIndexOf('startFromView(tracks, i)');
+    if (iPick < 0 || iPlay < 0 || iPick > iPlay)
+      err('★ pickable 行分发没排在"点整行=播放"之前 —— 勾选模式点行会把歌播掉');
+    else ok('★ pickable 行分发排在"点整行=播放"之前');
+  }
+
+  /* ---- ⑧ 样式 ---- */
+  if (!/\.local-wrap\b/.test(css)) err('★ style.css 没有 .local-wrap（左右两栏容器）');
+  else ok('★ 有 .local-wrap（两栏容器）');
+  if (!/\.local-side\b/.test(css)) err('★ style.css 没有 .local-side（左栏）');
+  else ok('★ 有 .local-side（左栏）');
+  if (!/\.local-folder-row\b/.test(css)) err('★ style.css 没有 .local-folder-row');
+  else ok('★ 有 .local-folder-row');
+  if (!/\.local-folder-row:hover \.del/.test(css)) err('★ 没有 .local-folder-row:hover .del（✕ 悬停出现）');
+  else ok('★ 文件夹行的 ✕ 悬停才出现');
+  if (!/\.ghost-btn\.danger\b/.test(css)) err('★ 没有 .ghost-btn.danger（「移出库」的破坏性配色）');
+  else ok('★ 有 .ghost-btn.danger（「移出库」按钮的破坏性配色）');
+
+  /* ---- ⑨ 离线实测脚本必须在 ---- */
+  if (fs.existsSync(path.join(ROOT, '.verify', 'test-round21.js'))) ok('有 .verify/test-round21.js（文件夹列表 + 批量选择离线实测）');
+  else err('缺少 .verify/test-round21.js —— 左栏分组 / 批量选择 / 移出库必须有离线实测');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 59 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

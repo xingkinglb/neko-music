@@ -131,6 +131,19 @@ let dlKeys = new Set();
      这样 trackRow 里那套"按 bvid 反查勾没勾上"的渲染分支可以原样共用。 */
 let dlPick = null;         // { selected: Map<bvid, track> }；null = 不在勾选模式
 
+/* 「本地歌曲」左栏当前选中的文件夹组（v2.8.0 修订）。
+   null / 'all' = 全部歌曲；'download' | 'imported' | 'folder:<root>' = 某个分组。
+   ★ 为什么单独一个变量、塞进 currentView 里：currentView 是"在哪一页"的唯一依据，
+     把它拼成 'local:xxx' 会让 renderAll / syncNavHighlight / viewLabel 全都要跟着改；
+     一个独立的筛选变量更省事，而且"点整行播放"用 currentTracks() 就能自然对上。 */
+let localFilter = 'all';
+
+/* 「本地歌曲」的批量选择模式（v2.8.0 修订）。
+   ★ 复用 download 那套 .track.pickable 渲染，但选择集换成本地歌的身份 —— 本地歌没有 bvid，
+     所以这里用 **localPath** 当 key。dlPick / impState 都是 Map<bvid, ...>，用途不同、不能混。
+   { selected: Map<localPath, track>, view: 'local' }；null = 不在勾选模式。 */
+let localPick = null;
+
 /* ★ v2.0.4：给每次"切歌"发一个序号。
    为什么需要它：playAt() 里有两段 await（补 cid、取音频地址），期间用户完全可能
    又点了另一首 —— 两个 playAt 会**叠在一起**跑。后一个一旦把 audio.src 换掉，
@@ -1228,8 +1241,12 @@ function trackRow(track, i, opts = {}) {
   //   所以翻页 / 换收藏夹回来，勾选状态照样在，同一个视频也不会被算两次。
   // v2.8.0：下载的批量勾选复用同一套渲染，只是换了一个选择集（opts.pickSet）。
   //   不显式传就退回导入页那个 —— 这样导入页那三屏一个字都不用改。
+  // v2.8.0 修订：本地歌曲批量选择也用这套，但本地歌**没有 bvid**，
+  //   所以按 opts.pickKey（默认 'bvid'）取身份键 —— 本地歌传 'localPath' 进来。
+  const pickKey = opts.pickKey || 'bvid';
   const pickSet = opts.pick ? (opts.pickSet || (impState && impState.selected) || null) : null;
-  const picked = !!(pickSet && track.bvid && pickSet.has(track.bvid));
+  const pickId = track[pickKey];
+  const picked = !!(pickSet && pickId && pickSet.has(pickId));
 
   // 作者名：知道 UP 的 mid 就做成可点的（点开看这个 UP 的全部视频），
   // 老数据 / 收藏夹导入来的没有 mid，就还是普通文字，不会点出个空页面。
@@ -3786,6 +3803,132 @@ async function dlDoPicked() {
   await enqueueDownloads(list);
 }
 
+/* ---------------- 本地歌曲的批量选择（v2.8.0 修订） ----------------
+   和上面的下载勾选是**两套独立的选择集**（这里按 localPath 存，下载那边按 bvid）。
+   但行渲染、工具条样式全部复用 —— 只有"选择集的键"不一样。 */
+
+/** 进 / 出批量选择模式。进的时候**默认全不勾**（Neo 明确要"默认一个都不勾"）。 */
+function toggleLocalPick() {
+  if (localPick) { localPick = null; renderLocal(); return; }
+  localPick = { view: 'local', selected: new Map() };
+  renderLocal();
+}
+
+/** 批量选择工具条：「已选 N 首 · 全选 · 清空 · 移出库 · 加入歌单 · 收藏」 */
+function localBarHTML() {
+  const n = localPick ? localPick.selected.size : 0;
+  const dis = n ? '' : ' disabled';
+  return `
+    <div class="imp-bar local-bar">
+      <span class="imp-count">已选 <b>${n}</b> 首</span>
+      <span class="imp-bar-actions">
+        <button class="ghost-btn" id="btnLocalPickAll">全选</button>
+        <button class="ghost-btn" id="btnLocalPickNone"${dis}>清空选择</button>
+        <button class="ghost-btn" id="btnLocalFav"${dis}>${ic('i-heart')}<span>收藏</span></button>
+        <button class="ghost-btn" id="btnLocalAddPl"${dis}>${ic('i-plus')}<span>加入歌单</span></button>
+        <button class="ghost-btn danger" id="btnLocalRemove"${dis}>${ic('i-trash')}<span>移出库</span></button>
+      </span>
+    </div>`;
+}
+
+/** 点整行 = 勾 / 取消（键是 localPath —— 本地歌没有 bvid）。 */
+function localToggle(i) {
+  if (!localPick) return;
+  const t = currentTracks()[i];
+  if (!t || !t.localPath) return;
+  if (localPick.selected.has(t.localPath)) localPick.selected.delete(t.localPath);
+  else localPick.selected.set(t.localPath, t);
+  rerenderKeepScroll();
+}
+
+/** 全选 / 清空**只作用于当前分组**（左栏选中的那个文件夹）—— 这是最不容易误操作的口径。 */
+function localPickAll() {
+  if (!localPick) return;
+  for (const t of currentTracks()) if (t && t.localPath) localPick.selected.set(t.localPath, t);
+  rerenderKeepScroll();
+}
+
+function localPickNone() {
+  if (!localPick) return;
+  localPick.selected.clear();
+  rerenderKeepScroll();
+}
+
+/** 从本地库里按 path 集合移除（只删记录，不动磁盘文件）。返回删掉的条数。 */
+function removeLocalPaths(paths) {
+  const set = new Set((paths || []).map(String));
+  if (!set.size) return 0;
+  const before = (DB.local || []).length;
+  DB.local = (DB.local || []).filter((e) => !e || !set.has(String(e.path)));
+  const removed = before - DB.local.length;
+  if (removed) { rebuildDlKeys(); persistLater(); }
+  return removed;
+}
+
+/**
+ * 左栏文件夹行右边那个 ✕ —— 把"这个文件夹"整组的记录从本地库里移除。
+ * ★ 只动记录，绝不动磁盘文件（和 removeLocalPaths 同一条红线）。
+ * ★ 确认框里写清"只是不再收录，文件还在" —— 用户点 × 时最容易以为是在删文件。
+ */
+async function localRemoveFolder(root) {
+  const r = String(root || '');
+  if (!r) return;
+  const grp = localGroups().find((g) => g.kind === 'folder' && String(g.root) === r);
+  const n = grp ? grp.count : 0;
+  if (!n) return;
+  const ok = await askConfirm(
+    '移除这个文件夹',
+    `把「${folderNameOf(r)}」里的 ${n} 首从本地库移除？只移除记录，磁盘上的文件不会被删。`,
+    '移除');
+  if (!ok) return;
+  const removed = removeLocalPaths(grp.entries.map((e) => e.path));
+  // 当前正停在这个分组上 → 退回「全部歌曲」，免得停在一个空分组上
+  if (localFilter === 'folder:' + r) localFilter = 'all';
+  localPick = null;
+  renderLocal();
+  toast(`已从本地库移除 ${removed} 首`);
+}
+
+/** 「移出库」：把选中的这批从本地库移除（确认一次，明确写"不动磁盘文件"）。 */
+async function localDoRemovePicked() {
+  if (!localPick) return;
+  const picked = Array.from(localPick.selected.values());
+  if (!picked.length) return;
+  const ok = await askConfirm(
+    '移出本地库',
+    `把选中的 ${picked.length} 首从本地库移除？只移除记录，磁盘上的文件不会被删。`,
+    '移出库');
+  if (!ok) return;
+  const removed = removeLocalPaths(picked.map((t) => t.localPath));
+  localPick = null;                 // 干完退出勾选模式
+  renderLocal();
+  toast(`已从本地库移除 ${removed} 首`);
+}
+
+/** 「收藏」：把选中的本地歌批量加进「我喜欢」（已经在里面的跳过）。 */
+async function localDoFavPicked() {
+  if (!localPick) return;
+  const picked = Array.from(localPick.selected.values());
+  if (!picked.length) return;
+  let added = 0;
+  for (const t of picked) {
+    if (isFav(t)) continue;
+    DB.favorites = [t, ...DB.favorites];
+    added++;
+  }
+  await persist();
+  renderLocal();
+  toast(added ? `已收藏 ${added} 首` : '选中的都已经在「我喜欢」里了');
+}
+
+/** 「加入歌单」：把选中的本地歌一次性加进某个歌单（复用同一个选歌单弹窗）。 */
+function localDoAddPlPicked() {
+  if (!localPick) return;
+  const picked = Array.from(localPick.selected.values());
+  if (!picked.length) return;
+  addManyToPlaylist(picked);
+}
+
 /* ---------------- 下载管理页（页面 7） ---------------- */
 
 const DL_FILTERS = [
@@ -4093,6 +4236,10 @@ function localTrack(entry) {
   return {
     localPath: entry.path,
     localId: entry.id,
+    // ★ v2.8.0 修订：把分组所需的来源信息一并带上（左栏文件夹列表要用它筛选）。
+    //   这两个字段**只读**，不参与播放/身份判定，纯粹给界面分组用。
+    src: entry.src || 'file',
+    folderRoot: entry.folderRoot || null,
     title: entry.title || fileNameOf(entry.path),
     author: entry.author || '',
     cover: entry.cover || '',
@@ -4108,6 +4255,66 @@ function fileNameOf(p) {
   const s = String(p || '');
   const base = s.split(/[\\/]/).pop() || s;
   return base.replace(/\.[^.]+$/, '') || base;
+}
+
+/** 从路径里抠"最后一级文件夹名"（左栏分组标题用；根目录名兜底）。 */
+function folderNameOf(p) {
+  const s = String(p || '');
+  const parts = s.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : s;
+}
+
+/**
+ * 把本地库分成"文件夹组"（v2.8.0 修订，左栏列表的数据源）。
+ * 分组规则（与 Neo 确认）：
+ *   · 下载落地的（src==='download' 或带 bvid/key）→ 归到固定的 `download` 组
+ *   · 导入文件夹的 → 按那条记录里的 `folderRoot`（用户选的那个根目录）分组
+ *   · 单曲导入的（src==='file' 且没有 folderRoot）→ 归到固定的 `imported` 组
+ * 返回 [{ id, name, kind, root, count, bytes, missing }...]，固定组排最前、文件夹组按名字排。
+ */
+function localGroups() {
+  const list = (DB.local || []).filter((e) => e && e.path);
+  const map = new Map();   // id -> { id, name, kind, root, count, bytes, missing, entries }
+  const bump = (id, name, kind, root, e) => {
+    let g = map.get(id);
+    if (!g) { g = { id, name, kind, root, count: 0, bytes: 0, missing: 0, entries: [] }; map.set(id, g); }
+    g.count++;
+    if (e.missing) g.missing++; else g.bytes += Number(e.size) || 0;
+    g.entries.push(e);
+  };
+
+  for (const e of list) {
+    if (e.src === 'download' || e.bvid || e.key) { bump('download', '本地下载', 'download', null, e); continue; }
+    if (e.folderRoot) { bump('folder:' + e.folderRoot, folderNameOf(e.folderRoot), 'folder', e.folderRoot, e); continue; }
+    bump('imported', '导入的歌曲', 'imported', null, e);
+  }
+
+  const rank = (g) => (g.kind === 'download' ? 0 : g.kind === 'imported' ? 1 : 2);
+  return Array.from(map.values()).sort((a, b) => {
+    const ra = rank(a), rb = rank(b);
+    if (ra !== rb) return ra - rb;
+    return a.name.localeCompare(b.name, 'zh');
+  });
+}
+
+/** 按 id 取一个分组（左栏点击时用）。找不到返回 null。 */
+function localGroupById(id) {
+  if (!id || id === 'all') return null;
+  return localGroups().find((g) => g.id === id) || null;
+}
+
+/**
+ * 当前左栏筛选下应该显示的曲目（右栏列表 + 点整行播放都用它）。
+ * ★ 顺序保持"库里原本的顺序"（DB.local 是**新导入的排在前面**），不重新排序 ——
+ *   用户刚导入的歌就该在最上面，这个直觉比"按文件名排"更符合预期。
+ */
+function localFilteredTracks() {
+  const all = localTracks();
+  if (!localFilter || localFilter === 'all') return all;
+  const g = localGroupById(localFilter);
+  if (!g) return all;   // 分组没了（被删了 / 换了）→ 退回全部，不显示空白页
+  const set = new Set(g.entries.map((e) => String(e.path)));
+  return all.filter((t) => set.has(String(t.localPath)));
 }
 
 /** 当前本地库里所有曲目（列表渲染用）。 */
@@ -4192,6 +4399,9 @@ async function importLocal(kind) {
 
   DB.local = Array.isArray(DB.local) ? DB.local : [];
   const have = new Set(DB.local.filter((e) => e && e.path).map((e) => String(e.path)));
+  // ★ v2.8.0 修订：folderRoot 由**用户选的那个根目录**决定（主进程 local:pickFolder 带回来的）。
+  //   界面绝不从每首歌的路径反推 —— 反推在多级子目录 / 同名文件夹下会分错组。
+  const root = (kind === 'folder' && res.root) ? String(res.root) : null;
   const fresh = [];
   for (const p of res.paths) {
     if (have.has(String(p))) continue;   // 已在库里
@@ -4205,6 +4415,7 @@ async function importLocal(kind) {
       duration: 0,
       size: 0,
       src: kind === 'folder' ? 'folder' : 'file',
+      folderRoot: root,          // 左栏"添加的文件夹 N"按它分组；单曲导入 = null
       key: '',
       bvid: null,
       cid: null,
@@ -4217,6 +4428,10 @@ async function importLocal(kind) {
   DB.local = fresh.concat(DB.local);
   persistLater();
   currentView = 'local';
+  localPick = null;              // 新导入的歌默认混在不同分组里，先退出勾选模式更安全
+  // 导入文件夹 → 直接把左栏切到"这个文件夹"，用户立刻能看到刚导进来的歌；
+  // 单曲导入 → 切到「导入的歌曲」那一组。
+  localFilter = root ? 'folder:' + root : (kind === 'folder' ? 'all' : 'imported');
   renderAll();
   toast(res.truncated
     ? `已导入 ${fresh.length} 首（文件太多，只取了前 5000 个）`
@@ -4265,11 +4480,38 @@ function cleanLocalMissing() {
   toast(`已清理 ${removed} 首失效记录`);
 }
 
-/** 本地歌曲页（currentView === 'local'）。 */
+/**
+ * 本地歌曲页（currentView === 'local'）。
+ * v2.8.0 修订：改成**左右两栏** ——
+ *   左栏是"文件夹列表"（全部歌曲 / 本地下载 / 各导入文件夹 + 悬停出现删除 ×），
+ *   右栏是当前选中分组下的曲目列表（顶部有「批量选择」按钮）。
+ * ★ 为什么不做成"全局侧边栏里挂一棵树"：全局侧边栏是常驻的，挂上去会挤掉「我的歌单」，
+ *   而且离开这一页还留着那些文件夹没有意义。放进内容区，切走就消失，更干净。
+ */
 function renderLocal() {
   currentView = 'local';
   const st = localStats();
-  const list = localTracks();
+  const groups = localGroups();
+  const list = localFilteredTracks();     // 已经按 localFilter 筛过
+
+  // 当前分组叫啥（右栏标题 + 空态文案都要用）
+  const cur = (localFilter && localFilter !== 'all') ? localGroupById(localFilter) : null;
+  const curName = cur ? cur.name : '全部歌曲';
+
+  const sideHTML = `
+    <div class="local-side">
+      <div class="local-side-head">文件夹</div>
+      <ul class="local-folder-list" id="localFolderList">
+        ${localFolderRow('all', 'i-note', '全部歌曲', st.total, null)}
+        ${groups.map((g) => localFolderRow(
+            g.id,
+            g.kind === 'download' ? 'i-download' : g.kind === 'imported' ? 'i-note' : 'i-folder',
+            g.name,
+            g.count,
+            (g.kind === 'folder') ? g.root : null,     // 只有"导入的文件夹"给 x（删这一组记录）
+          )).join('')}
+      </ul>
+    </div>`;
 
   content().innerHTML = `
     <div class="block-head">
@@ -4278,6 +4520,7 @@ function renderLocal() {
         <div class="block-sub">${st.total} 首${st.bytes ? ' · 共 ' + fmtBytes(st.bytes) : ''}${st.missing ? ' · ' + st.missing + ' 首失效' : ''}</div>
       </div>
       <div class="block-actions">
+        <button class="ghost-btn ${localPick ? 'on' : ''}" id="btnLocalPick">${ic('i-check')}<span>${localPick ? '退出批量选择' : '批量选择'}</span></button>
         <button class="ghost-btn" id="btnLocalImportFiles">${ic('i-note')}<span>导入歌曲</span></button>
         <button class="ghost-btn" id="btnLocalImportFolder">${ic('i-folder')}<span>导入文件夹</span></button>
       </div>
@@ -4285,17 +4528,69 @@ function renderLocal() {
 
     ${localWarnHTML()}
 
-    ${list.length
-      ? `<div class="track-list" id="trackList">${trackListHTML(list, { remove: true })}</div>`
-      : `<div class="local-empty">
-           ${ic('i-note')}
-           <div class="local-empty-title">还没有本地歌曲</div>
-           <div class="local-empty-sub">点右上角「导入歌曲」或「导入文件夹」把硬盘上的歌加进来；下载完成的歌也会自动出现在这里。</div>
-           <div class="local-empty-actions">
-             <button class="primary-btn" id="btnLocalEmptyFiles">导入歌曲</button>
-             <button class="ghost-btn" id="btnLocalEmptyFolder">导入文件夹</button>
-           </div>
-         </div>`}`;
+    <div class="local-wrap">
+      ${sideHTML}
+      <div class="local-main">
+        <div class="local-main-head" id="localMainHead">
+          <span class="lm-title">${esc(curName)}</span>
+          <span class="lm-count">${list.length} 首</span>
+        </div>
+        ${localPick && list.length ? localBarHTML() : ''}
+        ${list.length
+          ? `<div class="track-list" id="trackList">${trackListHTML(list, localTrackOpts())}</div>`
+          : localEmptyHTML(st.total)}
+      </div>
+    </div>`;
+}
+
+/**
+ * 左栏的一个文件夹行。
+ * @param {string} id    组 id（'all' | 'download' | 'imported' | 'folder:<root>'）
+ * @param {string} icon  图标名
+ * @param {string} name  显示名
+ * @param {number} count 曲目数
+ * @param {string|null} root 非 null 时显示右侧的删除 ×（只有导入的文件夹才有意义）
+ */
+function localFolderRow(id, icon, name, count, root) {
+  const active = (localFilter || 'all') === id;
+  return `
+    <li class="local-folder-row ${active ? 'active' : ''}" data-lgroup="${esc(id)}"${root ? ` title="${esc(root)}"` : ''}>
+      <span class="ico">${ic(icon)}</span>
+      <span class="nm">${esc(name)}</span>
+      <span class="cnt">${count}</span>
+      ${root ? `<button class="del" data-lrmfolder="${esc(root)}" title="从库里移除这个文件夹的记录（不动磁盘文件）">✕</button>` : ''}
+    </li>`;
+}
+
+/**
+ * 右栏曲目行的渲染选项。
+ * ★ 关键：批量选择模式下走 `pick:true`，而 pickSet 换成 localPick.selected。
+ *   trackRow 里"从选择集反查勾没勾上"那段是按 **bvid** 查的 —— 本地歌没有 bvid，
+ *   所以这里额外给 trackRow 传 `pickKey: 'localPath'`，让它按 localPath 反查（见 trackRow）。
+ */
+function localTrackOpts() {
+  if (localPick) return { pick: true, pickSet: localPick.selected, pickKey: 'localPath' };
+  return { remove: true };
+}
+
+/** 右栏空状态（区分"整个库是空的"和"这个分组是空的"）。 */
+function localEmptyHTML(total) {
+  if (total > 0) {
+    return `<div class="local-empty">
+      ${ic('i-folder')}
+      <div class="local-empty-title">这个文件夹里没有歌</div>
+      <div class="local-empty-sub">换左边的其他文件夹看看，或者点右上角「导入文件夹」再加一个。</div>
+    </div>`;
+  }
+  return `<div class="local-empty">
+    ${ic('i-note')}
+    <div class="local-empty-title">还没有本地歌曲</div>
+    <div class="local-empty-sub">点右上角「导入歌曲」或「导入文件夹」把硬盘上的歌加进来；下载完成的歌也会自动出现在这里。</div>
+    <div class="local-empty-actions">
+      <button class="primary-btn" id="btnLocalEmptyFiles">导入歌曲</button>
+      <button class="ghost-btn" id="btnLocalEmptyFolder">导入文件夹</button>
+    </div>
+  </div>`;
 }
 
 /* ---------- 侧边栏：歌单列表 ---------- */
@@ -4329,6 +4624,8 @@ function renderAll() {
   //   换到别的页面就自动退出 —— 不然跑到「发现」会发现每行都带着勾选框、
   //   点一下还会弹出下载，看着像界面坏了。
   if (dlPick && dlPick.view !== currentView) dlPick = null;
+  // v2.8.0 修订：本地歌曲的批量选择同理 —— 离开这一页就退出。
+  if (localPick && currentView !== 'local') localPick = null;
 
   renderPlaylistSidebar();
   syncNavHighlight();   // 侧栏高亮永远跟着"当前在哪一页"走（不再只在点侧栏时才更新）
@@ -5578,13 +5875,40 @@ function bindEvents() {
     if (id === 'btnImpDo') { importPicked(); return; }
     if (id === 'btnImpWholeUp') { impWholeUp(); return; }
 
+    // ---- 本地歌曲：批量选择 / 左栏文件夹（v2.8.0 修订）----
+    if (id === 'btnLocalPick') { toggleLocalPick(); return; }
+    if (id === 'btnLocalPickAll') { localPickAll(); return; }
+    if (id === 'btnLocalPickNone') { localPickNone(); return; }
+    if (id === 'btnLocalRemove') { localDoRemovePicked(); return; }
+    if (id === 'btnLocalFav') { localDoFavPicked(); return; }
+    if (id === 'btnLocalAddPl') { localDoAddPlPicked(); return; }
+
     // 挑歌模式（v2.6.0）：点整行 = 勾选 / 取消，**不播放**。
     // ★ 必须放在下面"点整行 = 播放"之前 —— 否则在导入页点一下行就把歌播了。
     // v2.8.0：下载的批量勾选复用了同一套行渲染（.track.pickable），靠 dlPick 分辨是谁在用。
+    // v2.8.0 修订：本地歌曲的批量选择也走这套，靠 localPick 分辨。
     const pickRow = e.target.closest('.track.pickable');
     if (pickRow) {
       const i = Number(pickRow.dataset.i);
-      if (dlPick) dlToggle(i); else impToggle(i);
+      if (dlPick) dlToggle(i);
+      else if (localPick) localToggle(i);
+      else impToggle(i);
+      return;
+    }
+
+    // 左栏文件夹行（v2.8.0 修订）。
+    // ★ 两个可点区域：整行 = 切分组；行右边那个 ✕ = 移除这一组的本地库记录。
+    //   必须先判 ✕ —— 否则点它会一路走到"切分组"那条去。
+    const rmFolder = e.target.closest('[data-lrmfolder]');
+    if (rmFolder) { localRemoveFolder(rmFolder.dataset.lrmfolder); return; }
+    const folderRow = e.target.closest('[data-lgroup]');
+    if (folderRow) {
+      const gid = folderRow.dataset.lgroup;
+      if ((localFilter || 'all') !== gid) {
+        localFilter = gid;
+        localPick = null;         // 换分组 → 退出勾选（选择集是按当前分组选的，留着没意义）
+        renderLocal();
+      }
       return;
     }
 
@@ -6587,7 +6911,7 @@ function currentTracks() {
   //   返回空数组而不是落到底下的 searchResults —— 否则在下载页点空白处
   //   有可能误触"播放搜索结果里的第 N 首"。
   if (currentView === 'downloads') return [];
-  if (currentView === 'local') return localTracks();   // v2.8.0 批次 B
+  if (currentView === 'local') return localFilteredTracks();   // v2.8.0 批次 B / 修订：跟着左栏筛选走
   if (currentView === 'up' && upState) return upState.list;
   if (currentView === 'parsed' && parsedView) return parsedView.tracks;
   if (currentView.startsWith('playlist:')) {

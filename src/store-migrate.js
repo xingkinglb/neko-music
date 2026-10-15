@@ -72,6 +72,19 @@ function migrate(data, opts) {
   //   放进来等于每次进度更新都重写 6MB 的 JSON。任务状态和"用户数据"是两种东西。
   d.local     = Array.isArray(d.local)     ? d.local     : [];
 
+  // v2.8.0 修订（左栏文件夹分组）：给每条本地库条目补齐 `folderRoot`（导入文件夹时选的根目录）。
+  // ★ 这是**数据条目内部字段的兜底**，不是删数据 —— 铁律"只许补、不许删"针对的是**结构字段**，
+  //   这里正好相反：老条目的 folderRoot 缺失 → 补成 null（渲染时按"没有分组信息"处理），
+  //   而 src 字段也一并按老数据兜底（老条目都有 src，这里只防手改存档/半途写入）。
+  //   补齐之后「本地歌曲」左栏才能稳定地把曲目分到「本地下载 / 各导入文件夹」下面。
+  // ★ 用 forEach **原地补字段**、不过滤、不丢条目 —— 哪怕某条是坏对象，也留着让界面自己判，
+  //   绝不在这里悄悄吞掉用户的一条记录。
+  d.local.forEach((e) => {
+    if (!e || typeof e !== 'object') return;
+    if (typeof e.folderRoot !== 'string') e.folderRoot = null;   // 没记录分组 = null，渲染时归"其他"
+    if (typeof e.src !== 'string' || !e.src) e.src = 'file';     // 认不出来的来源一律当"导入的单曲"
+  });
+
   const old = (d.settings && typeof d.settings === 'object') ? d.settings : {};
 
   // ★★ 从这里开始是修 bug 的地方：**从存档里已有的出发**，只覆盖我们认识的字段。

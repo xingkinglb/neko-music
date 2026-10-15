@@ -1225,7 +1225,11 @@ function registerHandlers() {
       properties: ['openDirectory'],
     });
     if (res.canceled || !res.filePaths || !res.filePaths.length) return null;
-    return scanAudioFolder(res.filePaths[0]);
+    const root = res.filePaths[0];
+    // ★ v2.8.0 修订：把根目录一起带回去 —— 界面要按"用户选的是哪个文件夹"给歌曲分组，
+    //   不能自己从每首歌的路径去反推（反推在多级子目录下会分错，而且根目录名也可能重复）。
+    //   界面那边只认这一个来源，所以这里是 folderRoot 的**唯一出处**。
+    return Object.assign({ root }, scanAudioFolder(root));
   });
 
   // 批量问"这些文件还在不在、多大" —— 界面拿它标失效、算总占用
