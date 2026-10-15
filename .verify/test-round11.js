@@ -104,6 +104,8 @@ ipcMain.handle('bili:videoInfo', (_e, bvid) => ({
 ipcMain.handle('bili:upVideos', () => ({ ok: true, data: { list: [], hasMore: false } }));
 ipcMain.handle('bg:pick', () => ({ ok: true, data: null }));
 ipcMain.handle('bg:clear', () => ({ ok: true, data: true }));
+/* v2.8.0：下载 / 本地歌曲 IPC 桩（本脚本会把"页面有报错"判 FAIL）。 */
+require('./stub-download-ipc.js')();
 ipcMain.on('win-min', () => {});
 ipcMain.on('win-max', () => {});
 ipcMain.on('win-close', () => {});

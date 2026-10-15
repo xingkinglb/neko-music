@@ -105,8 +105,13 @@ ipcMain.on('win:close-choice', (_e, payload) => {
 
 ipcMain.on('win:close-ready', (_e, okd) => { saveHandshakes.push('ready:' + !!okd); });
 
-/* 取封面故意慢一点，好观察"先没封面 → 后来补上"这两段 */
-let videoInfoDelay = 900;
+/* 取封面故意慢一点，好观察"先没封面 → 后来补上"这两段。
+   ★ v2.8.0：原来延迟设 900ms，而下面 [3] 的快照正好在 sleep(900) 拍 ——
+     两个 900ms 撞在一起成了**竞态**：补封面有时先回、有时后回，[3] 两条断言
+     "collectCovers 应为空 / 应仍挂 no-art"会随机 FAIL。
+     现在把桩延迟定成 1800ms、第二次快照前多等 2600ms（合计 ~3500ms）：
+     第一拍（900ms）稳在"中间态"，第二拍（3500ms）稳在"补完态"，两头都有余量。 */
+let videoInfoDelay = 1800;
 let videoInfoCalls = 0;
 
 ipcMain.handle('store:load', () => ({ ok: true, data: lastSaved }));
@@ -120,6 +125,8 @@ ipcMain.handle('bili:parse', () => ({ ok: true, data: { bvid: BVID } }));
 ipcMain.handle('bili:upVideos', () => ({ ok: true, data: { list: [], hasMore: false } }));
 ipcMain.handle('bg:pick', () => ({ ok: true, data: null }));
 ipcMain.handle('bg:clear', () => ({ ok: true, data: true }));
+/* v2.8.0：下载 / 本地歌曲 IPC 桩（本脚本会把"页面有报错"判 FAIL）。 */
+require('./stub-download-ipc.js')();
 ipcMain.handle('bili:videoInfo', async (_e, bvid) => {
   videoInfoCalls++;
   await sleep(videoInfoDelay);
@@ -320,8 +327,8 @@ app.whenReady().then(async () => {
     if (!st.noArt) bad('封面还没补到，播放条就已经不带 no-art 了 —— 判定可疑');
     else ok('封面还没到时挂的是音符兜底（.no-art），不是一张裂图');
 
-    // 等补封面回来
-    await sleep(1600);
+    // 等补封面回来（桩延迟 1800ms，这里给到 ~2600ms 的余量）
+    await sleep(2600);
     const st2 = await evalJS(`(() => ({
       noArt: document.getElementById('npCover').classList.contains('no-art'),
       bg: document.getElementById('npCover').style.backgroundImage,
@@ -359,6 +366,9 @@ app.whenReady().then(async () => {
      ======================================================== */
   say('\n[5] 播一首合集里的歌（封面是"后到"的，必须补贴一次）：');
   {
+    // ★ [3] 用大延迟（1800ms）稳住"中间态"；从这里开始恢复成快延迟，
+    //   否则 [5] 的 sleep(1500) 等不到封面（本段只关心"最终有没有贴上"，不关心中间态）。
+    videoInfoDelay = 300;
     await evalJS(`(() => {
       const a = document.getElementById('audio');
       a.play = () => Promise.resolve();

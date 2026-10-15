@@ -178,6 +178,160 @@ function safePlay() {
   }
 }
 
+/* ============================================================
+   ★ v2.8.0 修订：播放断流自愈（真机反馈"放着放着一卡一卡，最后一直卡着"）
+   ------------------------------------------------------------
+   根因（探针 probe-stall.js 抓到的三条事实）：
+     ① audio 只监听了 8 个事件，`stalled` / `waiting` / `progress` **一个都没监听**
+        → 流断流时**没有任何自愈动作**，这正好是"一卡一卡 → 一直卡着"的来源。
+     ② B 站音频地址带 `deadline=<unix秒>` 签名（有有效期），**地址拿到后就一直用到歌结束**，
+        从不刷新。长时间播放 / 暂停很久再继续 → 地址中途过期 → 后续 Range 请求被拒
+        → 缓冲耗尽 → stalled。拖进度条、重新点播用的**都是同一个已过期地址**
+        → "同一位置卡死"。
+     ③ 探针确认 `deadline` 能从地址里解析出来 —— 所以**预防 + 自愈两条都能做**。
+        两者一起上：预防为主（到期前主动换地址），自愈兜底（真断了就重解析 + seek 回去）。
+   ============================================================ */
+
+/** 从 `bili://get?url=<编码过的真实地址>` 里把真实地址掏出来。掏不出来返回 ''。 */
+function realUrlOf(src) {
+  try {
+    const u = new URL(String(src || ''));
+    // bili:// 只是个壳，真实地址在 url 参数里（见 main.js 的 registerBiliProtocol）
+    if (u.protocol === 'bili:') return u.searchParams.get('url') || '';
+    return '';
+  } catch (_) { return ''; }
+}
+
+/**
+ * 从 audio.src 里解出这个地址的到期时刻（毫秒时间戳）。解不出来返回 0。
+ * ★ 只认 `deadline` 那个参数 —— 它是 B 站签名的一部分，值就是 unix 秒。
+ */
+function srcDeadlineAt(src) {
+  const real = realUrlOf(src);
+  if (!real) return 0;
+  try {
+    const v = new URL(real).searchParams.get('deadline');
+    const sec = Number(v);
+    // 合理区间：2020-01 ~ 2100 年之间才认（防止把别的字段误当 deadline）
+    if (!Number.isFinite(sec) || sec < 1.6e9 || sec > 4.1e9) return 0;
+    return sec * 1000;
+  } catch (_) { return 0; }
+}
+
+/* 自愈状态。★ 必须节流 —— 每次 waiting 都刷新地址会让弱网下疯狂重试、反而更卡。 */
+let lastHealAt = 0;          // 上次自愈的时间戳（冷却用）
+let healBusy = false;        // 一次只跑一个自愈
+let deadlineTimer = null;    // 预防式刷新的定时器
+const HEAL_COOLDOWN = 8000;  // 两次自愈之间至少隔 8 秒
+const DEADLINE_MARGIN = 60000;  // 到期前 60 秒就主动刷新（留足重新解析 + 切换的时间）
+
+/** 清掉预防式刷新的定时器（换歌 / 暂停 / 播完时调）。 */
+function clearDeadlineTimer() {
+  if (deadlineTimer) { clearTimeout(deadlineTimer); deadlineTimer = null; }
+}
+
+/**
+ * 重新解析当前这首歌的音频地址，把播放位置接回去继续播。
+ *
+ * @param {number} seq    本次播放的序号（自愈回来时若已换歌，直接放弃）
+ * @param {'stalled'|'deadline'|'manual'} 因为什么触发
+ * @param {number} [atSec] 想跳回的位置（不传就用当前 audio.currentTime）
+ * @returns {Promise<boolean>} 是否成功接上
+ *
+ * ★ 关键步骤的顺序不能乱：
+ *   先记住 currentTime（换 src 会把它清零）→ 再换 src → 等能播了（loadedmetadata/canplay）
+ *   → seek 回原位置 → play()。少任何一步都会"从头开始播"或"跳回去又卡"。
+ */
+async function refreshAudioUrl(seq, reason, atSec) {
+  if (healBusy) return false;
+  const track = queue.tracks[queue.index];
+  if (!track || !track.bvid || !track.cid) return false;
+  if (seq !== playSeq) return false;                 // 已经换歌了，别抢
+
+  healBusy = true;
+  const resumeAt = Number.isFinite(atSec) ? atSec
+                 : (Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
+  const wasPlaying = !audio.paused;
+  try {
+    const info = await api('audioUrl', track.bvid, track.cid);
+    if (seq !== playSeq) return false;               // 期间换歌了 → 放弃
+    if (!info || !info.url) return false;
+
+    // 换地址：先把"接回来的位置"挂上，等元数据到了再 seek
+    audio.src = info.url;
+    lastSetSrc = info.url;
+    armDeadlineTimer(info.url, seq);
+
+    await new Promise((resolve) => {
+      let done = false;
+      const fin = () => { if (!done) { done = true; cleanup(); resolve(); } };
+      const cleanup = () => {
+        audio.removeEventListener('loadedmetadata', fin);
+        audio.removeEventListener('canplay', fin);
+        clearTimeout(t);
+      };
+      // 最多等 6 秒 —— 等不到也别把自愈卡死在这儿
+      const t = setTimeout(fin, 6000);
+      audio.addEventListener('loadedmetadata', fin, { once: true });
+      audio.addEventListener('canplay', fin, { once: true });
+    });
+    if (seq !== playSeq) return false;
+
+    try { if (resumeAt > 0.5) audio.currentTime = resumeAt; } catch (_) { /* 跳不了就算了，从头放也比卡死强 */ }
+    if (wasPlaying || reason !== 'manual') safePlay();
+    updatePlayBtn();
+    return true;
+  } catch (err) {
+    console.error('[播放自愈] 重新取地址失败', err);
+    // 自愈失败就换下一首，别让用户对着一个卡死的播放器干等
+    if (seq === playSeq && queue.tracks.length > 1) {
+      toast('这一首播放中断了，换下一首');
+      setTimeout(() => { if (seq === playSeq) next(1); }, 600);
+    }
+    return false;
+  } finally {
+    healBusy = false;
+  }
+}
+
+/**
+ * 给当前地址挂一个"到期前主动刷新"的定时器（预防）。
+ * ★ 到期前 60 秒就换 —— 我们这边重新解析要一次网络往返，切 src 后还要等缓冲，
+ *   留 60 秒比较稳；太晚（比如剩 5 秒）等于没预防。
+ *   解析不出 deadline（0）就不挂定时器，交给 stalled 自愈兜底。
+ */
+function armDeadlineTimer(src, seq) {
+  clearDeadlineTimer();
+  const at = srcDeadlineAt(src);
+  if (!at) return;
+  const delay = at - Date.now() - DEADLINE_MARGIN;
+  if (delay <= 0) return;                     // 已经快到期了 —— 等 stalled 自愈去处理
+  // 上限 30 分钟：再长的 setTimeout 在系统休眠后不可靠，那时靠 stalled 兜底就行
+  if (delay > 30 * 60 * 1000) return;
+  deadlineTimer = setTimeout(() => {
+    deadlineTimer = null;
+    if (seq !== playSeq) return;
+    if (audio.paused) return;                 // 暂停着就别折腾，恢复播放时再想办法
+    refreshAudioUrl(seq, 'deadline');
+  }, delay);
+}
+
+/**
+ * stalled / waiting 的统一处理：节流后自愈。
+ * ★ 为什么要节流：弱网下 waiting 会连发几十次，每次都重解析地址 = 疯狂请求接口
+ *   + 反复换 src，结果比原来更卡。冷却期内只允许自愈一次。
+ */
+function healOnStall() {
+  if (healBusy) return;
+  if (!audio.src) return;                     // 还没设过地址（比如刚换歌）→ 不是断流
+  if (audio.paused) return;                   // 用户自己按了暂停 → 别自作主张
+  const now = Date.now();
+  if (now - lastHealAt < HEAL_COOLDOWN) return;
+  lastHealAt = now;
+  refreshAudioUrl(playSeq, 'stalled');
+}
+
+
 // 界面当前所处的页面，比如 'discovery' / 'search' / 'favorites' / 'history' / 'playlist:xxx'
 // ★ 启动默认落在「发现」（一打开就有推荐，不用先看空搜索页）。
 let currentView = 'discovery';
@@ -744,9 +898,18 @@ function setPlayMode(id, save) {
   reportUiState();   // ★ v2.2.0：托盘菜单里「播放模式 ▸」那个打勾要跟着变
 }
 
-/** 判断两首歌是不是同一首（用 bvid + cid 当身份证） */
+/**
+ * 判断两首歌是不是同一首。
+ * B 站的歌用 `bvid + cid` 当身份证；本地歌（导入的、下载落地的）**没有 bvid/cid**，
+ * 所以拿**文件绝对路径**当身份证。这条分支只动这一个函数，
+ * 收藏 / 历史 / 队列 / "正在播放"高亮全靠它，扩在这里等于让本地歌白蹭整套现有逻辑。
+ */
 function sameTrack(a, b) {
-  return !!a && !!b && a.bvid === b.bvid && String(a.cid) === String(b.cid);
+  if (!a || !b) return false;
+  // ★ v2.8.0：本地歌用路径判等。两边都有 localPath 才算同一首；
+  //   一边有、一边没有 → 一定不是同一首（B 站歌和本地歌永远不撞）。
+  if (a.localPath || b.localPath) return !!a.localPath && a.localPath === b.localPath;
+  return a.bvid === b.bvid && String(a.cid) === String(b.cid);
 }
 
 function isFav(track) {
@@ -835,6 +998,10 @@ async function playAt(index) {
   const seq = ++playSeq;
   queue.index = index;
   const track = queue.tracks[index];
+  // ★ v2.8.0 修订：换歌先把上一首的"到期刷新"定时器和自愈冷却清掉 ——
+  //   否则上一首挂的定时器会在新歌上触发一次多余的地址刷新。
+  clearDeadlineTimer();
+  lastHealAt = 0;
 
   // 更新底部播放条的外观（先显示信息，再慢慢加载音频）
   $('npTitle').textContent = track.title;
@@ -855,6 +1022,56 @@ async function playAt(index) {
   // 「打开视频」按钮：没有 bvid 就没有页面可开，置灰
   const openBtn = $('btnOpenBili');
   if (openBtn) openBtn.classList.toggle('disabled', !track.bvid);
+
+  // ★★ v2.8.0 批次 B：本地歌（导入的 / 下载落地的）走这条**独立分支**。
+  //   它们没有 bvid/cid，不能去问 B 站要地址，直接播 local:// 协议。
+  //   `local://get?p=<绝对路径>` —— 主进程只放行"本地歌曲库里有的那几条路径"，
+  //   所以这里必须 encodeURIComponent，路径里的反斜杠/空格/中文才不会把 URL 弄坏。
+  if (track.localPath) {
+    let myLocalSrc = '';
+    try {
+      myLocalSrc = 'local://get?p=' + encodeURIComponent(track.localPath);
+      audio.src = myLocalSrc;
+      lastSetSrc = myLocalSrc;
+      audio.volume = (DB.settings.volume ?? 80) / 100;
+
+      // 本地歌的时长常常是未知的（导入时拿不到）→ 加载出元数据后回填，
+      // 写回 DB.local 那条，下次进来就有时长了。
+      const onMeta = () => {
+        audio.removeEventListener('loadedmetadata', onMeta);
+        if (seq !== playSeq) return;
+        if (audio.duration && isFinite(audio.duration) && audio.duration > 0) {
+          if (!track.duration) track.duration = audio.duration;
+          backfillLocalDuration(track.localPath, audio.duration);
+          $('timeTotal').textContent = fmtTime(audio.duration);
+        }
+      };
+      audio.addEventListener('loadedmetadata', onMeta);
+
+      try {
+        await audio.play();
+      } catch (playErr) {
+        if (isPlayInterrupted(playErr) || (myLocalSrc && lastSetSrc !== myLocalSrc)) return;
+        throw playErr;
+      }
+      if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
+
+      DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
+      DB.lastTrack = track;
+      persistLater();
+      renderAll();
+    } catch (err) {
+      if (seq !== playSeq || isPlayInterrupted(err) || (myLocalSrc && lastSetSrc !== myLocalSrc)) return;
+      console.error('[播放失败]', (track && track.title) || '', err);
+      // 本地文件找不到了（被挪走/删掉）→ 提示更具体，并顺手标记失效
+      toast('本地文件打不开了：' + cleanPlayError(err));
+      markLocalMissing(track.localPath);
+      if (queue.tracks.length > 1) {
+        setTimeout(() => { if (seq === playSeq) next(1); }, 900);
+      }
+    }
+    return;
+  }
 
   let mySrc = '';   // 本次给播放器设的地址（给 catch 里那道"过期"闸门用）
   try {
@@ -886,6 +1103,8 @@ async function playAt(index) {
     lastSetSrc = info.url;
     mySrc = info.url;
     audio.volume = (DB.settings.volume ?? 80) / 100;
+    // ★ v2.8.0 修订：挂一个"到期前主动刷新"的定时器（预防式，见 armDeadlineTimer）
+    armDeadlineTimer(info.url, seq);
 
     try {
       await audio.play();
@@ -1021,7 +1240,7 @@ function trackRow(track, i, opts = {}) {
     : '';
 
   return `
-    <div class="track ${playing ? 'playing' : ''} ${opts.pick ? 'pickable' : ''} ${picked ? 'picked' : ''}" data-i="${i}">
+    <div class="track ${playing ? 'playing' : ''} ${opts.pick ? 'pickable' : ''} ${picked ? 'picked' : ''} ${track.missing ? 'missing' : ''}" data-i="${i}">
       ${opts.pick ? `<span class="pick${picked ? ' on' : ''}" role="checkbox" aria-checked="${picked ? 'true' : 'false'}" data-pick="${i}">${ic('i-check')}</span>` : ''}
       <div class="idx">${playing ? BARS_ICON : i + 1}</div>
       <div class="cover" style="background-image:url('${esc(track.cover || '')}')"></div>
@@ -1029,6 +1248,7 @@ function trackRow(track, i, opts = {}) {
         <div class="t">${esc(track.title)}</div>
         <div class="a">${authorHTML}</div>
       </div>
+      ${track.missing ? `<span class="miss-chip">文件不见了</span>` : ''}
       ${showBadge ? `<button class="badge" data-act="expand" data-i="${i}" title="展开选集 / 合集">${badgeLabel}</button>` : ''}
       <div class="dur">${fmtTime(track.duration)}</div>
       <div class="ops">
@@ -1084,6 +1304,9 @@ function trackListHTML(tracks, opts = {}) {
 const COLLECT_HINT_RE = /合集|合辑|歌单|串烧|连播|选集|\d+\s*首/;
 function maybeCollection(track) {
   if (!track) return false;
+  // ★ v2.8.0 批次 B：本地歌没有 bvid/cid，永远不是"合集"，也不该去查选集 ——
+  //   否则标题里带「合集」「串烧」的本地文件会触发一次注定失败的网络请求。
+  if (track.localPath || !track.bvid) return false;
   if (track.parts > 1) return true;          // 已经查过，确实是分P
   if (track.seasonCount > 1) return true;    // 已经查过，确实是合集
   if (isCollectPart(track)) return false;    // 它自己就是某合集里的一集，不用再给一个入口
@@ -3150,6 +3373,179 @@ function rebuildDlKeys() {
   dlKeys = s;
 }
 
+/* ★★ v2.8.0 修订：失联文件体检（真机反馈 —— 在资源管理器里直接删文件后，绿勾还在，
+   再点还显示「已下载」不肯重下）。
+
+   根因：rebuildDlKeys() 是**纯字符串**运算，从头到尾没查过磁盘 —— 它只认
+   DB.local 与已完成任务表里那两条记录。文件被外部删掉后记录还在，于是绿勾一直挂着；
+   而点「已下载」走的是 download:reveal（开文件夹），不是重新入队 → 点多少次都不重下。
+
+   所以补一道体检：拿现成的 local:stat（main.js:1232）问一遍"这些路径还在不在"，
+   把 exists:false 的条目从 DB.local 里剔掉，再重算绿勾。
+
+   ★ 三个节制点：
+     ① **60 秒节流** —— 切换视图会频繁调它，每次都发 IPC 问一遍磁盘没必要。
+     ② **只在有东西可查时才发** —— 空库直接返回，不发空请求。
+     ③ **只在真的删掉了条目时才落盘** —— 免得白白写那个 6MB 的存档。
+
+   ★ 为什么"删 DB.local 里的数据条目"是允许的：store-migrate.js 那条「只许补、不许删」
+     管的是**结构字段定义**（dir / concurrent 这些字段不能悄悄删掉，否则老存档读不出来）。
+     数据条目本来就该随用户的删除而消失 —— 下载管理里的「删除」早就在干这件事了。
+     凡是被剔掉的 key，顺手把已完成任务也从任务表里清掉，两边保持一致。 */
+let localSweepAt = 0;          // 上次体检的时间戳（节流用）
+let localSweepBusy = false;
+
+async function sweepMissingLocal(force) {
+  const now = Date.now();
+  // ① 60 秒内且不是强制 → 直接跳过。切视图那几次够用了，别每次都摸盘
+  if (!force && now - localSweepAt < 60000) return 0;
+  if (localSweepBusy) return 0;          // 上一次还没回来，别叠着发
+  const list = Array.isArray(DB.local) ? DB.local.filter((e) => e && e.path) : [];
+  if (!list.length) { localSweepAt = now; return 0; }   // ② 空库不查
+
+  localSweepBusy = true;
+  let gone = [];
+  try {
+    const res = await api('localStat', list.map((e) => e.path));
+    const arr = Array.isArray(res) ? res : [];
+    // 建立"路径 → 还在不在"的表。★ 主进程逐条返回，顺序与传入一致，
+    //   但这里按 path 建表而不是按下标 —— 万一以后主进程改了顺序也不会错删。
+    const alive = new Map();
+    for (const r of arr) if (r && r.path) alive.set(String(r.path), r.exists === true);
+    for (const e of list) {
+      // ★ 查不到的那条**当它还活着** —— 宁可多留一个绿勾，也不能因为一次查询遗漏
+      //   就把用户的下载记录误删（那才是真正找不回来的损失）。
+      const exists = alive.has(String(e.path)) ? alive.get(String(e.path)) : true;
+      if (!exists) gone.push(e);
+    }
+  } catch (err) {
+    // 问不到就当没体检过：不清、不提示。下次进视图再试
+    console.error('检查本地文件是否还在失败', err);
+    localSweepBusy = false;
+    return 0;
+  }
+  localSweepAt = now;
+  localSweepBusy = false;
+  if (!gone.length) return 0;
+
+  const gonePaths = new Set(gone.map((e) => String(e.path)));
+  const goneKeys = new Set(gone.filter((e) => e.key).map((e) => String(e.key)));
+  DB.local = (DB.local || []).filter((e) => !e || !gonePaths.has(String(e.path)));
+
+  // 已完成任务表里那些对应的也清掉 —— 否则绿的来源从任务表那边又冒出来
+  if (goneKeys.size) {
+    let removed = false;
+    for (const t of dlTasks) {
+      if (t && t.status === 'done' && t.key && goneKeys.has(String(t.key))) {
+        t.status = 'gone'; removed = true;      // 界面不显示这种状态，等同于删除
+      }
+    }
+    if (removed) dlTasks = dlTasks.filter((t) => t.status !== 'gone');
+  }
+  rebuildDlKeys();
+  persistLater();                 // ③ 只有真删了东西才落盘
+  return gone.length;
+}
+
+/**
+ * 给单条本地记录做一次即时体检。
+ * ★ 与 sweepMissingLocal 的区别：这个是"点它那一刻"用的，**不节流、不看缓存** ——
+ *   要的就是"现在这一刻磁盘上到底有没有"。返回 true = 文件还在。
+ *
+ * ★ 关键：问不到（IPC 挂了 / 超时）时返回 **true**（当它还活着）。
+ *   理由同上 —— 宁可让用户点一下开文件夹失败，也不能因为一次查询异常
+ *   就把他明明还在的下载记录清掉。
+ */
+async function localFileAlive(entry) {
+  if (!entry || !entry.path) return false;
+  try {
+    const res = await api('localStat', [entry.path]);
+    const r = Array.isArray(res) ? res[0] : null;
+    if (!r) return true;
+    return r.exists === true;
+  } catch (err) {
+    console.error('检查单个本地文件失败', err);
+    return true;
+  }
+}
+
+/**
+ * 找出某一首歌在本地库里的那条记录（没有就 null）。
+ * ★ 匹配方式：优先用 key（bvid:cid，最可靠）；key 没有时退回比路径。
+ *   注意下载条目**一定有 key**（downloader 落盘时写进去的），
+ *   手动导入的条目才可能没有 key —— 那种本来也不参与"已下载"判定。
+ */
+function findLocalEntryOf(track) {
+  if (!track || !track.bvid || !track.cid) return null;
+  const key = track.bvid + ':' + String(track.cid);
+  return (DB.local || []).find((e) => e && e.key && String(e.key) === key) || null;
+}
+
+/**
+ * 绿勾被点那一刻的兜底（真机反馈的核心一条）。
+ *
+ * 原逻辑：已下载 → 直接 download:reveal 去开文件夹。外部删了文件后，
+ * reveal 抛「文件不在了」，界面只弹一句报错，**然后什么都不做** ——
+ * 用户得自己去下载管理里删掉那条记录才能重下。
+ *
+ * 新逻辑：先 stat 一次，
+ *   · 文件还在  → 照旧开文件夹（原行为不变）
+ *   · 文件没了  → 静默把失效记录剔掉（本地库 + 已完成任务），
+ *                 重算绿勾 → 行内按钮**立刻变回下载箭头**，
+ *                 并把这首歌**直接加进下载队列**（Neo 要的"能重新下"）
+ */
+async function revealOrRedownload(track, task) {
+  const entry = findLocalEntryOf(track);
+  const path = (entry && entry.path) || (task && task.file && dlDir ? joinPath(dlDir, task.file) : '');
+  const alive = path ? await localFileAlive({ path }) : true;
+
+  if (alive) {
+    try {
+      await api('downloadReveal', entry ? entry.path : (task && task.file));
+    } catch (err) {
+      toast(err.message || '找不到这个文件');
+    }
+    return;
+  }
+
+  // ---- 文件真的没了 ----
+  // ① 清本地库那条（绿勾的第一来源）
+  if (entry) {
+    DB.local = (DB.local || []).filter((e) => e !== entry);
+    persistLater();
+  }
+
+  // ② 清"已完成任务"那条（绿勾的第二来源）。
+  //   ★ 不能只看界面这份 dlTasks 镜像 —— 它可能是空的（清过 downloads.json，
+  //     或者这次会话还没拉到任务表）。所以**直接问主进程要一份全量**再挑出同 key 的。
+  const key = track.bvid + ':' + String(track.cid);
+  let candidates = dlTasks.filter((t) => t && t.status === 'done' && String(t.key) === key);
+  if (!candidates.length) {
+    try {
+      const r = await api('downloadList');
+      const all = Array.isArray(r && r.tasks) ? r.tasks : [];
+      candidates = all.filter((t) => t && t.status === 'done' && String(t.key) === key);
+    } catch (_) { /* 问不到就算了，下面照样重下 */ }
+  }
+  for (const t of candidates) {
+    // 文件已经不在，这条"已完成"记录没有任何意义了。删掉它（deleteFile 传 false ——
+    // 文件本来就没了，别让主进程去删一个不存在的路径）。
+    // ★ 这一步很关键：主进程的 localKeys（它判"已下过"用的）是界面存档驱动的，
+    //   界面清了存档之后它下次 save 会跟着对齐；但它的 downloads.json 里那条
+    //   带 skipExisting 的"已完成"记录必须主动删掉，否则重下会被它拦下来说"本地已有"。
+    try { await api('downloadRemove', [t.id], false); } catch (_) { /* 失败也不影响重下 */ }
+  }
+  if (candidates.length) {
+    const ids = new Set(candidates.map((t) => t.id));
+    dlTasks = dlTasks.filter((t) => !ids.has(t.id));
+  }
+
+  rebuildDlKeys();
+  renderAll();                       // 行内绿勾 → 立刻变回下载箭头
+  toast('本地文件已不在了，已清掉这条记录，重新下载中…');
+  enqueueDownloads([track]);         // ★ 直接重下，用户不用自己去下载管理删
+}
+
 /** 这首歌是不是已经在本地库里了（行内按钮 / 播放条按钮据此变成绿勾）。 */
 function isDownloaded(track) {
   if (!track || !track.bvid || !track.cid) return false;
@@ -3317,10 +3713,12 @@ function syncDownloadBtn() {
     return;
   }
   const task = taskForTrack(t);
+  // ★ v2.8.0 修订：「已下载」的按钮现在点下去会先确认文件还在 —— 所以提示语
+  //   不能只写"打开所在文件夹"（万一文件被外部删了，那一下会变成重新下载）。
   if (task && task.status === 'done') {
     btn.className = 'ico-btn done';
     btn.innerHTML = ic('i-check');
-    btn.title = '已下载 · 点一下打开所在文件夹';
+    btn.title = '已下载 · 点一下打开所在文件夹（文件不在了会重新下载）';
   } else if (task && (task.status === 'downloading' || task.status === 'queued')) {
     const pct = task.total ? Math.min(100, Math.round((task.received / task.total) * 100)) : 0;
     btn.className = 'ico-btn';
@@ -3435,7 +3833,11 @@ function dlRowHTML(t) {
   } else if (t.status === 'done') {
     status = '已完成';
     sub = `${t.author ? t.author + ' · ' : ''}${fmtBytes(t.received)}`;
-    ops = dlOpBtn('reveal', '打开所在位置', 'i-reveal', t.id) + dlOpBtn('remove', '删除这条记录', 'i-trash', t.id);
+    // ★ v2.8.0 批次 B：下完的歌现在能直接从下载管理播了（批次 A 故意压着没放 ——
+    //   那时 local:// 的渲染分支还没接，放一个点了没反应的「播放」比不放更糟）。
+    ops = dlOpBtn('play', '播放', 'i-play', t.id)
+        + dlOpBtn('reveal', '打开所在位置', 'i-reveal', t.id)
+        + dlOpBtn('remove', '删除这条记录', 'i-trash', t.id);
   } else {
     status = '失败';
     sub = `${t.author ? t.author + ' · ' : ''}${t.error || '下载失败'}`;
@@ -3622,6 +4024,24 @@ async function dlRetryAll() {
   toast(`正在重试 ${ids.length} 个任务`);
 }
 
+/**
+ * 从下载管理页直接播一首"已完成"的歌（v2.8.0 批次 B）。
+ * ★ 它其实是"找到这条任务对应的本地库条目 → 用 localTrack 适配 → 单首播"。
+ *   任务里存的是**相对文件名**（t.file），本地库里存的是**绝对路径**，
+ *   所以要先拼出绝对路径再去找 DB.local 里那条。
+ */
+function dlPlayTask(t) {
+  if (!t || !t.file || !dlDir) { toast('这个文件的位置还不知道呢'); return; }
+  const full = joinPath(dlDir, t.file);
+  const entry = (DB.local || []).find((e) => e && e.path === full);
+  if (!entry) {
+    // 任务还在、本地库那条没了（用户手动删过 / 存档没对上）→ 兜底造一条临时曲目
+    playTracks([{ localPath: full, title: t.title, author: t.author, cover: t.cover, duration: t.duration || 0, bvid: null, cid: null }], 0, '下载管理');
+    return;
+  }
+  playTracks([localTrack(entry)], 0, '下载管理');
+}
+
 async function handleDlAction(act, id) {
   const t = dlTasks.find((x) => x.id === id);
   if (!t) return;
@@ -3630,6 +4050,7 @@ async function handleDlAction(act, id) {
     else if (act === 'resume') await api('downloadResume', id);
     else if (act === 'retry')  await api('downloadRetry', id);
     else if (act === 'cancel') await api('downloadCancel', id);
+    else if (act === 'play')   { dlPlayTask(t); return; }
     else if (act === 'reveal') { await api('downloadReveal', t.file); return; }
     else if (act === 'remove') { await dlRemoveOne(t); return; }
     else return;
@@ -3654,6 +4075,227 @@ function addLocalEntry(entry) {
   if (DB.local.length > 20000) DB.local.length = 20000;   // 兜底，别让存档无限长
   rebuildDlKeys();
   persistLater();
+}
+
+/* ============================================================
+   本地歌曲（v2.8.0 批次 B）
+   ------------------------------------------------------------
+   两条来源合成一个曲库：
+     · 下载落地的（src:'download'，带 bvid/cid/key）
+     · 从硬盘导入的（src:'file' / 'folder'，没有 bvid/cid）
+   渲染时把 DB.local 的条目**适配成 track 形状**（localTrack），
+   于是 trackRow / trackListHTML / 收藏 / 历史 / 队列全都原样复用。
+   ============================================================ */
+
+/** 本地库条目 → 曲目形状（多一个 localPath 当身份证）。 */
+function localTrack(entry) {
+  if (!entry) return null;
+  return {
+    localPath: entry.path,
+    localId: entry.id,
+    title: entry.title || fileNameOf(entry.path),
+    author: entry.author || '',
+    cover: entry.cover || '',
+    duration: entry.duration || 0,
+    missing: !!entry.missing,
+    bvid: null,
+    cid: null,
+  };
+}
+
+/** 从路径里抠文件名（不带扩展名）当兜底标题。 */
+function fileNameOf(p) {
+  const s = String(p || '');
+  const base = s.split(/[\\/]/).pop() || s;
+  return base.replace(/\.[^.]+$/, '') || base;
+}
+
+/** 当前本地库里所有曲目（列表渲染用）。 */
+function localTracks() {
+  return (DB.local || []).filter((e) => e && e.path).map(localTrack);
+}
+
+/**
+ * 回填本地歌时长（播放时从 audio.duration 拿到）。
+ * ★ 只在"真的变了"时才写盘，避免每播一首白写一次存档。
+ */
+function backfillLocalDuration(p, dur) {
+  if (!p || !dur || !isFinite(dur) || dur <= 0) return;
+  const e = (DB.local || []).find((x) => x && x.path === p);
+  if (!e) return;
+  const rounded = Math.round(dur);
+  if (Math.round(e.duration || 0) === rounded) return;
+  e.duration = rounded;
+  persistLater();
+}
+
+/** 播放时发现文件不在了 → 标记失效（列表置灰 + 顶部黄条），不删记录。 */
+function markLocalMissing(p) {
+  const e = (DB.local || []).find((x) => x && x.path === p);
+  if (!e || e.missing) return;
+  e.missing = true;
+  persistLater();
+  renderAll();
+}
+
+/**
+ * 批量标记失联（进「本地歌曲」页时体检一次）。
+ * ★ 与 sweepMissingLocal 的区别：那个是"下载记录 + 绿勾"的体检（会**删**记录、允许重下）；
+ *   这个是本地库的"导入文件被挪走"检测（**只标记不删** —— 用户可能只是换了盘符，
+ *   删了记录他得重新导入一遍，标一下让他自己决定）。
+ */
+async function checkLocalMissing() {
+  const list = (DB.local || []).filter((e) => e && e.path);
+  if (!list.length) return;
+  let res;
+  try { res = await api('localStat', list.map((e) => e.path)); }
+  catch (_) { return; }   // 查不到就当都还在，别误标
+  if (!Array.isArray(res)) return;
+  const byPath = new Map(res.map((r) => [String(r.path), r]));
+  let changed = false;
+  for (const e of list) {
+    const r = byPath.get(String(e.path));
+    // 查不到这条 → 当它还在（宁可不标，别误标）
+    const miss = r ? r.exists !== true : false;
+    if (!!e.missing !== miss) { e.missing = miss; changed = true; }
+    if (r && r.exists && r.size && e.size !== r.size) e.size = r.size;
+  }
+  if (changed) persistLater();
+}
+
+/** 统计本地库：N 首、总占用、几首失效。 */
+function localStats() {
+  const list = (DB.local || []).filter((e) => e && e.path);
+  let bytes = 0;
+  let missing = 0;
+  for (const e of list) {
+    if (e.missing) { missing++; continue; }
+    bytes += Number(e.size) || 0;
+  }
+  return { total: list.length, bytes, missing };
+}
+
+/**
+ * 导入本地歌（两个入口共用）：
+ *   · kind='files'  → 系统多选文件框
+ *   · kind='folder' → 系统选文件夹框（主进程递归扫，限深限量）
+ * ★ 只记录路径，**绝不移动/复制文件**（Neo 拍板：非破坏性）。
+ *   去重按路径：已在库里的跳过。
+ */
+async function importLocal(kind) {
+  const fn = kind === 'folder' ? 'localPickFolder' : 'localPickFiles';
+  let res;
+  try { res = await api(fn); }
+  catch (err) { toast('选择失败：' + (err.message || '')); return; }
+
+  if (!res || !res.paths || !res.paths.length) return;   // 用户取消 / 空文件夹
+
+  DB.local = Array.isArray(DB.local) ? DB.local : [];
+  const have = new Set(DB.local.filter((e) => e && e.path).map((e) => String(e.path)));
+  const fresh = [];
+  for (const p of res.paths) {
+    if (have.has(String(p))) continue;   // 已在库里
+    have.add(String(p));
+    fresh.push({
+      id: uid(),
+      path: p,
+      title: fileNameOf(p),      // 导入时不知道真标题，先用文件名；播放条/B 站那套不适用，这里就是最终标题
+      author: '',
+      cover: '',
+      duration: 0,
+      size: 0,
+      src: kind === 'folder' ? 'folder' : 'file',
+      key: '',
+      bvid: null,
+      cid: null,
+      addedAt: Date.now(),
+    });
+  }
+
+  if (!fresh.length) { toast('这些歌已经在本地库里了'); return; }
+
+  DB.local = fresh.concat(DB.local);
+  persistLater();
+  currentView = 'local';
+  renderAll();
+  toast(res.truncated
+    ? `已导入 ${fresh.length} 首（文件太多，只取了前 5000 个）`
+    : `已导入 ${fresh.length} 首`);
+}
+
+/**
+ * 从本地库里移除一条记录。
+ * ★ 只从库里移除，**绝不删磁盘文件** —— 导入遵循 Neo 拍板的"非破坏性"原则：
+ *   文件是用户自己的，我们只是"记录了一条路径"，没资格替他删。
+ *   真要删文件，用户去资源管理器删（删完列表会自动标失效，再点「清理失效项」即可）。
+ */
+function removeLocalEntry(entry) {
+  if (!entry) return;
+  const before = DB.local.length;
+  DB.local = DB.local.filter((e) => e !== entry && (!e || e.path !== entry.path));
+  if (DB.local.length === before) return;
+  rebuildDlKeys();
+  persistLater();
+  renderAll();
+  toast('已从本地库移除（磁盘上的文件没动）');
+}
+
+/** 本地库顶部那个"失效清单 + 清理"黄条。 */
+function localWarnHTML() {
+  const st = localStats();
+  if (!st.missing) return '';
+  return `
+    <div class="local-warn">
+      ${ic('i-info')}
+      <span>有 <b>${st.missing}</b> 首文件找不到了（可能被移动或删除）。</span>
+      <span class="spacer"></span>
+      <button class="ghost-btn" id="btnLocalClean">清理失效项</button>
+    </div>`;
+}
+
+/** 「清理失效项」：把所有 missing 的条目从库里移除（不动磁盘 —— 反正也找不到）。 */
+function cleanLocalMissing() {
+  const before = (DB.local || []).length;
+  DB.local = (DB.local || []).filter((e) => e && !e.missing);
+  const removed = before - DB.local.length;
+  if (!removed) return;
+  rebuildDlKeys();
+  persistLater();
+  renderAll();
+  toast(`已清理 ${removed} 首失效记录`);
+}
+
+/** 本地歌曲页（currentView === 'local'）。 */
+function renderLocal() {
+  currentView = 'local';
+  const st = localStats();
+  const list = localTracks();
+
+  content().innerHTML = `
+    <div class="block-head">
+      <div>
+        <div class="block-title">本地歌曲</div>
+        <div class="block-sub">${st.total} 首${st.bytes ? ' · 共 ' + fmtBytes(st.bytes) : ''}${st.missing ? ' · ' + st.missing + ' 首失效' : ''}</div>
+      </div>
+      <div class="block-actions">
+        <button class="ghost-btn" id="btnLocalImportFiles">${ic('i-note')}<span>导入歌曲</span></button>
+        <button class="ghost-btn" id="btnLocalImportFolder">${ic('i-folder')}<span>导入文件夹</span></button>
+      </div>
+    </div>
+
+    ${localWarnHTML()}
+
+    ${list.length
+      ? `<div class="track-list" id="trackList">${trackListHTML(list, { remove: true })}</div>`
+      : `<div class="local-empty">
+           ${ic('i-note')}
+           <div class="local-empty-title">还没有本地歌曲</div>
+           <div class="local-empty-sub">点右上角「导入歌曲」或「导入文件夹」把硬盘上的歌加进来；下载完成的歌也会自动出现在这里。</div>
+           <div class="local-empty-actions">
+             <button class="primary-btn" id="btnLocalEmptyFiles">导入歌曲</button>
+             <button class="ghost-btn" id="btnLocalEmptyFolder">导入文件夹</button>
+           </div>
+         </div>`}`;
 }
 
 /* ---------- 侧边栏：歌单列表 ---------- */
@@ -3698,6 +4340,7 @@ function renderAll() {
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'history') renderHistory();
   else if (currentView === 'downloads') renderDownloads();
+  else if (currentView === 'local') renderLocal();   // v2.8.0 批次 B
   else if (currentView === 'up') renderUp();
   else if (currentView === 'importMine') renderImportMine();   // v2.6.0：导入我的 B 站收藏夹
   else if (currentView.startsWith('playlist:')) renderPlaylist(currentView.split(':')[1]);
@@ -4598,10 +5241,12 @@ function bindEvents() {
   });
 
   /* ---- 左侧导航 ---- */
-  $('nav').addEventListener('click', (e) => {
+  $('nav').addEventListener('click', async (e) => {
     const item = e.target.closest('.nav-item');
     if (!item) return;
     currentView = item.dataset.view;
+    // v2.8.0 批次 B：进「本地歌曲」先体检一次（标出被挪走的文件），再画界面。
+    if (currentView === 'local') await checkLocalMissing();
     renderAll();   // 高亮由 renderAll → syncNavHighlight() 统一刷，这里不再手动改 class
   });
 
@@ -4611,6 +5256,9 @@ function bindEvents() {
   $('btnDownloads').addEventListener('click', async () => {
     currentView = 'downloads';
     await refreshDownloads();
+    // ★ v2.8.0 修订：进下载管理时顺带体检一次（60 秒节流）——
+    //   下载页是"文件可能已被外部删掉"最该被看见的地方。
+    await sweepMissingLocal();
     renderAll();
   });
 
@@ -4622,10 +5270,12 @@ function bindEvents() {
     if (!t || !t.bvid) { toast('先选一首歌吧'); return; }
     const task = taskForTrack(t);
 
-    if (task && task.status === 'done') {
-      // 已下好 → 在资源管理器里定位。★ 主进程只取 basename，界面传什么都不会跑出下载目录
-      try { await api('downloadReveal', task.file); }
-      catch (err) { toast(err.message || '找不到这个文件'); }
+    // ★ v2.8.0 修订：判据用 isDownloaded(t)（绿勾的真实来源），不是"有没有已完成任务" ——
+    //   理由同行内按钮那条：清过 downloads.json 之后任务没了、本地库还在，绿勾仍然是绿的。
+    if (isDownloaded(t)) {
+      // 已下好 → 在资源管理器里定位。★ v2.8.0 修订：先确认文件还在，
+      //   外部删掉的话改走"清记录 + 重新下载"（和行内按钮同一套，见 revealOrRedownload）
+      revealOrRedownload(t, task);
       return;
     }
     if (task && (task.status === 'downloading' || task.status === 'queued')) {
@@ -4781,10 +5431,15 @@ function bindEvents() {
       if (act === 'add') { addToPlaylist(track); return; }
       if (act === 'remove') { removeFromCurrent(track); return; }
       // v2.8.0：下载这一首。已下载的再点一次 → 打开所在文件夹（和播放条那个按钮一致）
+      // ★ v2.8.0 修订：判据从"有没有一条已完成的任务"改成 **isDownloaded(track)**。
+      //   绿勾有两个来源（DB.local ∪ 已完成任务），只认任务的话会漏掉一整类情况：
+      //   用户清过 downloads.json / 重启过 / 任务记录没了，但本地库那条还在 ——
+      //   那时绿勾照样是绿的，可 taskForTrack 返回 null，就会一路掉到"重新入队"，
+      //   既不体检也不清记录（真机反馈里"绿勾一直在"的另一半就是这个）。
       if (act === 'download') {
         const task = taskForTrack(track);
-        if (task && task.status === 'done') {
-          api('downloadReveal', task.file).catch((err) => toast(err.message || '找不到这个文件'));
+        if (isDownloaded(track)) {
+          revealOrRedownload(track, task);      // 先确认文件还在，不在就清记录 + 重下
         } else if (task && (task.status === 'downloading' || task.status === 'queued')) {
           currentView = 'downloads'; dlFilter = 'doing'; refreshDownloads().then(renderAll);
         } else {
@@ -4890,6 +5545,12 @@ function bindEvents() {
     if (id === 'btnDlPauseAll') { dlPauseAll(); return; }
     if (id === 'btnDlRetryAll') { dlRetryAll(); return; }
     if (id === 'btnDlSetDir') { showSettingsTab('download'); return; }
+
+    // ---- v2.8.0 批次 B：本地歌曲 ----
+    if (id === 'btnLocalImportFiles' || id === 'btnLocalEmptyFiles') { importLocal('files'); return; }
+    if (id === 'btnLocalImportFolder' || id === 'btnLocalEmptyFolder') { importLocal('folder'); return; }
+    if (id === 'btnLocalClean') { cleanLocalMissing(); return; }
+
     if (id === 'btnRenamePl') {
       const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
       if (!pl) return;
@@ -5011,12 +5672,20 @@ function bindEvents() {
 
   /* ---- 音频事件 ---- */
   // ★ 播放按钮的图标只有一个来源：updatePlayBtn()（按 audio.paused 决定 ▶ / ‖）。
-  //   这里**故意不监听 waiting** —— 缓冲时不再换成转圈（那样一旦没人换回来就永远转圈）。
-  //   播放/暂停/缓冲结束(playing)/被清空(emptied)/出错/播完，都只是"重算一次图标"。
+  //   这里**故意不监听 waiting 去换图标** —— 缓冲时不再换成转圈（那样一旦没人换回来就永远转圈）。
+  //   ★ v2.8.0 修订：waiting / stalled 现在**要监听**了，但不是为了换图标，
+  //     而是为了"断流自愈"（见 healOnStall）。两件事分开，别再混在一起。
   audio.addEventListener('play',    () => { updatePlayBtn(); pushLyricToDesktop(); });
-  audio.addEventListener('pause',   () => { updatePlayBtn(); pushLyricToDesktop(); });
+  audio.addEventListener('pause',   () => { updatePlayBtn(); pushLyricToDesktop(); clearDeadlineTimer(); });
   audio.addEventListener('playing', () => { updatePlayBtn(); });
   audio.addEventListener('emptied', () => { updatePlayBtn(); });
+
+  // ★ v2.8.0 修订：断流自愈。
+  //   stalled = 浏览器尝试取数据但超时（典型：地址过期后 Range 被拒）。
+  //   waiting = 播放中缓冲不足，先停下来等数据。
+  //   两个都接上，统一走 healOnStall（内部有 8 秒冷却，不会疯狂重试）。
+  audio.addEventListener('stalled', () => { healOnStall(); });
+  audio.addEventListener('waiting', () => { healOnStall(); });
 
   audio.addEventListener('timeupdate', () => {
     // 正在拖动时不要抢着刷新画面，否则进度条会被自己拖回去，疯狂抖动
@@ -5042,14 +5711,26 @@ function bindEvents() {
 
   audio.addEventListener('ended', () => {
     updatePlayBtn();
+    clearDeadlineTimer();                 // 这一首结束了，别再挂"到期刷新"
     if (playMode === 'one') { audio.currentTime = 0; safePlay(); return; }
     next(1);
   });
 
+  // ★ v2.8.0 修订：error 也要试着自愈。
+  //   地址过期时 net.fetch 多半回一个 403/404 响应（而不是网络错误），
+  //   浏览器会把它当"媒体加载失败" → 触发 error。以前这里只弹一句
+  //   "可能链接已过期，换一首试试"，**然后什么都不做** —— 用户按提示换回来
+  //   还是同一首、还是同一个过期地址，于是"同一位置卡死"。
+  //   现在：先试着重新解析地址接回去；接不上才提示 + 跳下一首。
   audio.addEventListener('error', () => {
     updatePlayBtn();
-    // 地址过期是常事（B 站链接有时效），提示一下就好
-    if (audio.src) toast('音频加载失败了，可能链接已过期，换一首试试');
+    if (!audio.src) return;                     // 没地址（比如切歌清空）→ 不是过错
+    const seq = playSeq;
+    const at = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+    // 自愈里已经带了"失败就换下一首"，这里只在它明确失败时才提示
+    refreshAudioUrl(seq, 'manual', at).then((okNow) => {
+      if (!okNow && seq === playSeq) toast('音频加载失败了，可能链接已过期，换一首试试');
+    });
   });
 
   /* ---- 全局快捷键 ---- */
@@ -5906,6 +6587,7 @@ function currentTracks() {
   //   返回空数组而不是落到底下的 searchResults —— 否则在下载页点空白处
   //   有可能误触"播放搜索结果里的第 N 首"。
   if (currentView === 'downloads') return [];
+  if (currentView === 'local') return localTracks();   // v2.8.0 批次 B
   if (currentView === 'up' && upState) return upState.list;
   if (currentView === 'parsed' && parsedView) return parsedView.tracks;
   if (currentView.startsWith('playlist:')) {
@@ -5925,6 +6607,7 @@ function viewLabel() {
   if (currentView === 'favorites') return '我喜欢';
   if (currentView === 'history') return '最近播放';
   if (currentView === 'downloads') return '下载管理';   // v2.8.0
+  if (currentView === 'local') return '本地歌曲';        // v2.8.0 批次 B
   if (currentView === 'up' && upState) return `${upState.name} 的视频`;
   if (currentView === 'parsed' && parsedView) return parsedView.info.title;
   if (currentView.startsWith('playlist:')) {
@@ -5972,6 +6655,11 @@ async function removeFromCurrent(track) {
   } else if (currentView.startsWith('playlist:')) {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
     if (pl) pl.tracks = pl.tracks.filter((t) => !sameTrack(t, track));
+  } else if (currentView === 'local') {
+    // v2.8.0 批次 B：本地歌曲页的「移除」= 从本地库里删掉这条记录（只删记录，不动磁盘文件）。
+    const entry = (DB.local || []).find((e) => e && e.path === track.localPath);
+    if (entry) removeLocalEntry(entry);
+    return;
   }
   await persist();
   renderAll();
@@ -6036,6 +6724,13 @@ async function boot() {
   //     都是"没下过"的样子，要等下一次重画才会变成绿勾。
   rebuildDlKeys();
   await refreshDownloads();
+  // ★ v2.8.0 修订：启动时给本地库做一次失联体检 —— 用户在资源管理器里删过文件的话，
+  //   这里就该把失效记录剔掉，免得第一次画出来就是一排假绿勾。
+  //   force=true：开机这一次不受 60 秒节流限制（上一次会话的时间戳早就过期了）。
+  await sweepMissingLocal(true);
+  // ★ v2.8.0 批次 B：本地库（导入的文件）也体检一次 —— 只**标记**失效，不删记录。
+  //   本地库里没东西时它内部会立刻返回，几乎零成本。
+  await checkLocalMissing();
 
   // 4) 画界面
   renderAll();

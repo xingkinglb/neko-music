@@ -49,7 +49,19 @@ ipcMain.handle('store:save', (_e, data) => { addData(data); return { ok: true, d
 ipcMain.handle('bili:hasCookie', () => ({ ok: true, data: false }));
 ipcMain.handle('cookie:get', () => ({ ok: true, data: '' }));
 ipcMain.handle('bili:subtitle', () => ({ ok: false, error: '测试环境不给字幕', reason: 'none' }));
-ipcMain.handle('bili:audioUrl', () => ({ ok: true, data: { url: '', quality: 30280, duration: 200, backup: [] } }));
+/* ★ v2.8.0 修订二：audioUrl 必须回一条**真的 bili:// 地址**（带 deadline），
+   否则 audio.src 设成空串 → 浏览器把它解析成页面自身的 file:// URL，
+   "断流自愈换了地址没有"就永远测不出来（第一次跑就是这么假失败的）。
+   每次调用换一个 tag，好断言"确实换了新地址"。 */
+const realDl = Math.floor(Date.now() / 1000) + 3600;
+let audioUrlSeq = 0;
+ipcMain.handle('bili:audioUrl', () => {
+  audioUrlSeq++;
+  return { ok: true, data: {
+    url: 'bili://get?url=' + encodeURIComponent(
+      'https://x.mcdn.bilivideo.cn:4483/a.m4s?deadline=' + realDl + '&gen=playurlv3&sk=call' + audioUrlSeq),
+    quality: 30280, duration: 200, backup: [] } };
+});
 ipcMain.handle('bili:videoInfo', (_e, bvid) => {
   if (bvid === COLLECT_BVID) {
     return { ok: true, data: { bvid: COLLECT_BVID, aid: 1, title: '六合集', cover: '', owner: { mid: UP_MID, name: '皓晨音乐' }, duration: 1200, pages: PAGES, season: null } };
@@ -611,6 +623,132 @@ app.whenReady().then(async () => {
     else bad('删除后绿勾没消失：' + JSON.stringify({ sent, after }));
   } else {
     bad('下载管理里找不到这条任务的「删除」按钮');
+  }
+
+  /* ================= v2.8.0 修订二：两个新问题（真机反馈） ================= */
+
+  /* ⑪ 问题 A：在资源管理器里**直接删文件**后，绿勾要消失、并且能重下。
+     ★ 判别力关键：旧代码里 rebuildDlKeys() 是纯字符串运算、从不查磁盘，
+       所以"文件没了但绿勾还在"；点它只会去 download:reveal，既不体检也不重下。
+       这里把 local:stat 打开成"一律不存在"，走一遍真实点击链路。 */
+  {
+    dlStub.setLocalMissing(true);            // ★ 模拟"文件已被外部删掉"
+    const addBefore = dlStub.calls.add.length;
+    // 塞一条本地库记录（绿勾的第一来源），并把任务表那条也放回来（第二来源）
+    await evalJS(`(() => {
+      DB.local = [{ id: 'L2', path: 'C:\\\\测试\\\\下载\\\\周深 - 大鱼.m4a', title: '大鱼',
+                    key: 'BV1song0001:7', bvid: 'BV1song0001', cid: 7, src: 'download' }];
+      dlDir = 'C:\\\\测试\\\\下载';
+      rebuildDlKeys();
+      currentView = 'search'; searchKeyword = '测试';
+      searchResults[0].cid = 7; searchResults[0].bvid = 'BV1song0001'; searchResults[0].title = '大鱼';
+      renderAll();
+      return true;
+    })()`);
+    await sleep(400);
+    const beforeA = await evalJS(`(() => {
+      const b = document.querySelector('#content .track [data-act="download"]');
+      return { done: b ? /\\bdone\\b/.test(b.className) : null,
+               icon: b ? (b.querySelector('use') || {}).getAttribute('href') : '' };
+    })()`);
+    if (beforeA.done && beforeA.icon === '#i-check') ok('（前置）外部删文件前这首歌是绿勾');
+    else bad('前置条件不成立：' + JSON.stringify(beforeA));
+
+    // 点它 —— 应该：发现文件没了 → 清记录 → 变回下载箭头 → 重新入队
+    await evalJS(`document.querySelector('#content .track [data-act="download"]').click()`);
+    await sleep(1500);
+    const afterA = await evalJS(`(() => {
+      currentView = 'search'; searchKeyword = '测试'; renderAll();
+      const b = document.querySelector('#content .track [data-act="download"]');
+      return { localLen: (DB.local || []).length,
+               dlKeys: [...dlKeys],
+               done: b ? /\\bdone\\b/.test(b.className) : null,
+               icon: b ? (b.querySelector('use') || {}).getAttribute('href') : '' };
+    })()`);
+    const sentAdd = dlStub.calls.add.slice(addBefore);
+    say('\n--- 问题 A：外部删除后点绿勾 ---');
+    say('  点击后 DB.local=' + afterA.localLen + '，dlKeys=' + JSON.stringify(afterA.dlKeys)
+        + '，按钮=' + afterA.icon);
+    say('  重新入队的曲目 = ' + JSON.stringify(sentAdd.map((l) => l.map((t) => t.bvid + ':' + t.cid))));
+    if (afterA.localLen === 0 && afterA.dlKeys.length === 0 && afterA.done === false
+        && afterA.icon === '#i-download' && sentAdd.length > 0)
+      ok('★ 外部删文件后点绿勾 → 清掉失效记录、绿勾变回下载箭头、并重新入队');
+    else bad('问题 A 没修好：' + JSON.stringify({ afterA, sentAdd }));
+    dlStub.setLocalMissing(false);           // 复位，别影响后面的用例
+
+    // 补一条：文件还在时点绿勾不能变成"重新下载"（回归）
+    const addBefore2 = dlStub.calls.add.length;
+    const revBefore = dlStub.calls.reveal;
+    await evalJS(`(() => {
+      DB.local = [{ id: 'L3', path: 'C:\\\\测试\\\\下载\\\\周深 - 大鱼.m4a', title: '大鱼',
+                    key: 'BV1song0001:7', bvid: 'BV1song0001', cid: 7, src: 'download' }];
+      rebuildDlKeys();
+      currentView = 'search'; searchKeyword = '测试'; renderAll();
+      return true;
+    })()`);
+    await sleep(300);
+    await evalJS(`document.querySelector('#content .track [data-act="download"]').click()`);
+    await sleep(1200);
+    const sameAdd = dlStub.calls.add.length - addBefore2;
+    const sameRev = dlStub.calls.reveal - revBefore;
+    const stillLocal = await evalJS(`(DB.local || []).length`);
+    if (sameAdd === 0 && sameRev === 1 && stillLocal === 1)
+      ok('★ 回归：文件还在时点绿勾只开文件夹（reveal+1），不清记录、不重下');
+    else bad('回归被破坏（文件在时不该重下）：' + JSON.stringify({ sameAdd, sameRev, stillLocal }));
+  }
+
+  /* ⑫ 问题 B：断流自愈（stalled → 重新解析地址 → 接回原位置）
+     ★ 只验"机制接上了"这件事 —— 真实的断流要在真机上才复现得了，
+       这里把 audio 的 paused 临时改成 false（离屏沙箱没声卡，它永远是 paused），
+       再派发 stalled，看有没有走一遍"重新取地址"。 */
+  {
+    const healProbe = await evalJS(`(async () => {
+      window.next = () => {};                      // 别让兜底真的跳歌
+      currentView = 'search'; searchKeyword = '测试';
+      searchResults = [{ bvid: 'BV1song0001', cid: 7, page: 1, title: '大鱼', author: '周深', cover: '', duration: 312 }];
+      renderAll();
+      playTracks(searchResults.slice(), 0, '断流测试');
+      return true;
+    })()`);
+    await sleep(1600);
+    const healBefore = await evalJS(`({
+      hasHeal: typeof healOnStall === 'function',
+      hasRefresh: typeof refreshAudioUrl === 'function',
+      hasDeadline: typeof srcDeadlineAt === 'function',
+      listened: ['stalled','waiting'].every((ev) => {
+        // 用"派发后有没有反应"间接确认（拿不到监听器列表）
+        return true;
+      }),
+      src: audio.src ? audio.src.slice(0, 30) : '',
+    })`);
+    say('\n--- 问题 B：断流自愈 ---');
+    say('  healOnStall=' + healBefore.hasHeal + ' refreshAudioUrl=' + healBefore.hasRefresh
+        + ' srcDeadlineAt=' + healBefore.hasDeadline);
+    if (healBefore.hasHeal && healBefore.hasRefresh && healBefore.hasDeadline)
+      ok('★ 自愈三件套都在（healOnStall / refreshAudioUrl / srcDeadlineAt）');
+    else bad('自愈函数缺失：' + JSON.stringify(healBefore));
+
+    // 真派发一次 stalled：把 paused 强行改成 false（模拟"正在播"），清掉冷却
+    const healed = await evalJS(`(async () => {
+      try { Object.defineProperty(audio, 'paused', { configurable: true, get: () => false }); } catch (e) {}
+      healBusy = false; lastHealAt = 0;
+      const gate = { healBusy, lastHealAt, paused: audio.paused, hasSrc: !!audio.src,
+                     would: (healBusy ? 'busy' : (audio.paused ? 'paused' : (!audio.src ? 'nosrc' : 'PASS'))) };
+      const oldSrc = audio.src;
+      try { audio.currentTime = 55; } catch (e) {}
+      audio.dispatchEvent(new Event('stalled'));
+      await new Promise((r) => setTimeout(r, 2400));
+      return { changed: audio.src !== oldSrc, ct: audio.currentTime, gate, oldSrc: String(oldSrc).slice(0, 40),
+               newSrc: String(audio.src).slice(0, 40), healBusyAfter: healBusy };
+    })()`);
+    say('  闸门诊断：' + JSON.stringify(healed.gate));
+    say('  stalled 后：src 换了=' + healed.changed + '，currentTime=' + healed.ct + '（≈55 说明接回了原位置）');
+    say('  src: ' + healed.oldSrc + ' → ' + healed.newSrc);
+    if (!/^bili:\/\//.test(healed.oldSrc))
+      say('  ★ 注意：这一条依赖 bili:// 桩地址；若 src 不是 bili:// 说明桩没生效');
+    if (healed.changed && healed.ct >= 53 && healed.ct <= 57)
+      ok('★ 断流后真的重新解析了地址并把播放位置接了回去（不会从头开始、不会卡死）');
+    else bad('自愈没生效：' + JSON.stringify(healed));
   }
 
   /* 勾选模式的那张图：要的是"已选 2 首"的样子，所以先重进一次勾选模式再截 */
