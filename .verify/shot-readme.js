@@ -28,24 +28,68 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'bg', privileges: { standard: tr
 // ⚠️ registerBgProtocol 必须在 app ready 之后调用（它要拿默认 session）
 const { registerBgProtocol } = require(path.join(ROOT, 'src', 'bg-protocol.js'));
 
-/* 演示壁纸来源：优先用本机这张（可用 NEKO_DEMO_WALLPAPER 覆盖）；
-   找不到就自己生成一张渐变，保证脚本在别的机器上也能跑。 */
-const WALLPAPER_SRC = process.env.NEKO_DEMO_WALLPAPER
-  || 'C:\\Users\\Dico\\Pictures\\新建文件夹\\【哲风壁纸】动漫人物-动漫壁纸.png';
+/* 演示壁纸来源（按优先级找）：
+   ① 环境变量 NEKO_DEMO_WALLPAPER 指定的文件；
+   ② 系统「图片」目录里第一张图片（自动找，避免在仓库里写死任何私人路径）；
+   ③ 都没有 → 自己生成一张渐变兜底，保证脚本在任何机器上都能跑。
+   ★ 隐私红线：绝不在源码里写死本机私人路径。 */
+function findWallpaper() {
+  if (process.env.NEKO_DEMO_WALLPAPER && fs.existsSync(process.env.NEKO_DEMO_WALLPAPER)) {
+    return process.env.NEKO_DEMO_WALLPAPER;
+  }
+  const guesses = [
+    path.join(os.homedir(), 'Pictures'),
+    path.join(os.homedir(), 'OneDrive', 'Pictures'),
+  ];
+  const exts = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
+  for (const dir of guesses) {
+    try {
+      if (!fs.existsSync(dir)) continue;
+      /* 只要**看着像壁纸**的：小于 60KB 的多半是图标 / 缩略图 / 空白测试图，
+         拿它当壁纸截出来是一片纯色，反而更难看 —— 宁可走渐变兜底。 */
+      const hit = fs.readdirSync(dir)
+        .filter((f) => exts.has(path.extname(f).toLowerCase()))
+        .map((f) => ({ f, size: fs.statSync(path.join(dir, f)).size }))
+        .filter((x) => x.size >= 60 * 1024)
+        .sort((a, b) => b.size - a.size)[0];
+      if (hit) return path.join(dir, hit.f);
+    } catch { /* 读不到就跳过 */ }
+  }
+  return null;
+}
+const WALLPAPER_SRC = findWallpaper();
 
-/* 极简 PNG 编码（竖向渐变，纯 Node，不引依赖）—— 只在没找到壁纸时兜底 */
+/* 极简 PNG 编码（纯 Node，不引依赖）—— 只在没找到壁纸时兜底。
+   画的是「斜向渐变 + 两团柔光」，比纯竖条更像一张真壁纸（截出来不呆板）。 */
 function gradientPng(w, h, top, bottom) {
   const zlib = require('zlib');
   const raw = Buffer.alloc((w * 4 + 1) * h);
+  // 两团柔光的中心与半径（左上偏中、右下偏中）
+  const glows = [
+    { cx: w * 0.28, cy: h * 0.22, r: Math.max(w, h) * 0.55, c: [255, 138, 176], a: 0.30 },
+    { cx: w * 0.78, cy: h * 0.80, r: Math.max(w, h) * 0.60, c: [55, 214, 192], a: 0.22 },
+  ];
   for (let y = 0; y < h; y++) {
     const k = y / (h - 1);
     const off = y * (w * 4 + 1);
     raw[off] = 0;
     for (let x = 0; x < w; x++) {
       const p = off + 1 + x * 4;
-      raw[p] = Math.round(top[0] + (bottom[0] - top[0]) * k);
-      raw[p + 1] = Math.round(top[1] + (bottom[1] - top[1]) * k);
-      raw[p + 2] = Math.round(top[2] + (bottom[2] - top[2]) * k);
+      // 斜向渐变：竖向为主，横向再叠一点，避免"一条一条"的观感
+      const diag = k * 0.82 + (x / (w - 1)) * 0.18;
+      let r = top[0] + (bottom[0] - top[0]) * diag;
+      let g = top[1] + (bottom[1] - top[1]) * diag;
+      let b = top[2] + (bottom[2] - top[2]) * diag;
+      for (const gl of glows) {
+        const d = Math.sqrt((x - gl.cx) ** 2 + (y - gl.cy) ** 2) / gl.r;
+        const f = Math.max(0, 1 - d) ** 2 * gl.a;   // 平方衰减，边缘更柔
+        r += (gl.c[0] - r) * f;
+        g += (gl.c[1] - g) * f;
+        b += (gl.c[2] - b) * f;
+      }
+      raw[p] = Math.round(r);
+      raw[p + 1] = Math.round(g);
+      raw[p + 2] = Math.round(b);
       raw[p + 3] = 255;
     }
   }
@@ -135,6 +179,21 @@ const FAKE_DB = {
   favorites: ['BV1Neko00001', 'BV1Neko00003', 'BV1Neko00006', 'BV1Neko00008'].map(track),
   history: ['BV1Neko00008', 'BV1Neko00006', 'BV1Neko00005', 'BV1Neko00004', 'BV1Neko00003', 'BV1Neko00002', 'BV1Neko00001', 'BV1Neko00007'].map(track),
   lastTrack: null,
+  /* 本地歌曲库：全是虚构路径（D:\演示音乐 / E:\我的歌单…），绝不指向真实文件 */
+  local: [
+    // ① 下载目录里下好的两首（src=download）
+    { id: 'l1', path: 'C:\\演示音乐\\NekoMusic\\星海漫游.m4a', title: '星海漫游', author: '夜色合成器', cover: DEMO[0].cover, duration: 252, size: 8400000, key: 'BV1Neko00001:101', bvid: 'BV1Neko00001', cid: 101, src: 'download', folderRoot: null, addedAt: 1 },
+    { id: 'l2', path: 'C:\\演示音乐\\NekoMusic\\Neon Rain.m4a', title: 'Neon Rain', author: '像素花园', cover: DEMO[2].cover, duration: 235, size: 7800000, key: 'BV1Neko00003:103', bvid: 'BV1Neko00003', cid: 103, src: 'download', folderRoot: null, addedAt: 2 },
+    // ② 手动导入的一整个文件夹「专辑A」（含子目录，证明按"导入时选的根"归组而不是从路径反推）
+    { id: 'l3', path: 'D:\\演示音乐\\专辑A\\雨后的便利店.m4a', title: '雨后的便利店', author: 'Lo-Fi 猫', cover: DEMO[3].cover, duration: 167, size: 5200000, key: '', bvid: null, cid: null, src: 'folder', folderRoot: 'D:\\演示音乐\\专辑A', addedAt: 3 },
+    { id: 'l4', path: 'D:\\演示音乐\\专辑A\\深海电台.flac', title: '深海电台', author: '夜色合成器', cover: DEMO[5].cover, duration: 380, size: 41000000, key: '', bvid: null, cid: null, src: 'folder', folderRoot: 'D:\\演示音乐\\专辑A', addedAt: 4 },
+    { id: 'l5', path: 'D:\\演示音乐\\专辑A\\2019 旧作\\纸飞机与风.mp3', title: '纸飞机与风', author: '晴空小组', cover: DEMO[6].cover, duration: 192, size: 6100000, key: '', bvid: null, cid: null, src: 'folder', folderRoot: 'D:\\演示音乐\\专辑A', addedAt: 5 },
+    // ③ 另一个文件夹「我的歌单」
+    { id: 'l6', path: 'E:\\我的歌单\\晚安，东京.mp3', title: '晚安，东京', author: '晴空小组', cover: DEMO[7].cover, duration: 280, size: 8900000, key: '', bvid: null, cid: null, src: 'folder', folderRoot: 'E:\\我的歌单', addedAt: 6 },
+    { id: 'l7', path: 'E:\\我的歌单\\凌晨三点的键盘声.m4a', title: '凌晨三点的键盘声', author: 'Lo-Fi 猫', cover: DEMO[1].cover, duration: 208, size: 6600000, key: '', bvid: null, cid: null, src: 'folder', folderRoot: 'E:\\我的歌单', addedAt: 7 },
+    // ④ 单曲导入的（src=file，归到「导入的歌曲」）
+    { id: 'l8', path: 'D:\\下载\\随手存的单曲.mp3', title: '随手存的单曲', author: '', cover: '', duration: 0, size: 4100000, key: '', bvid: null, cid: null, src: 'file', folderRoot: null, addedAt: 8 },
+  ],
   settings: {
     theme: 'violet',
     volume: 80,
@@ -146,6 +205,38 @@ const FAKE_DB = {
   },
   collectParts: {},
 };
+
+/* 虚构下载任务（覆盖五种状态，好让「下载管理」页每一类都有内容可看） */
+const DEMO_DL_DIR = 'C:\\演示音乐\\NekoMusic';
+const DEMO_TASKS = [
+  { id: 'd1', bvid: 'BV1Neko00006', cid: 106, title: '深海电台', author: '夜色合成器', cover: DEMO[5].cover,
+    file: '深海电台.m4a', status: 'downloading', received: 5242880, total: 9437184, speed: 1258291, error: '' },
+  { id: 'd2', bvid: 'BV1Neko00007', cid: 107, title: '纸飞机与风', author: '晴空小组', cover: DEMO[6].cover,
+    file: '纸飞机与风.m4a', status: 'downloading', received: 1258291, total: 6291456, speed: 786432, error: '' },
+  { id: 'd3', bvid: 'BV1Neko00004', cid: 104, title: '雨后的便利店', author: 'Lo-Fi 猫', cover: DEMO[3].cover,
+    file: '雨后的便利店.m4a', status: 'paused', received: 3145728, total: 5242880, speed: 0, error: '' },
+  { id: 'd4', bvid: 'BV1Neko00002', cid: 102, title: '凌晨三点的键盘声', author: 'Lo-Fi 猫', cover: DEMO[1].cover,
+    file: '凌晨三点的键盘声.m4a', status: 'queued', received: 0, total: 6815744, speed: 0, error: '' },
+  { id: 'd5', bvid: 'BV1Neko00001', cid: 101, title: '星海漫游', author: '夜色合成器', cover: DEMO[0].cover,
+    file: '星海漫游.m4a', status: 'done', received: 8388608, total: 8388608, speed: 0, error: '' },
+  { id: 'd6', bvid: 'BV1Neko00008', cid: 108, title: '晚安，东京', author: '晴空小组', cover: DEMO[7].cover,
+    file: '晚安，东京.m4a', status: 'done', received: 9175040, total: 9175040, speed: 0, error: '' },
+  { id: 'd7', bvid: 'BV1Neko00003', cid: 103, title: 'Neon Rain', author: '像素花园', cover: DEMO[2].cover,
+    file: 'Neon Rain.m4a', status: 'done', received: 7864320, total: 7864320, speed: 0, error: '' },
+  { id: 'd8', bvid: 'BV1Neko00005', cid: 105, title: '像素花园 · 全专辑', author: '像素花园', cover: DEMO[4].cover,
+    file: '像素花园-全专辑.m4a', status: 'failed', received: 2936012, total: 42362470, speed: 0, error: '连接被重置，点重试再试一次' },
+];
+function demoDlStats(tasks) {
+  const st = { done: 0, running: 0, failed: 0, queued: 0, paused: 0, bytes: 0, total: tasks.length };
+  for (const t of tasks) {
+    if (t.status === 'done') { st.done++; st.bytes += t.received || 0; }
+    else if (t.status === 'downloading') { st.running++; st.bytes += t.received || 0; }
+    else if (t.status === 'queued') st.queued++;
+    else if (t.status === 'paused') { st.paused++; st.bytes += t.received || 0; }
+    else if (t.status === 'failed') st.failed++;
+  }
+  return st;
+}
 
 let lastSaved = JSON.parse(JSON.stringify(FAKE_DB));
 
@@ -171,6 +262,26 @@ ipcMain.handle('bili:videoInfo', (_e, bvid) => {
 ipcMain.handle('bili:upVideos', () => ({ ok: true, data: { list: DEMO.slice(0, 4).map((t) => ({ ...t })), hasMore: false } }));
 ipcMain.handle('bg:pick', () => ({ ok: true, data: { file: DEMO_BG, kind: 'image', sizeMB: 0.3 } }));
 ipcMain.handle('bg:clear', () => ({ ok: true, data: true }));
+
+/* ---------- 下载 / 本地歌曲 两组 IPC 的打桩（让「下载管理」「本地歌曲」两页能出图） ---------- */
+ipcMain.handle('download:list', () => ({ ok: true, data: { tasks: DEMO_TASKS, stats: demoDlStats(DEMO_TASKS), dir: DEMO_DL_DIR } }));
+ipcMain.handle('download:add', () => ({ ok: true, data: { added: 0, skipped: 0, duplicates: 0, needDir: false } }));
+['pause', 'resume', 'retry', 'cancel'].forEach((op) => ipcMain.handle('download:' + op, () => ({ ok: true, data: true })));
+ipcMain.handle('download:remove', () => ({ ok: true, data: true }));
+ipcMain.handle('download:clearFinished', () => ({ ok: true, data: true }));
+ipcMain.handle('download:pickDir', () => ({ ok: true, data: { dir: DEMO_DL_DIR } }));
+ipcMain.handle('download:setDir', () => ({ ok: true, data: true }));
+ipcMain.handle('download:openDir', () => ({ ok: true, data: true }));
+ipcMain.handle('download:reveal', () => ({ ok: true, data: true }));
+ipcMain.handle('local:pickFiles', () => ({ ok: true, data: { paths: [] } }));
+ipcMain.handle('local:pickFolder', () => ({ ok: true, data: { root: null, paths: [], truncated: false } }));
+ipcMain.handle('local:stat', (_e, paths) => ({ ok: true, data: (paths || []).map((p) => ({ path: p, exists: true, size: 0 })) }));
+ipcMain.on('win-min', () => {});
+ipcMain.on('win-max', () => {});
+ipcMain.on('win-close', () => {});
+ipcMain.on('win:close-ready', () => {});
+ipcMain.on('win:fullscreen', () => {});
+ipcMain.on('win:mini', () => {});
 
 app.whenReady().then(async () => {
   registerBgProtocol(BG_DIR);
@@ -285,9 +396,53 @@ app.whenReady().then(async () => {
 
   /* ---------- 4) 设置面板（动态背景） ---------- */
   say('\n[4] 动态背景设置面板');
-  await evalJS(`(() => { toggleLyrics(false); openSettings(); return true; })()`);
+  await evalJS(`(() => { toggleLyrics(false); closeSettings(); return true; })()`);
+  await sleep(200);
+  await evalJS(`(() => { openSettings(); return true; })()`);
   await sleep(900);
   await shoot('settings.png');
+  await evalJS(`(() => { closeSettings(); return true; })()`);
+  await sleep(300);
+
+  /* ---------- 5) 下载管理页（v2.8.0） ---------- */
+  say('\n[5] 下载管理页');
+  await evalJS(`(async () => {
+    currentView = 'downloads'; dlFilter = 'all';
+    await refreshDownloads();
+    renderAll();
+    return true; })()`);
+  await sleep(900);
+  await shoot('downloads.png');
+
+  /* ---------- 6) 本地歌曲页：左栏文件夹列表（v2.8.1） ---------- */
+  say('\n[6] 本地歌曲页（左栏分组）');
+  await evalJS(`(async () => {
+    currentView = 'local'; localFilter = 'all'; localPick = null;
+    renderAll();
+    return true; })()`);
+  await sleep(900);
+  await shoot('local.png');
+
+  /* ---------- 7) 本地歌曲页：批量选择态（v2.8.1） ---------- */
+  say('\n[7] 本地歌曲页（批量选择）');
+  await evalJS(`(async () => {
+    document.getElementById('btnLocalPick').click();
+    return true; })()`);
+  await sleep(400);
+  /* 勾三首（点整行 = 勾选）。
+     ★ 每次点完界面会重画，之前抓到的 DOM 节点就失效了 ——
+       必须**一次只点一个、点完重新抓**，不能先抓三个节点再连着点（那样只有第一下算数）。 */
+  for (const idx of [0, 2, 4]) {
+    await evalJS(`(() => {
+      const rows = document.querySelectorAll('#content .track');
+      if (rows[${idx}]) rows[${idx}].click();
+      return true; })()`);
+    await sleep(220);
+  }
+  await sleep(400);
+  const pickedN = await evalJS(`(localPick && localPick.selected ? localPick.selected.size : -1)`);
+  say('  已勾 ' + pickedN + ' 首');
+  await shoot('local-pick.png');
 
   if (errors.length) say('\n页面报错：\n  ' + errors.slice(0, 8).join('\n  '));
   else say('\n页面无报错');
