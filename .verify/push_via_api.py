@@ -96,7 +96,18 @@ base_sha = api("GET", f"/git/refs/heads/{BRANCH}")["object"]["sha"]
 print(f"远程当前 {BRANCH} = {base_sha[:7]}")
 
 # 2) 待推送的提交，从旧到新
-shas = [s for s in git("log", "--reverse", "--format=%H", f"{base_sha}..HEAD").split("\n") if s.strip()]
+#    大多数情况下 base_sha 本地也有，直接 `base_sha..HEAD` 即可。
+#    ★ 例外：远程 main 已经被前一次"API 重建"（push_via_api 自身）推过去了，
+#      重建后的 sha 在本地不存在（API 推会换 sha），这条命令会报 128 ———
+#      用 PUSH_COUNT=N 强制"只推最后 N 个 commit"，脚本会用"本地 HEAD 的前一个"
+#      当 parent 起点（和远程 main 在内容上是一致的，因为重建是逐 blob 复制的）。
+import os
+push_count = int(os.environ.get("PUSH_COUNT", "0") or "0")
+if push_count > 0:
+    shas = [s for s in git("log", "--reverse", "--format=%H", f"-{push_count}", "HEAD").split("\n") if s.strip()]
+    print(f"⚠️  PUSH_COUNT={push_count} 模式：只推最后 {push_count} 个提交（远程 base_sha={base_sha[:7]} 在本地不存在）")
+else:
+    shas = [s for s in git("log", "--reverse", "--format=%H", f"{base_sha}..HEAD").split("\n") if s.strip()]
 if not shas:
     print("没有需要推送的提交，收工。")
     sys.exit(0)
