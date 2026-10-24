@@ -182,9 +182,11 @@ const CASES = [
     expect: '自愈没有冷却',
   },
   {
+    // ★ v2.8.2 语义化：闸门放宽成 `audio.paused && !startPending` 之后，
+    //   样例的 from 也要跟着换 —— 否则这条样例恒为"找不到"，判别力就白丢了。
     name: '★ 问题B：healOnStall 不再判 audio.paused（暂停时也乱动）',
     file: 'src/ui/app.js',
-    from: `  if (audio.paused) return;                   // 用户自己按了暂停 → 别自作主张`,
+    from: `  if (audio.paused && !startPending) return;  // 用户自己按了暂停 → 别自作主张`,
     to:   `  if (false) return;                          // 用户自己按了暂停 → 别自作主张`,
     expect: '没判 audio.paused',
   },

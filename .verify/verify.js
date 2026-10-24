@@ -3208,14 +3208,17 @@ console.log('\n[57] 两个新问题的修复（v2.8.0 修订二）：');
   else ok('★ 自愈有 healBusy 闸门（一次只跑一个）');
 
   // ④ 反向断言：用户自己暂停时别自作主张
-  // ★ 必须切到 healOnStall 函数体里查 —— 文件里有两处 `if (audio.paused) return;`
-  //   （另一处在 armDeadlineTimer 里），不切开的话把 healOnStall 那条删掉照样"通过"。
+  // ★ 必须切到 healOnStall 函数体里查 —— 文件里别处也有 `audio.paused` 判断
+  //   （armDeadlineTimer 里），不切开的话把 healOnStall 那条删掉照样"通过"。
+  // ★ v2.8.2 语义化：闸门从 `audio.paused` 放宽成 `audio.paused && !startPending` ——
+  //   "设了地址、play() 还挂着"时 paused 仍是 true，那正是最需要救的状态，
+  //   不能把它当成"用户按了暂停"（probe-hang.js 复现的静默停死就是这种）。
   {
     const hsStart = appjs.indexOf('function healOnStall()');
-    const hsBody = hsStart < 0 ? '' : appjs.slice(hsStart, hsStart + 700);
-    if (!/if \(audio\.paused\) return;/.test(hsBody))
+    const hsBody = hsStart < 0 ? '' : appjs.slice(hsStart, hsStart + 900);
+    if (!/if \(audio\.paused && !startPending\) return;/.test(hsBody))
       err('★ healOnStall 没判 audio.paused（或被短路）—— 用户按了暂停，界面却跑去重新解析地址、还 safePlay() 继续播');
-    else ok('★ 反向断言：用户暂停时不擅自自愈');
+    else ok('★ 反向断言：用户暂停时不擅自自愈（但"等着出声"时要救）');
   }
 
   // ⑤ 预防式：解析 deadline，到期前主动刷新
@@ -3245,10 +3248,64 @@ console.log('\n[57] 两个新问题的修复（v2.8.0 修订二）：');
     else ok('★ 反向断言：error 不是"只弹提示、什么都不做"');
   }
 
+  // ⑦ v2.8.2：开播看门狗 + 代理超时（"播完该切下一首时彻底停住"）
+  // ★ 探针 probe-hang.js 复现的成因：bili:// 背后的 net.fetch 挂住时，
+  //   play() 的 promise 永远 pending（不 resolve 也不 reject），
+  //   界面既不提示也不跳歌 —— 整条链路静默停死。
+  //   所以这两道闸门少一道，那个"静默停住"就会回来。
+  {
+    if (!/async function onStartGuardTimeout\(/.test(appjs))
+      err('★ 没有 onStartGuardTimeout —— 设了地址却一直不出声时没人兜底，播放会静默停死');
+    else ok('★ 有开播看门狗 onStartGuardTimeout（设了地址 12 秒不出声就介入）');
+    if (!/startPending = true;\s*\n\s*armStartGuard\(seq\);/.test(appjs))
+      err('★ playAt 设完 src 没有 armStartGuard —— 看门狗根本没挂上');
+    else ok('★ playAt 设完 audio.src 就挂上开播看门狗');
+    if (!/addEventListener\('playing', \(\) => \{ updatePlayBtn\(\); endStartWait\(\); \}\)/.test(appjs))
+      err('★ playing 事件没有 endStartWait —— 真出声了看门狗还留着，12 秒后会误判成"打不开"');
+    else ok('★ 反向断言：真的出声（playing）就收掉看门狗，不会误判');
+    // 反向断言：重试过还不行必须跳下一首，不能只是提示一句就干等
+    {
+      const gStart = appjs.indexOf('async function onStartGuardTimeout(');
+      const gBody = gStart < 0 ? '' : appjs.slice(gStart, gStart + 900);
+      if (!/next\(1\)/.test(gBody))
+        err('★ 看门狗重试后仍然失败时没有 next(1) —— 用户只能对着一个哑巴播放器干等');
+      else ok('★ 看门狗重试一次还不行就跳下一首（不会干等）');
+    }
+    // 开播还没播起来时的那次 waiting 不许重载（否则每首歌多取一次地址）
+    if (!/if \(!\(audio\.currentTime > 0\.5\)\) return;/.test(appjs))
+      err('★ 自愈没判"还没真的播起来" —— 每首歌开播的正常缓冲都会触发一次换地址重载（多打一次 playurl，更容易被限流，也多一次可能挂住的机会）');
+    else ok('★ 反向断言：还没播起来时的正常缓冲不折腾（每首歌只取一次地址）');
+    // 播到结尾的 waiting 是"该切歌了"，不是断流 —— 不许重载（重载会把 ended 吃掉）
+    {
+      const hsStart = appjs.indexOf('function healOnStall()');
+      const hsBody = hsStart < 0 ? '' : appjs.slice(hsStart, hsStart + 1400);
+      if (!/const nearEnd = Number\.isFinite\(dur\) && dur > 0 && \(dur - audio\.currentTime\) < 1\.0;/.test(hsBody))
+        err('★ healOnStall 没判"已经播到结尾" —— 结尾那次 waiting 会去重载地址，把本该来的 ended 吃掉（"播完停在那儿不动"的一个入口）');
+      else ok('★ 反向断言：播到结尾的 waiting 直接切歌，不重载（不会吃掉 ended）');
+    }
+    // refreshAudioUrl 不能"恒 return true" —— 那会把"没救活"当"救活了"
+    {
+      const rStart = appjs.indexOf('async function refreshAudioUrl(');
+      const rBody = rStart < 0 ? '' : appjs.slice(rStart, rStart + 2600);
+      if (!/const loaded = audio\.readyState >= 1;/.test(rBody) || !/return loaded;/.test(rBody))
+        err('★ refreshAudioUrl 还是"恒 return true" —— 地址换了但流打不开时会被当成救活了，调用方就不提示、不跳歌（又一个静默停住的入口）');
+      else ok('★ refreshAudioUrl 按"真的加载出来了"返回（没救活要如实说）');
+    }
+    // 主进程：代理必须带首字节超时
+    if (!/BILI_FIRST_BYTE_TIMEOUT/.test(mainjs))
+      err('★ bili:// 代理没有首字节超时 —— CDN"连上却不回数据"时 net.fetch 会永远挂着，播放静默停死');
+    else ok('★ bili:// 代理有首字节超时（12 秒拿不到响应头就断）');
+    if (!/signal: ac\.signal/.test(mainjs))
+      err('★ bili:// 代理没有把 signal 传给 net.fetch —— 超时/取消都不会真的断掉连接');
+    else ok('★ bili:// 代理把 signal 传给了 net.fetch（超时 / 换歌能真的断开）');
+  }
+
   /* ---- 离线实测脚本必须在 ---- */
   [['probe-ghost-cb.js', '问题 A 探针（失联文件）'],
    ['probe-stall.js', '问题 B 探针（deadline / 断流）'],
-   ['probe-heal.js', '问题 B 自愈实测']].forEach(([f, name]) => {
+   ['probe-heal.js', '问题 B 自愈实测'],
+   ['probe-transition.js', 'v2.8.2 探针（真实音源切歌）'],
+   ['probe-hang.js', 'v2.8.2 探针（请求挂住 → 静默停死）']].forEach(([f, name]) => {
     if (fs.existsSync(path.join(ROOT, '.verify', f))) ok(`有 .verify/${f}（${name}）`);
     else err(`缺少 .verify/${f} —— ${name} 必须留档，否则下次改动没法复现`);
   });

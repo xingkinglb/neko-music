@@ -238,6 +238,85 @@ let deadlineTimer = null;    // 预防式刷新的定时器
 const HEAL_COOLDOWN = 8000;  // 两次自愈之间至少隔 8 秒
 const DEADLINE_MARGIN = 60000;  // 到期前 60 秒就主动刷新（留足重新解析 + 切换的时间）
 
+/* ============================================================
+   ★ v2.8.2：开播看门狗 —— "地址取到了、但流一直打不开"的兜底
+   ------------------------------------------------------------
+   真机反馈：**播完一首该切下一首时，偶尔彻底停住**（没提示、不跳歌、不报错）。
+
+   探针 probe-hang.js 复现出来的成因（不是猜的）：
+     bili:// 背后的 net.fetch 一旦"连上了却一个字节都不回"，会**永远挂着**；
+     媒体元素于是停在 readyState=0、既不 error 也不 ended，
+     而 playAt 里的 `await audio.play()` **永远 pending** ——
+     既不 resolve（不记历史、不刷界面），也不 reject（不弹提示、不跳下一首）。
+     整条链路就静默地停在那一个 await 上，40 秒都不动。
+
+   为什么"总在切歌那一下"撞上：每首歌开播时的第一个 `waiting` 都会触发一次自愈，
+   自愈要重新取地址 + 换 src 重载 —— 每切一首歌就多一次"可能挂住"的机会。
+   （probe-transition.js 实测：每首歌都取了**两次**音频地址。）
+
+   三道闸门：
+     ① 别瞎折腾：**还没真的播起来**时的那次 waiting 是正常缓冲，不重载
+        （顺带把"每首歌取两次地址"改回一次）；
+     ② 开播看门狗：设了地址 12 秒还没出声 → 认定这条流打不开 → 重试一次 → 还不行就跳下一首；
+     ③ 自愈闸门放宽：`audio.paused` 但**我们正在等它出声**时也要救（挂着 play() 时 paused 还是 true）。
+   ============================================================ */
+let startPending = false;      // 已经设了地址、还在等"真的出声"
+let startGuard = null;         // 看门狗定时器
+let startRetries = 0;          // 这一首重试过几次（只重试一次，再不行就跳歌）
+let lastSeekAt = 0;            // 上一次跳转的时间戳（seek 后重新缓冲是正常的，别当断流）
+const START_GUARD_MS = 12000;  // 设了地址 12 秒还没出声 → 判定这条流打不开
+
+/** 清掉开播看门狗。 */
+function clearStartGuard() {
+  if (startGuard) { clearTimeout(startGuard); startGuard = null; }
+}
+
+/** 给"这一次播放"挂上看门狗：到点还没出声就判定打不开。 */
+function armStartGuard(seq) {
+  clearStartGuard();
+  startGuard = setTimeout(() => {
+    startGuard = null;
+    onStartGuardTimeout(seq);
+  }, START_GUARD_MS);
+}
+
+/**
+ * 已经"想播"并且设了地址，但这么久还没出声 —— 说明这条流打不开。
+ * ★ 只有当前这次播放才处理（seq 对不上说明早换歌了）。
+ */
+async function onStartGuardTimeout(seq) {
+  if (seq !== playSeq) return;      // 已经换歌了，别抢
+  if (!startPending) return;        // 已经出声了（playing 到了，会清掉 startPending）
+  if (audio.paused) return;         // 用户自己按了暂停 → 别自作主张
+
+  startPending = false;             // 先摘掉，避免自愈里再被重复触发
+  if (startRetries < 1) {
+    startRetries++;
+    toast('这一首加载有点慢，正在重试…');
+    const ok = await refreshAudioUrl(seq, 'stalled', 0);
+    if (seq !== playSeq) return;
+    if (ok) {
+      startPending = true;
+      armStartGuard(seq);
+      return;
+    }
+  }
+  // 重试过还不出声 → 换下一首，别让用户对着一个哑巴播放器干等
+  if (queue.tracks.length > 1) {
+    toast('这一首的音频流连不上，换下一首');
+    next(1);
+  } else {
+    toast('这一首的音频流连不上，稍后再试');
+  }
+}
+
+/** 这一首已经出声（或这次播放结束了）→ 收掉看门狗。 */
+function endStartWait(seq) {
+  if (seq !== undefined && seq !== playSeq) return;   // 已被新的播放接管，别动它的看门狗
+  startPending = false;
+  clearStartGuard();
+}
+
 /** 清掉预防式刷新的定时器（换歌 / 暂停 / 播完时调）。 */
 function clearDeadlineTimer() {
   if (deadlineTimer) { clearTimeout(deadlineTimer); deadlineTimer = null; }
@@ -273,6 +352,10 @@ async function refreshAudioUrl(seq, reason, atSec) {
     // 换地址：先把"接回来的位置"挂上，等元数据到了再 seek
     audio.src = info.url;
     lastSetSrc = info.url;
+    // ★ v2.8.2：从这里开始算"设了地址、等出声" —— 换 src 后如果又挂住，
+    //   看门狗（onStartGuardTimeout）能接住，不会又静默停死一次。
+    startPending = true;
+    armStartGuard(seq);
     armDeadlineTimer(info.url, seq);
 
     await new Promise((resolve) => {
@@ -290,10 +373,15 @@ async function refreshAudioUrl(seq, reason, atSec) {
     });
     if (seq !== playSeq) return false;
 
+    // ★ v2.8.2：等完了还是连元数据都没有 → 这次自愈**没成功**。
+    //   以前这里一律 return true，于是"地址换了、但流打不开"会被当成"已救活"，
+    //   调用方（error 处理）就不再提示、也不跳歌 —— 又一个静默停住的入口。
+    const loaded = audio.readyState >= 1;
+
     try { if (resumeAt > 0.5) audio.currentTime = resumeAt; } catch (_) { /* 跳不了就算了，从头放也比卡死强 */ }
     if (wasPlaying || reason !== 'manual') safePlay();
     updatePlayBtn();
-    return true;
+    return loaded;
   } catch (err) {
     console.error('[播放自愈] 重新取地址失败', err);
     // 自愈失败就换下一首，别让用户对着一个卡死的播放器干等
@@ -337,9 +425,41 @@ function armDeadlineTimer(src, seq) {
 function healOnStall() {
   if (healBusy) return;
   if (!audio.src) return;                     // 还没设过地址（比如刚换歌）→ 不是断流
-  if (audio.paused) return;                   // 用户自己按了暂停 → 别自作主张
+  // ★ v2.8.2：`paused` 但**我们正等着它出声**（play() 挂着）时也要救 ——
+  //   探针 probe-hang.js 里那个"永久停住"的状态就是 paused=true、readyState=0，
+  //   以前这一行会把它当成"用户按了暂停"，于是唯一的自愈机会被自己挡掉。
+  if (audio.paused && !startPending) return;  // 用户自己按了暂停 → 别自作主张
+  // ★ v2.8.2：**已经播到结尾了** —— 这不是断流，是"该切歌了"。
+  //   以前这里会重新取地址 + 换 src 重载（probe-transition 实测：每首歌边界都白打一次 playurl），
+  //   更糟的是换 src 会把本该到来的 `ended` 吃掉，于是"播完了却停在那儿不动"。
+  //   判据：离结尾不到 1 秒（正常播放中）。1 秒内切歌，人耳听不出来。
+  {
+    const dur = audio.duration;
+    const nearEnd = Number.isFinite(dur) && dur > 0 && (dur - audio.currentTime) < 1.0;
+    if (nearEnd && !audio.paused) {
+      // ★ 必须先把这首停下来 —— 否则它会在几十毫秒后走到真正的结尾再发一次 `ended`，
+      //   而那时 playAt 已经切到下一首了，于是**连跳两首**（test-round22 C 组抓到的：
+      //   seq 1 → 3）。pause() 之后 ended 不会再来，切歌只发生这一次。
+      try { audio.pause(); } catch (_) { /* 停不下来也继续往下走 */ }
+      if (playMode === 'one') { try { audio.currentTime = 0; } catch (_) {} safePlay(); }
+      else if (queue.tracks.length) next(1);
+      return;
+    }
+  }
   const now = Date.now();
   if (now - lastHealAt < HEAL_COOLDOWN) return;
+  // ★ v2.8.2：**还没真的播起来**（currentTime 贴着 0）时的那次 waiting 是正常缓冲，
+  //   别一有 waiting 就换地址重载。以前每首歌开播都会在这里白跑一次自愈
+  //   （probe-transition 实测：每首歌取两次地址），既多打一次 playurl（更容易被限流），
+  //   又多一次"可能挂住"的机会。
+  //   ★ 这里按"有没有播起来"判，**不按"开播多久"判** —— 按时间判会把
+  //     "播到一半真的断了"也一起挡掉（test-ui 的自愈用例当场就抓到了这个错）。
+  //     开播就卡死的极端情况交给开播看门狗（12 秒还不出声才介入）。
+  if (!(audio.currentTime > 0.5)) return;
+  // ★ v2.8.2：**刚跳过进度**（拖进度条 / 点歌词跳句）之后的重新缓冲是正常的，
+  //   别把它当成断流去重解析地址 + 换 src 重载 —— 那会让每次拖进度都白打一次 playurl，
+  //   而且换 src 会让"刚跳到的位置"抖一下（probe-transition 实测：每首歌都多了一次）。
+  if (audio.seeking || Date.now() - lastSeekAt < 2000) return;
   lastHealAt = now;
   refreshAudioUrl(playSeq, 'stalled');
 }
@@ -1015,6 +1135,10 @@ async function playAt(index) {
   //   否则上一首挂的定时器会在新歌上触发一次多余的地址刷新。
   clearDeadlineTimer();
   lastHealAt = 0;
+  // ★ v2.8.2：这一首的重试次数 / 看门狗全部重置
+  startRetries = 0;
+  lastSeekAt = 0;
+  endStartWait(seq);
 
   // 更新底部播放条的外观（先显示信息，再慢慢加载音频）
   $('npTitle').textContent = track.title;
@@ -1061,6 +1185,10 @@ async function playAt(index) {
       };
       audio.addEventListener('loadedmetadata', onMeta);
 
+      // ★ v2.8.2：本地文件也可能读不出来（网络盘掉线 / 文件被占用）——
+      //   同样交给开播看门狗，别让 await audio.play() 永远挂着。
+      startPending = true;
+      armStartGuard(seq);
       try {
         await audio.play();
       } catch (playErr) {
@@ -1068,6 +1196,7 @@ async function playAt(index) {
         throw playErr;
       }
       if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
+      endStartWait(seq);
 
       DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
       DB.lastTrack = track;
@@ -1075,6 +1204,7 @@ async function playAt(index) {
       renderAll();
     } catch (err) {
       if (seq !== playSeq || isPlayInterrupted(err) || (myLocalSrc && lastSetSrc !== myLocalSrc)) return;
+      endStartWait(seq);   // ★ v2.8.2：这一首已经判失败，收掉看门狗，别再重复提示
       console.error('[播放失败]', (track && track.title) || '', err);
       // 本地文件找不到了（被挪走/删掉）→ 提示更具体，并顺手标记失效
       toast('本地文件打不开了：' + cleanPlayError(err));
@@ -1119,6 +1249,12 @@ async function playAt(index) {
     // ★ v2.8.0 修订：挂一个"到期前主动刷新"的定时器（预防式，见 armDeadlineTimer）
     armDeadlineTimer(info.url, seq);
 
+    // ★ v2.8.2：设了地址就开始"等出声"计时。真机上偶尔会出现
+    //   "地址取到了、但这条流连不上"——此时 play() 的 promise 会一直挂着，
+    //   既不 resolve 也不 reject，整条链路就静默停死（probe-hang.js 复现）。
+    startPending = true;
+    armStartGuard(seq);
+
     try {
       await audio.play();
     } catch (playErr) {
@@ -1132,6 +1268,7 @@ async function playAt(index) {
       throw playErr;
     }
     if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
+    endStartWait(seq);
 
     // 记入历史（同样的歌不重复记录，把它提到最前面）
     DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
@@ -1142,6 +1279,7 @@ async function playAt(index) {
   } catch (err) {
     // 被换歌打断 / 已经是过期的那一次请求 → 静默放弃，不提示也不跳歌
     if (seq !== playSeq || isPlayInterrupted(err) || (mySrc && lastSetSrc !== mySrc)) return;
+    endStartWait(seq);   // ★ v2.8.2：这一首已经判失败，收掉看门狗，别再重复提示
     // 真的失败了：控制台留下完整信息（含媒体地址，方便排查），提示条只显示原因本身
     console.error('[播放失败]', (track && track.title) || '', err);
     toast('播放失败：' + cleanPlayError(err));
@@ -6001,7 +6139,8 @@ function bindEvents() {
   //     而是为了"断流自愈"（见 healOnStall）。两件事分开，别再混在一起。
   audio.addEventListener('play',    () => { updatePlayBtn(); pushLyricToDesktop(); });
   audio.addEventListener('pause',   () => { updatePlayBtn(); pushLyricToDesktop(); clearDeadlineTimer(); });
-  audio.addEventListener('playing', () => { updatePlayBtn(); });
+  // ★ v2.8.2：真的出声了 → 收掉"开播看门狗"（它只负责"设了地址却一直不出声"那种情况）
+  audio.addEventListener('playing', () => { updatePlayBtn(); endStartWait(); });
   audio.addEventListener('emptied', () => { updatePlayBtn(); });
 
   // ★ v2.8.0 修订：断流自愈。
@@ -6032,10 +6171,13 @@ function bindEvents() {
   // ★ 这一条不能省：暂停状态下 timeupdate 是不触发的，
   //   没有它的话，暂停时拖进度条歌词不会跟着走。
   audio.addEventListener('seeked', () => { syncLyric(true); pushLyricToDesktop(); });
+  // ★ v2.8.2：记下"刚跳转过" —— 之后那次重新缓冲是正常现象，不是断流（见 healOnStall）
+  audio.addEventListener('seeking', () => { lastSeekAt = Date.now(); });
 
   audio.addEventListener('ended', () => {
     updatePlayBtn();
     clearDeadlineTimer();                 // 这一首结束了，别再挂"到期刷新"
+    endStartWait();                       // ★ v2.8.2：收掉开播看门狗
     if (playMode === 'one') { audio.currentTime = 0; safePlay(); return; }
     next(1);
   });

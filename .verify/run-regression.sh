@@ -4,7 +4,7 @@
 cd "$(dirname "$0")/.." || exit 1
 # ★ 必须真的 unset（本机 shell 里常带着 ELECTRON_RUN_AS_NODE=1，空值仍算"已设置"，
 #   Electron 会当成 node 跑 → 脚本报 exit=9）。用 env -u 而不是 export xxx=。
-TESTS="test-round6 test-round7 test-round8 test-round9 test-round10 test-round11 test-round12 test-round13 test-round14 test-round15 test-round16 test-round17 test-round18 test-round19 test-round20 test-round21 test-ui test-collect test-keys test-persist test-overlay test-playing test-lyric-drag test-play-interrupt"
+TESTS="test-round6 test-round7 test-round8 test-round9 test-round10 test-round11 test-round12 test-round13 test-round14 test-round15 test-round16 test-round17 test-round18 test-round19 test-round20 test-round21 test-round22 test-ui test-collect test-keys test-persist test-overlay test-playing test-lyric-drag test-play-interrupt"
 OUT=.verify/regression-summary.txt
 : > "$OUT"
 for t in $TESTS; do

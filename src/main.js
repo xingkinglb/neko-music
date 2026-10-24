@@ -197,8 +197,20 @@ protocol.registerSchemesAsPrivileged([
   },
 ]);
 
+/* ★ v2.8.2：首字节超时。
+   探针 probe-hang.js 复现出来的坑：B 站 CDN 偶尔会"连上了却一个字节都不回"，
+   而 `net.fetch` **没有超时**，会一直挂着。于是媒体元素停在 readyState=0，
+   既不 error 也不 ended，界面那边 `await audio.play()` 永远 pending ——
+   表现就是"播完一首该切下一首时彻底停住，没提示、不跳歌"。
+   这里给一道硬闸门：12 秒还没拿到响应头就主动断掉，让媒体元素报错，
+   界面那套"自愈 / 换下一首"才有机会接上。
+   ★ 只卡"拿到响应头"这一段：拿到之后是几分钟的长流，不能继续计时。 */
+const BILI_FIRST_BYTE_TIMEOUT = 12000;
+
 function registerBiliProtocol() {
   protocol.handle('bili', async (request) => {
+    let ac = null;
+    let timer = null;
     try {
       // 从 bili://get?url=xxx 里取出真正的音频地址
       const u = new URL(request.url);
@@ -216,15 +228,35 @@ function registerBiliProtocol() {
       headers['Referer'] = bili.REFERER;
       headers['User-Agent'] = bili.USER_AGENT;
 
+      ac = new AbortController();
+      // ① 界面那边不要这个请求了（换歌 / 拖进度条 / 关窗）→ 底下的连接也要真的断掉，
+      //    否则连接会一直挂着占着不释放。
+      if (request.signal) {
+        if (request.signal.aborted) ac.abort();
+        else request.signal.addEventListener('abort', () => ac.abort(), { once: true });
+      }
+      // ② 首字节超时
+      timer = setTimeout(() => {
+        try { ac.abort(new Error('音频流首字节超时')); } catch (_) { /* 已经结束了就忽略 */ }
+      }, BILI_FIRST_BYTE_TIMEOUT);
+
       // 由 Electron 的网络模块代发请求，返回的是一个流式响应
-      return await net.fetch(realUrl, {
+      const res = await net.fetch(realUrl, {
         method: request.method || 'GET',
         headers,
         redirect: 'follow',
+        signal: ac.signal,
       });
+      // 拿到响应头就算"连上了"，后面是长流，别再用首字节计时器去掐它
+      if (timer) { clearTimeout(timer); timer = null; }
+      return res;
     } catch (err) {
-      console.error('[bili协议] 代理音频失败：', err);
-      return new Response(String(err), { status: 500 });
+      if (timer) { clearTimeout(timer); timer = null; }
+      const msg = (err && (err.message || String(err))) || '未知错误';
+      const aborted = (err && err.name === 'AbortError') || /abort|超时/i.test(msg);
+      console.error('[bili协议] 代理音频失败：', msg);
+      // 504 = 超时/取消（界面据此走"自愈 / 换下一首"），500 = 其它真错误
+      return new Response(msg, { status: aborted ? 504 : 500 });
     }
   });
 }
