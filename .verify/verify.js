@@ -1089,7 +1089,11 @@ console.log('\n[31] 播放模式：一个按钮切换四种：');
   else if (!/\$\('btnMode'\)\.addEventListener/.test(appjs)) err('#btnMode 没有绑定点击');
   else ok('播放模式按钮 #btnMode 存在且绑定了点击');
 
-  const ids = [...appjs.matchAll(/\{\s*id:\s*'(\w+)',\s*icon:\s*'(i-[\w-]+)'/g)].map((m) => [m[1], m[2]]);
+  // ★ v2.9.0：这个正则原来是在**整个 app.js** 里捞 `{id:'x', icon:'i-y'}`，
+  //   后来「批量选择」的动作表（selActions）也长成这个形状，一捞就多出 4 条 → 误报。
+  //   现在先切出 PLAY_MODES 那一段再捞，断言才真的在验"播放模式四态"。
+  const pmBody = (appjs.split('const PLAY_MODES')[1] || '').split('];')[0];
+  const ids = [...pmBody.matchAll(/\{\s*id:\s*'(\w+)',\s*icon:\s*'(i-[\w-]+)'/g)].map((m) => [m[1], m[2]]);
   const want = [['list', 'i-repeat'], ['one', 'i-repeat1'], ['shuffle', 'i-shuffle'], ['order', 'i-order']];
   const bad = want.filter(([id, icon]) => !ids.some(([a, b]) => a === id && b === icon));
   if (ids.length !== 4 || bad.length) err(`PLAY_MODES 四态不完整（缺：${bad.map((b) => b[0]).join('/') || '数量 ' + ids.length}）`);
@@ -1810,10 +1814,13 @@ console.log('\n[48] mini 模式 · 同一个窗口换布局（v2.1.0）：');
   /* ---- ① index.html：按钮和图标都得在 ---- */
   if (!htmlIds.has('btnMini')) err('index.html 里没有 #btnMini（mini 模式的入口）');
   else if (!htmlIds.has('btnRestoreFull')) err('index.html 里没有 #btnRestoreFull（回完整模式的出口）');
-  else if (!htmlIds.has('miniClose')) err('index.html 里没有 #miniClose（mini 条上的关闭）');
+  // ★ v2.9.0：#miniClose（关程序）换成了 #miniLyric（桌面歌词开关）。
+  //   关程序还剩三条路：托盘菜单退出 / Alt+F4 / 回完整模式再点 ✕。
+  //   所以这里盯的是"mini 条上那个歌词开关在不在"，而不是"关闭在不在"。
+  else if (!htmlIds.has('miniLyric')) err('index.html 里没有 #miniLyric（mini 条上的桌面歌词开关）');
   else if (!htmlIds.has('miniActions')) err('index.html 里没有 .mini-actions 那一块');
   else if (!htmlIds.has('miniList')) err('index.html 里没有 #miniList（展开态的队列列表容器）');
-  else ok('index.html：入口 / 出口 / 关闭 / 展开列表，四样都在');
+  else ok('index.html：入口 / 出口 / 歌词开关 / 展开列表，四样都在');
 
   // 图标：照 #i-win-close 那一套画的两个新 symbol
   if (!/<symbol id="i-win-mini"/.test(html)) err('没有 #i-win-mini 这个 SVG symbol');
@@ -2985,9 +2992,9 @@ console.log('\n[56] 下载与本地歌曲（v2.8.0）：');
   if (!/id="btnDownload"/.test(html) || !/btnDownload'\)\.addEventListener/.test(appjs))
     err('播放条上没有下载按钮 / 没绑事件');
   else ok('入口②：播放条上有下载按钮');
-  if (!/id="btnDownloadFav"/.test(appjs) || !/id="btnDownloadPl"/.test(appjs))
-    err('「我喜欢」/「歌单」工具条上没有「批量下载」按钮');
-  else ok('入口③：「我喜欢」和「歌单」都有「批量下载」（点进去是勾选模式，能全选）');
+  if (!/id="btnSelectFav"/.test(appjs) || !/id="btnSelectPl"/.test(appjs))
+    err('「我喜欢」/「歌单」工具条上没有「批量选择」按钮');
+  else ok('入口③：「我喜欢」和「歌单」都有「批量选择」（点进去是选择模式，能全选）');
   if (!/data-cact="download"/.test(appjs) || !/btnDownloadCollect'\)\.addEventListener/.test(appjs))
     err('合集面板没有下载入口（选集行内按钮 / 工具条）');
   else ok('入口④：合集面板的选集行 + 工具条都能下');
@@ -3571,9 +3578,9 @@ console.log('\n[59] 本地歌曲：文件夹列表 + 批量选择（v2.8.0 修�
     if (!/const pickKey = opts\.pickKey \|\| 'bvid';/.test(fn))
       err('★ trackRow 不支持 opts.pickKey —— 本地歌的勾选状态查不到（会永远显示未勾）');
     else ok('★ trackRow 支持 opts.pickKey（默认 bvid，本地歌传 localPath）');
-    if (!/const pickId = track\[pickKey\];/.test(fn) || !/pickSet\.has\(pickId\)/.test(fn))
-      err('★ trackRow 没用 pickKey 取身份键去查选择集');
-    else ok('★ trackRow 按 pickKey 取身份键查选择集');
+    if (!/const pickId = opts\.pickIdOf \? opts\.pickIdOf\(track\) : track\[pickKey\];/.test(fn) || !/pickSet\.has\(pickId\)/.test(fn))
+      err('★ trackRow 没用 pickKey / pickIdOf 取身份键去查选择集');
+    else ok('★ trackRow 按 pickKey（或 pickIdOf）取身份键查选择集');
   }
   // localTrackOpts 必须把 pickKey 传成 localPath
   if (!/function localTrackOpts\(\)/.test(appjs))
@@ -3647,7 +3654,7 @@ console.log('\n[59] 本地歌曲：文件夹列表 + 批量选择（v2.8.0 修�
     err('★ 「全选 / 清空选择」没绑定');
   else ok('★ 「全选 / 清空选择」已绑定');
   // 点行：本地批量选择要排在"点整行 = 播放"之前
-  if (!/if \(dlPick\) dlToggle\(i\);[\s\S]{0,120}else if \(localPick\) localToggle\(i\);/.test(appjs))
+  if (!/if \(selPick\) selToggle\(i\);[\s\S]{0,120}else if \(localPick\) localToggle\(i\);/.test(appjs))
     err('★ 点行分发里没有 localPick 分支 —— 在本地页点行会直接播放，勾不上');
   else ok('★ 点行分发已接 localPick（在"点整行=播放"之前）');
   {
@@ -3678,5 +3685,264 @@ console.log('\n[59] 本地歌曲：文件夹列表 + 批量选择（v2.8.0 修�
   else err('缺少 .verify/test-round21.js —— 左栏分组 / 批量选择 / 移出库必须有离线实测');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 59 大类检查）');
+/* ---- 60) v2.9.0：mini 词开关 / 工具条常显 / 导入落地方式 ---- */
+console.log('\n[60] v2.9.0 · mini 词开关 + 工具条常显 + 导入落地（v2.9.0）：');
+{
+  /* ===== A. mini 条上的 ✕ 换成「词」 ===== */
+  if (!htmlIds.has('miniLyric'))
+    err('★ mini 条上没有 #miniLyric（桌面歌词开关）—— mini 里就再没有歌词入口了');
+  else if (htmlIds.has('miniClose'))
+    err('★ #miniClose 还在 —— 说好换成「词」，两个都留着第一行会挤（mini 的宽度是算出来的）');
+  else ok('★ mini 条：✕ 已换成「词」，两个没并存');
+
+  if (!/\$\('miniLyric'\)\.addEventListener\('click', \(\) => toggleDesktopLyric\(\)\)/.test(appjs))
+    err('★ #miniLyric 没绑到 toggleDesktopLyric —— 点了不会开桌面歌词');
+  else ok('★ #miniLyric 绑到了 toggleDesktopLyric');
+
+  // ★ 真机反馈：`#i-lyric`（三横 + 小圆点）和旁边的播放队列 ☰ 长得几乎一样，放一起分不出来。
+  //   所以 mini 条上那个按钮必须是**汉字「词」**，不许再退回图标。
+  if (!/<button[^>]*id="miniLyric"[^>]*>\s*<span>词<\/span>\s*<\/button>/.test(html))
+    err('★ mini 条的「词」按钮不是纯汉字（图标 #i-lyric 和播放队列 ☰ 太像，会认错）');
+  else ok('★ mini 条的「词」是汉字，不是图标');
+
+  // 状态同步：按钮要跟着"桌面歌词开没开"亮灭（否则点了看不出状态）
+  if (!/const mb = \$\('miniLyric'\)/.test(appjs) || !/mb\.classList\.toggle\('on'/.test(appjs))
+    err('★ updateLyricBtn 没同步 mini 那个「词」按钮 —— 点了不亮、关了不灭');
+  else ok('★ mini「词」按钮跟着桌面歌词状态亮灭');
+  if (!/body\.mini \.mini-actions \.win-btn#miniLyric\.on/.test(css))
+    err('★ style.css 没有 #miniLyric.on 的样式（亮起状态看不出来）');
+  else ok('★ 有 #miniLyric.on 的亮起样式');
+
+  /* ===== B. 歌曲行右侧按钮：悬停 / 一直显示 ===== */
+  if (!/body\.ops-always \.track \.ops\s*\{[^}]*opacity:\s*var\(--ops-alpha/.test(css))
+    err('★ 没有 body.ops-always 那条规则 —— 设置里选「一直显示」不会有任何效果');
+  else ok('★ 有 body.ops-always .track .ops（用 --ops-alpha 控制亮度）');
+  if (!/--ops-alpha:\s*0?\.\d+/.test(css))
+    err('★ :root 没定义 --ops-alpha 默认值 —— var() 取不到值时整条规则会失效');
+  else ok('★ :root 给了 --ops-alpha 默认值');
+  // ★ 反向断言：常显只能动 opacity，不能动 display（动了会让整行宽度跳一下）
+  if (/body\.ops-always \.track \.ops\s*\{[^}]*display:/.test(css))
+    err('★ 常显规则里动了 display —— .ops 一直占着宽度，改成 display 会让列表在切档时跳一下');
+  else ok('★ 反向断言：常显只动 opacity、不动 display（切档不跳）');
+  // ★ 反向断言：挑视频那一屏仍然要藏起来
+  if (!/\.track\.pickable \.ops\s*\{\s*display:\s*none/.test(css))
+    err('★ .track.pickable .ops 的 display:none 没了 —— 挑视频那一屏会冒出一排按钮');
+  else ok('★ 反向断言：挑视频那一屏的按钮仍然 display:none');
+
+  if (!/function applyOpsMode\(\)/.test(appjs) || !/classList\.toggle\('ops-always'/.test(appjs))
+    err('★ 没有 applyOpsMode() —— 设置切了也不会立即生效');
+  else ok('★ 有 applyOpsMode()（切档立即生效，不用重启）');
+
+  /* ★★ 真机反馈：带「合集 N」徽章的行，右边按钮比别的行更靠右。
+     根因是网格 6 列、但元素按条件拼 —— 没有徽章的行少一个元素，自动排布把
+     「时长」塞进徽章列、「操作」塞进时长列，第 6 列空着；空列没宽度但 gap 还在 → 左移 13px。
+     修法是把 ops / dur / badge 按"从右往左数"钉死在固定列上。这三条少一条就会复发。 */
+  if (!/\.track:not\(\.pickable\) \.ops\s*\{[^}]*grid-column:\s*-2/.test(css))
+    err('★ 没有把 .ops 钉在第 6 列 —— 没有徽章的行按钮组会左移 13px（和带徽章的行对不齐）');
+  else ok('★ .ops 钉死在最后一列（-2 / -1）');
+  if (!/\.track:not\(\.pickable\) \.dur\s*\{[^}]*grid-column:\s*-3/.test(css))
+    err('★ 没有把 .dur 钉在第 5 列 —— 时长会跟着徽章有无而左右乱跳');
+  else ok('★ .dur 钉死在第 5 列（-3 / -2）');
+  if (!/\.track:not\(\.pickable\) \.badge,\s*\n?\.track:not\(\.pickable\) \.miss-chip\s*\{[^}]*grid-column:\s*-4/.test(css))
+    err('★ 没有把 .badge / .miss-chip 钉在第 4 列 —— 有徽章时会把时长和按钮一起推走');
+  else ok('★ .badge / .miss-chip 钉死在第 4 列（-4 / -3）');
+  // ★ 反向断言：这几条只许管非勾选态。勾选态是另一套 4 列布局，插手会把复选框那屏挤乱。
+  if (/\.track \.ops\s*\{[^}]*grid-column/.test(css) || /\.track \.dur\s*\{[^}]*grid-column/.test(css))
+    err('★ 列位置规则没限定 :not(.pickable) —— 会把勾选态那套 4 列布局挤乱');
+  else ok('★ 反向断言：列位置规则只作用于非勾选态');
+  if (!/applyOpsMode\(\);\s*\n?\s*\/\*|applyOpsMode\(\)/.test(appjs))
+    err('★ applyAppearance 没调 applyOpsMode —— 启动时不会按存档恢复');
+  else ok('★ 启动时会按存档恢复（applyAppearance 里调了）');
+  if (!htmlIds.has('selListOps') || !htmlIds.has('rngOpsAlpha'))
+    err('★ 设置页缺控件：selListOps（悬停/常显）或 rngOpsAlpha（亮度）');
+  else ok('★ 设置页有两个控件：显示方式 + 亮度');
+  // 老存档零迁移：没这一项就是 'hover'
+  if (!/listOps:\s*old\.listOps === 'always' \? 'always' : DEFAULT_SETTINGS\.listOps/.test(appjs))
+    err('★ migrateSettings 没给 listOps 兜默认值 —— 老存档会拿到 undefined');
+  else ok('★ migrateSettings 给 listOps 兜了默认（老存档 = 悬停，行为不变）');
+  if (!/s\.listOps\s*=/.test(storemigrate) || !/s\.opsOpacity\s*=/.test(storemigrate))
+    err('★ store-migrate.js 没补 listOps / opsOpacity —— 主进程写回存档时会把这两项弄丢');
+  else ok('★ store-migrate.js 也补了这两个字段（主进程那条路不会丢）');
+
+  /* ===== C. 导入收藏夹：新建 / 加入现有 ===== */
+  if (!/async function askImportTarget\(\)/.test(appjs))
+    err('★ 没有 askImportTarget() —— 导入时没法选"加入现有歌单"');
+  else ok('★ 有 askImportTarget()（先问"到哪儿"）');
+  // ★★ 这条是这次踩出来的坑：用 showPrompt() 会把 promptResolve 清成 null，
+  //    closePrompt(v) 没人接，await 永远不返回 —— 弹窗关了但歌没进去。
+  // ★ 必须**切开函数体**再查：openPrompt 里也有一句 `promptResolve = resolve;`，
+  //   不切的话把 askImportTarget 里那句删掉照样"通过"（判别力实测当场抓到）。
+  const aitStart = appjs.indexOf('async function askImportTarget()');
+  const aitBody = aitStart < 0 ? '' : appjs.slice(aitStart, aitStart + 2600);
+  if (/showPrompt\(/.test(aitBody))
+    err('★ askImportTarget 里用了 showPrompt() —— 它会把等待者清成 null，导入流程会静默卡住（必须自己挂 promptResolve）');
+  else ok('★ 反向断言：askImportTarget 没用 showPrompt（用 renderPrompt + 自己挂等待者）');
+  if (!/promptResolve = resolve;/.test(aitBody))
+    err('★ askImportTarget 没自己挂 promptResolve —— closePrompt 找不到人接');
+  else ok('★ askImportTarget 自己挂了 promptResolve');
+  if (!/importPicked[\s\S]{0,600}?await askImportTarget\(\)/.test(appjs))
+    err('★ importPicked 没走 askImportTarget —— 还是只能新建');
+  else ok('★ importPicked 已改为先问"到哪儿"');
+  // ★ 必须切开 addInto 的函数体再查：v2.9.0 的「批量移出」里也有一句
+  //   `list.some((x) => sameTrack(x, t))`，全局 grep 会被它骗过去（判别力实测抓到过一次）。
+  const addIntoBody = (() => {
+    const i = appjs.indexOf('const addInto = async (pl) => {');
+    if (i < 0) return '';
+    const j = appjs.indexOf('\n  };', i);
+    return appjs.slice(i, j < 0 ? i + 700 : j);
+  })();
+  if (!/sameTrack\(x, t\)/.test(addIntoBody))
+    err('★ 加入现有歌单时没按 sameTrack 判重 —— 同一首歌会被塞两遍');
+  else ok('★ 加入现有歌单按 sameTrack 判重（和「加入歌单」同一条规则）');
+  if (!/\.pl-sep\b/.test(css)) err('★ 没有 .pl-sep 样式（现有歌单与「新建」之间那道分隔）');
+  else ok('★ 有 .pl-sep 分隔样式');
+
+  /* ===== ⑨ 离线实测 / 探针必须在 ===== */
+  if (fs.existsSync(path.join(ROOT, '.verify', 'test-round23.js'))) ok('有 .verify/test-round23.js（本轮三处改动的离线实测）');
+  else err('缺少 .verify/test-round23.js —— mini 词开关 / 工具条常显 / 导入落地必须有离线实测');
+  if (fs.existsSync(path.join(ROOT, '.verify', 'probe-viz.js'))) ok('有 .verify/probe-viz.js（律动条频谱可行性探针，留给下一版）');
+  else err('缺少 .verify/probe-viz.js —— 律动条的技术结论靠它，删了以后要重新趟一遍');
+}
+
+/* ---- 61) v2.9.0：「批量下载」→「批量选择」（下载 / 加入歌单 / 喜欢 / 移出） ---- */
+console.log('\n[61] v2.9.0 · 列表的「批量选择」：');
+{
+  /** 切出一段函数体（从函数签名到下一个顶层 `\n}`）。
+   *  ★ 必须切开查，不能直接在整个 app.js 里 grep —— 同名字样在别处出现会误命中，
+   *    上一轮 askImportTarget 就是这么被骗过一次的。 */
+  const bodyOf = (sig) => {
+    const i = appjs.indexOf(sig);
+    if (i < 0) return '';
+    const j = appjs.indexOf('\n}\n', i);
+    return appjs.slice(i, j < 0 ? appjs.length : j);
+  };
+
+  /* ===== ① 工具条那颗按钮换了名 ===== */
+  if (!/id="btnSelectFav"[^`]*?批量选择/.test(appjs) || !/id="btnSelectPl"[^`]*?批量选择/.test(appjs))
+    err('★ 「我喜欢」/「歌单」工具条上的按钮不叫「批量选择」');
+  else ok('★ 工具条：两个列表都改成了「批量选择」');
+
+  if (!/picking \? '退出批量选择' : '批量选择'/.test(appjs))
+    err('★ 进了选择模式后按钮没变成「退出批量选择」');
+  else ok('★ 进模式后按钮变「退出批量选择」（再点一下能出来）');
+
+  // 反向：旧的 btnDownloadFav / btnDownloadPl 不许留 —— 两套并存会有一个是死按钮
+  if (/\bbtnDownloadFav\b/.test(appjs) || /\bbtnDownloadPl\b/.test(appjs))
+    err('★ 旧的 btnDownloadFav / btnDownloadPl 还有残留（两套入口会打架）');
+  else ok('★ 旧的 btnDownloadFav / btnDownloadPl 已清干净');
+
+  // 反向：解析页那颗「批量下载 (N)」**必须留着** —— 那是动作不是模式（整页就是一个视频的曲目）
+  if (!/id="btnDownloadParsed"/.test(appjs))
+    err('★ 解析页的「批量下载 (N)」被误改了 —— 那一页是"直接下整批"，不是选择模式');
+  else ok('★ 解析页的「批量下载 (N)」保持原样（动作，不是模式）');
+
+  /* ===== ② 选择集改名：dlPick → selPick ===== */
+  if (!/let selPick = null;/.test(appjs))
+    err('★ 没有 selPick（选择集）');
+  else ok('★ 选择集变量叫 selPick');
+  // 反向：dlPick 只允许活在注释里（历史说明），不许再有活的代码引用
+  if (/\bdlPick\.selected\b/.test(appjs) || /\bdlPick = /.test(appjs) || /\bif \(dlPick\)/.test(appjs))
+    err('★ 还有活的 dlPick 引用 —— 改名只改了一半（会有一半代码读旧变量）');
+  else ok('★ 没有活的 dlPick 引用（改名改干净了）');
+
+  /* ===== ③ 四个动作 + 按视图分叉 ===== */
+  const acts = ['btnSelDownload', 'btnSelAddPl', 'btnSelFav', 'btnSelRemove'];
+  const missAct = acts.filter((a) => !new RegExp(`id: '${a}'`).test(appjs));
+  if (missAct.length) err(`★ 批量选择的动作缺了：${missAct.join(' / ')}`);
+  else ok('★ 四个动作都在：下载 / 加入歌单 / 喜欢 / 移出');
+
+  if (!/if \(currentView !== 'favorites'\) \{\s*\n\s*acts\.push\(\{ id: 'btnSelFav'/.test(appjs))
+    err('★ 「我喜欢」页里也画了「喜欢」按钮 —— 那一页每首都已经喜欢了，点不出任何反应');
+  else ok('★ 「我喜欢」页不画「喜欢」（那一页全已喜欢，放了就是死按钮）');
+
+  if (!/label: currentView === 'favorites' \? '取消喜欢' : '移出歌单'/.test(appjs))
+    err('★ 移出按钮的文案没按视图分叉（「取消喜欢」/「移出歌单」）');
+  else ok('★ 移出按钮按视图换文案：取消喜欢 / 移出歌单');
+
+  // 破坏性那个必须 danger 配色，且**是最后 push 进去的那一个**（位置固定，别让肌肉记忆点错）。
+  // ★ 还要禁掉 unshift / splice：它们能"看起来写在最后、实际插到前面去"，
+  //   只比文字顺序是查不出来的（判别力实测就是这么漏过一条的）。
+  {
+    const fn = bodyOf('function selActions()');
+    const lastPush = fn.lastIndexOf('acts.push(');
+    const isLast = lastPush >= 0 && fn.indexOf("id: 'btnSelRemove'", lastPush) >= 0;
+    if (!/danger: true/.test(fn)) err('★ 「移出」按钮没标 danger');
+    else if (!isLast || /acts\.unshift\(/.test(fn) || /acts\.splice\(/.test(fn))
+      err('★ 「移出」不是最后 push 进去的按钮 —— 破坏性操作必须永远排在最后（不然肌肉记忆会点错）');
+    else ok('★ 「移出」是 danger 配色、且永远排在最后');
+  }
+
+  /* ===== ④ 两条选择条共用一个渲染器 ===== */
+  if (!/function pickBarHTML\(n, actions, opts\)/.test(appjs))
+    err('★ 没有统一的 pickBarHTML() —— 两条选择条又会各写一份，早晚不一致');
+  else ok('★ 有统一的 pickBarHTML(n, actions, opts)');
+  if (!/return pickBarHTML\(n, selActions\(\), \{ allId: 'btnSelPickAll'/.test(appjs))
+    err('★ 列表那条选择条没走 pickBarHTML');
+  else ok('★ 列表的选择条走 pickBarHTML');
+  if (!/return pickBarHTML\(n, \[/.test(appjs))
+    err('★ 本地歌曲那条选择条没走 pickBarHTML');
+  else ok('★ 本地歌曲的选择条也走 pickBarHTML（两边永远长得一样）');
+
+  if (!/\.bar-sep\b/.test(css)) err('★ 没有 .bar-sep 样式（"选哪些"和"做什么"之间那道竖线）');
+  else ok('★ 有 .bar-sep 分组竖线');
+  // 4 个动作按钮在窄窗口下必须能换行，否则右边那颗「移出」会被裁掉
+  if (!/\.imp-bar-actions \{[^}]*flex-wrap: wrap/.test(css))
+    err('★ .imp-bar-actions 没有 flex-wrap —— 按钮一多，窄窗口下最右边那颗会被裁掉');
+  else ok('★ .imp-bar-actions 允许换行（4 个动作按钮不会挤出内容区）');
+
+  /* ===== ⑤ 下载：跳过本地歌，并且把跳过的数量说出来 ===== */
+  {
+    const fn = bodyOf('async function selDoDownload()');
+    if (!/const dlAble = list\.filter\(\(t\) => t && t\.bvid\)/.test(fn))
+      err('★ 批量下载没筛掉本地歌 —— 本地文件送进下载队列只会报错');
+    else ok('★ 批量下载先筛掉本地歌（只送有 bvid 的）');
+    if (!/note: localN \?/.test(fn))
+      err('★ 跳过几首本地歌没说 —— 用户会以为"选了 5 首怎么只下了 3 首"');
+    else ok('★ 跳过的本地歌数量会拼进提示');
+    if (!/if \(opts\.note\)\s+parts\.push\(opts\.note\)/.test(appjs))
+      err('★ enqueueDownloads 不支持 opts.note —— 跳过说明会被后一条 toast 盖掉');
+    else ok('★ enqueueDownloads 支持 opts.note（拼进同一条 toast）');
+  }
+
+  /* ===== ⑥ 移出：按视图分叉、不弹确认、干完退出模式 ===== */
+  {
+    const fn = bodyOf('async function selDoRemove()');
+    if (!/if \(inFav\)/.test(fn) || !/currentView\.startsWith\('playlist:'\)/.test(fn))
+      err('★ 批量移出没按视图分叉（我喜欢 / 歌单）');
+    else ok('★ 批量移出按视图分叉：我喜欢 / 歌单');
+    if (/askConfirm/.test(fn))
+      err('★ 批量移出弹了确认框 —— 和行内那个垃圾桶口径不一致（那里是直接移的）');
+    else ok('★ 批量移出不弹确认（和行内垃圾桶同口径）');
+    if (!/selPick = null;/.test(fn))
+      err('★ 移出后没退出选择模式 —— 选择集里指着已经不在列表上的行');
+    else ok('★ 移出后自动退出选择模式');
+  }
+
+  /* ===== ⑦ 歌单里混着本地歌也能勾上 ===== */
+  if (!/function selKey\(t\)/.test(appjs) || !/return 'b:' \+ t\.bvid;/.test(appjs) || !/return 'l:' \+ t\.localPath;/.test(appjs))
+    err('★ 没有 selKey()（B 站歌 b: + bvid / 本地歌 l: + localPath）—— 歌单里的本地歌勾不上');
+  else ok('★ selKey() 给两种歌各自的身份键（b: / l:）');
+  if (!/pickIdOf: selKey/.test(appjs))
+    err('★ 列表渲染没传 pickIdOf: selKey —— 本地歌的勾选状态永远显示未勾');
+  else ok('★ 两个列表都传了 pickIdOf: selKey');
+  if (!/const pickId = opts\.pickIdOf \? opts\.pickIdOf\(track\) : track\[pickKey\];/.test(appjs))
+    err('★ trackRow 不认 pickIdOf');
+  else ok('★ trackRow 认 pickIdOf（取身份键的口子）');
+
+  /* ===== ⑧ 干完能自动退出（换页也退出） ===== */
+  if (!/if \(selPick && selPick\.view !== currentView\) selPick = null;/.test(appjs))
+    err('★ 换页不会退出选择模式 —— 跑到「发现」会发现每行都带勾选框');
+  else ok('★ 换页自动退出选择模式');
+  // ★ 注意：appjs 是**去掉注释之后**的源码（见文件顶部 stripLine/stripBlock），
+  //   所以这里只能按代码形状断言，不能靠注释里的文字。
+  if (!/\n  if \(selPick\) selPick = null;/.test(appjs))
+    err('★ 下载排完队列后没退出选择模式');
+  else ok('★ 下载排完队列后退出选择模式');
+
+  /* ===== ⑨ 离线实测必须在 ===== */
+  if (fs.existsSync(path.join(ROOT, '.verify', 'test-round24.js'))) ok('有 .verify/test-round24.js（批量选择四个动作的离线实测）');
+  else err('缺少 .verify/test-round24.js —— 四个动作必须真的点一遍');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 61 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

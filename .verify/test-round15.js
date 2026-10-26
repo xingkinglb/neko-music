@@ -202,7 +202,9 @@ app.whenReady().then(async () => {
       hasSrcUp: !!document.getElementById('btnImpUp'),
       hasSrcFav: !!document.getElementById('btnImpFav'),
       promptShown: !!(document.getElementById('promptMask') || {}).classList && document.getElementById('promptMask').classList.contains('show'),
-      promptValue: (document.getElementById('promptInput') || {}).value || '',
+      // v2.9.0：导入落地改成两步 —— 第一步问「到哪儿」，第二步才是命名框（#impName）。
+      //   这里两个都读，谁在就用谁（老代码只有 #promptInput）。
+      promptValue: (document.getElementById('impName') || document.getElementById('promptInput') || {}).value || '',
     };
   })()`);
 
@@ -482,6 +484,21 @@ app.whenReady().then(async () => {
 
   await click('#btnImpDo');
   await sleep(400);
+  /* v2.9.0：点「导入」后先问「到哪儿」。
+     ★ 本组跑到这里时 DB.playlists 还是空的 → 应该**直接进命名屏**（不显示空列表，也不多问一次）。
+       有歌单时的"列出已有歌单 / 并进已有"由 test-round23 的 C 组覆盖。 */
+  const n12tgt = await evalJS(`({
+    shown: document.getElementById('promptMask').classList.contains('show'),
+    rows: document.querySelectorAll('#promptBody .pl-row').length,
+    hasNew: !!document.getElementById('impNew'),
+    hasName: !!document.getElementById('impName'),
+  })`);
+  say('  弹窗=' + n12tgt.shown + '；已有歌单行=' + n12tgt.rows + '；新建按钮=' + n12tgt.hasNew + '；命名框=' + n12tgt.hasName);
+  if (n12tgt.shown) ok('点「导入」弹出了窗');
+  else bad('点「导入」没弹窗');
+  if (n12tgt.rows === 0 && n12tgt.hasName) ok('★ 一个歌单都没有 → 直接进命名屏（不多问一次）');
+  else bad('空歌单时没有直接进命名屏：' + JSON.stringify(n12tgt));
+
   const n12b = await readImp();
   say('  命名框弹出=' + n12b.promptShown + '；默认名=' + JSON.stringify(n12b.promptValue));
   if (n12b.promptShown) ok('弹出了命名框');
@@ -489,9 +506,9 @@ app.whenReady().then(async () => {
   if (n12b.promptValue === '深夜爵士') ok('默认名 = 收藏夹名「深夜爵士」');
   else bad('默认名不对：' + JSON.stringify(n12b.promptValue));
 
-  await evalJS(`(() => { const i = document.getElementById('promptInput'); i.value = '我的爵士歌单'; return true; })()`);
+  await evalJS(`(() => { const i = document.getElementById('impName'); i.value = '我的爵士歌单'; return true; })()`);
   saveCalls = 0;
-  await click('#promptOk');
+  await click('#impOk');
   await sleep(600);
   const after = await evalJS(`({
     plCount: DB.playlists.length,

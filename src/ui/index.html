@@ -429,11 +429,19 @@
       </div>
     </div>
 
-    <!-- mini 模式专用：关闭 / 回到完整模式。平时藏起来，只在 body.mini 下显示。
-         顺序照图2：✕ 在左、▢（还原）在最右角 —— 和 Windows 把"关闭"放在最角上不同，
-         这里故意让最角上是"回到完整模式"，免得手一抖就把程序关掉。 -->
+    <!-- mini 模式专用：「桌面歌词」开关 + 回到完整模式。平时藏起来，只在 body.mini 下显示。
+         ★ v2.9.0：原来这里是 ✕（关程序），换成了「词」。
+           理由：mini 下本来就点不到歌词按钮（.lyric-wrap 在 mini 里是藏起来的），
+           而关程序这条路已经有三条（托盘菜单退出 / Alt+F4 / 回完整模式再点 ✕），
+           反倒是"一边缩在小窗里一边把词浮到桌面上"才是 mini 的常用姿势。
+         ★ 这里**写汉字「词」而不是图标**：`#i-lyric` 那枚图标是"三横 + 一个小圆点"，
+           和旁边的播放队列 ☰ 长得几乎一样，放一起分不出来（真机反馈过）。
+           一个字最省事、也最不会认错。
+         ★ 最角上仍然是"回到完整模式"（和 Windows 把关闭放最角上的习惯相反）——
+           免得手一抖就把程序关了。宽度也没变：两个按钮都是 32px，
+           所以第一行的排版余量一点没动（见 style.css 里 .player 那段宽度核算）。 -->
     <div class="mini-actions" id="miniActions">
-      <button class="win-btn close" id="miniClose" title="关闭" aria-label="关闭"><svg class="ic"><use href="#i-win-close"/></svg></button>
+      <button class="win-btn ml-word" id="miniLyric" title="桌面歌词" aria-label="桌面歌词"><span>词</span></button>
       <button class="win-btn" id="btnRestoreFull" title="回到完整模式" aria-label="回到完整模式"><svg class="ic"><use href="#i-win-expand"/></svg></button>
     </div>
   </footer>
@@ -669,6 +677,28 @@
           <div class="field-label">面板不透明度 <b id="valAlpha">12%</b></div>
           <input type="range" id="rngGlassAlpha" min="0" max="40" value="12" />
           <div class="field-hint">四块框架（标题栏 / 侧栏 / 搜索栏 / 播放条）比内容区<b>多压</b>多少。拖到 0 = 面板和内容区一样透，背景就铺满整个界面。</div>
+        </div>
+
+        <!-- ========== 歌曲行右侧按钮（v2.9.0） ==========
+             以前只有"鼠标移到这一行才显示"一种。有人喜欢一直看得见（不用每次找），
+             有人嫌一屏十几行全是按钮太吵 —— 所以给两档，默认仍是老行为。
+             ★ 切档只动 opacity、不动 display：那排按钮一直占着宽度，切换不会让列表跳一下。 -->
+        <div class="field">
+          <div class="field-label">歌曲行右侧按钮</div>
+          <select id="selListOps">
+            <option value="hover">鼠标移到这一行才显示（默认）</option>
+            <option value="always">一直显示</option>
+          </select>
+          <div class="field-hint">
+            就是收藏 / 加入歌单 / 下载 / 详情 / 移除那一排小图标。<br />
+            选「一直显示」时会先压暗，鼠标移到某一行它才提亮 —— 免得整屏都是按钮。
+          </div>
+        </div>
+
+        <div class="field" id="fieldOpsAlpha">
+          <div class="field-label">常显时的亮度 <b id="valOpsAlpha">55%</b></div>
+          <input type="range" id="rngOpsAlpha" min="20" max="100" step="5" value="55" />
+          <div class="field-hint">只在上面选了「一直显示」时有用。拖满 = 一直全亮。</div>
         </div>
 
         <button class="ghost-btn" id="btnResetAppearance">恢复默认外观</button>

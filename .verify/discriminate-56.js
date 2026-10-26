@@ -34,11 +34,11 @@ const CASES = [
     expect: '没有用 Set.has 做精确匹配',
   },
   {
-    name: '「我喜欢」的批量下载按钮被删掉',
+    name: '「我喜欢」的「批量选择」按钮被删掉',
     file: 'src/ui/app.js',
-    from: 'id="btnDownloadFav"',
+    from: 'id="btnSelectFav"',
     to:   'id="btnNoSuchFav"',
-    expect: '工具条上没有「批量下载」按钮',
+    expect: '工具条上没有「批量选择」按钮',
   },
   {
     name: '两处下载默认值写歪（并发 2 vs 3）',
@@ -390,6 +390,108 @@ const CASES = [
     from: '.local-side {',
     to:   '.local-sideX {',
     expect: '.local-side',
+  },
+
+  /* ===== v2.9.0 新增 4 条 ===== */
+  {
+    name: 'v2.9.0：mini 的「词」按钮没绑上（点了没反应）',
+    file: 'src/ui/app.js',
+    from: "$('miniLyric').addEventListener('click', () => toggleDesktopLyric());",
+    to:   "$('miniLyric').addEventListener('click', () => {});",
+    expect: '#miniLyric 没绑到 toggleDesktopLyric',
+  },
+  {
+    name: 'v2.9.0：常显规则被改成 opacity:0（设置里选了也没效果）',
+    file: 'src/ui/style.css',
+    from: 'body.ops-always .track .ops { opacity: var(--ops-alpha, 0.55); }',
+    to:   'body.ops-always .track .ops { opacity: 0; }',
+    expect: '没有 body.ops-always 那条规则',
+  },
+  {
+    name: 'v2.9.0：askImportTarget 用 showPrompt（等待者被清空，导入静默卡住）',
+    file: 'src/ui/app.js',
+    from: '      promptResolve = resolve;          // 每换一屏都重新挂一次',
+    to:   '      promptResolve = null;            // 每换一屏都重新挂一次',
+    expect: '没自己挂 promptResolve',
+  },
+  {
+    name: 'v2.9.0：加入现有歌单不判重（同一首歌被塞两遍）',
+    file: 'src/ui/app.js',
+    from: '      if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added += 1; }',
+    to:   '      if (true) { pl.tracks.push(t); added += 1; }',
+    expect: '没按 sameTrack 判重',
+  },
+  {
+    name: 'v2.9.0 修订：.ops 不再钉死在最后一列（带徽章的行按钮会右移）',
+    file: 'src/ui/style.css',
+    from: '.track:not(.pickable) .ops        { grid-column: -2 / -1; }',
+    to:   '.track:not(.pickable) .ops        { grid-column: auto; }',
+    expect: '没有把 .ops 钉在第 6 列',
+  },
+  {
+    name: 'v2.9.0 修订：mini 的「词」退回图标（和播放队列 ☰ 认不出来）',
+    file: 'src/ui/index.html',
+    from: '<button class="win-btn ml-word" id="miniLyric" title="桌面歌词" aria-label="桌面歌词"><span>词</span></button>',
+    to:   '<button class="win-btn ml-word" id="miniLyric" title="桌面歌词" aria-label="桌面歌词"><svg class="ic"><use href="#i-lyric"/></svg></button>',
+    expect: '不是纯汉字',
+  },
+
+  /* ===== v2.9.0 追加：「批量下载」→「批量选择」 ===== */
+  {
+    name: '★ 批量选择：我喜欢页也画了「喜欢」（那一页全已喜欢，死按钮）',
+    file: 'src/ui/app.js',
+    from: "  if (currentView !== 'favorites') {\n    acts.push({ id: 'btnSelFav'",
+    to:   "  if (currentView !== 'nosuchview') {\n    acts.push({ id: 'btnSelFav'",
+    expect: '「我喜欢」页里也画了「喜欢」按钮',
+  },
+  {
+    name: '★ 批量选择：本地那条选择条不再共用 pickBarHTML',
+    file: 'src/ui/app.js',
+    from: '  return pickBarHTML(n, [\n    { id: \'btnLocalFav\'',
+    to:   '  const _s = pickBarHTML(n, [\n    { id: \'btnLocalFav\'',
+    expect: '本地歌曲那条选择条没走 pickBarHTML',
+  },
+  {
+    name: '★ 批量选择：selKey 的本地歌分支打错字（歌单里的本地歌勾不上）',
+    file: 'src/ui/app.js',
+    from: "  if (t.localPath) return 'l:' + t.localPath;",
+    to:   "  if (t.localPath) return 'l:' + t.localPathx;",
+    expect: '没有 selKey()',
+  },
+  {
+    name: '★ 批量选择：批量下载没筛掉本地歌（本地文件送进下载队列）',
+    file: 'src/ui/app.js',
+    from: '  const dlAble = list.filter((t) => t && t.bvid);',
+    to:   '  const dlAble = list.slice();',
+    expect: '批量下载没筛掉本地歌',
+  },
+  {
+    name: '★ 批量选择：批量移出弹了确认框（和行内垃圾桶口径不一致）',
+    file: 'src/ui/app.js',
+    from: "  const inFav = currentView === 'favorites';",
+    to:   "  const inFav = currentView === 'favorites';\n  await askConfirm('x', 'y');",
+    expect: '批量移出弹了确认框',
+  },
+  {
+    name: '★ 批量选择：换页不退出选择模式（跑到「发现」每行都带勾选框）',
+    file: 'src/ui/app.js',
+    from: '  if (selPick && selPick.view !== currentView) selPick = null;',
+    to:   '  if (false) selPick = null;',
+    expect: '换页不会退出选择模式',
+  },
+  {
+    name: '★ 批量选择：动作按钮不换行（窄窗口下最右边那颗被裁掉）',
+    file: 'src/ui/style.css',
+    from: '.imp-bar-actions { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 8px; }',
+    to:   '.imp-bar-actions { display: inline-flex; align-items: center; gap: 8px; row-gap: 8px; }',
+    expect: '.imp-bar-actions 没有 flex-wrap',
+  },
+  {
+    name: '★ 批量选择：把「移出」挪到最前面（破坏性操作不该夹在中间）',
+    file: 'src/ui/app.js',
+    from: "  acts.push({\n    id: 'btnSelRemove',\n    icon: 'i-trash',\n    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n    danger: true,\n  });",
+    to:   "  acts.unshift({\n    id: 'btnSelRemove',\n    icon: 'i-trash',\n    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n    danger: true,\n  });",
+    expect: '不是最后 push 进去的按钮',
   },
 ];
 

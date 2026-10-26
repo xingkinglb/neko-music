@@ -103,6 +103,9 @@ let DB = {
              pauseOnBlur: true },
     glass: { blur: 12, frameAlpha: 0.12, mode: 'prebake' },
     autoLyric: false,
+    // v2.9.0（见 DEFAULT_SETTINGS 里的说明）
+    listOps: 'hover',
+    opsOpacity: 55,
   },
 };
 
@@ -124,12 +127,25 @@ let dlFilter = 'all';      // 下载管理页当前筛的是哪一类：all / do
    所以只在这些东西变化时重算一次，见 rebuildDlKeys()。 */
 let dlKeys = new Set();
 
-/* 「批量下载」的勾选模式（我喜欢 / 歌单的工具条点进去）。
+/* 「批量选择」模式（我喜欢 / 歌单的工具条点进去）。
    ★ 为什么不复用 impState：那是「导入我的 B 站收藏夹」的状态机，带着 step / folders /
      source 一整套；这里只要一个选择集。
-     但**选择集的形状故意做成一样的**（Map<bvid, track>），
-     这样 trackRow 里那套"按 bvid 反查勾没勾上"的渲染分支可以原样共用。 */
-let dlPick = null;         // { selected: Map<bvid, track> }；null = 不在勾选模式
+     但**选择集的形状故意做成一样的**（Map<key, track>），
+     这样 trackRow 里那套"按 key 反查勾没勾上"的渲染分支可以原样共用。
+   ★ v2.9.0 修订：这个变量原来叫 dlPick（只服务于"批量下载"），现在同一条工具条上
+     挂了 下载 / 加入歌单 / 喜欢 / 移出 四种动作，名字跟着改成 selPick。
+     键也从"裸 bvid"换成了 selKey()（带 b: / l: 前缀）—— 因为**歌单里可能混着本地歌**，
+     本地歌没有 bvid，不换键的话它们在列表里根本勾不上。 */
+let selPick = null;        // { view, selected: Map<key, track> }；null = 不在选择模式
+
+/** 选择集里一首歌的键。B 站歌用 bvid，本地歌用 localPath，前缀区分开
+ *  （理论上不会撞，但带上前缀就永远不用去想"会不会撞"这件事）。 */
+function selKey(t) {
+  if (!t) return '';
+  if (t.bvid) return 'b:' + t.bvid;
+  if (t.localPath) return 'l:' + t.localPath;
+  return '';
+}
 
 /* 「本地歌曲」左栏当前选中的文件夹组（v2.8.0 修订）。
    null / 'all' = 全部歌曲；'download' | 'imported' | 'folder:<root>' = 某个分组。
@@ -140,7 +156,7 @@ let localFilter = 'all';
 
 /* 「本地歌曲」的批量选择模式（v2.8.0 修订）。
    ★ 复用 download 那套 .track.pickable 渲染，但选择集换成本地歌的身份 —— 本地歌没有 bvid，
-     所以这里用 **localPath** 当 key。dlPick / impState 都是 Map<bvid, ...>，用途不同、不能混。
+     所以这里用 **localPath** 当 key。selPick / impState 都是 Map<bvid, ...>，用途不同、不能混。
    { selected: Map<localPath, track>, view: 'local' }；null = 不在勾选模式。 */
 let localPick = null;
 
@@ -545,6 +561,12 @@ const DEFAULT_SETTINGS = {
   // v2.3.0：自定义快捷键。★ 只存"和默认不一样的那几条"（空对象 = 全用默认），
   // 所以老存档零迁移：没有这一项就是全默认，行为和以前一模一样。
   keys: {},
+  // v2.9.0：歌曲行右侧那排小按钮（♡ / ＋ / 下载 / 详情 / 移除）什么时候出现。
+  //   'hover'  = 鼠标移到这一行才显示（老行为，默认）
+  //   'always' = 一直显示（但压暗到 opsOpacity，鼠标到这一行再提亮）
+  // ★ 默认保持 'hover' —— 老存档读进来行为一模一样，不给人"更新完界面突然变吵"的惊吓。
+  listOps: 'hover',
+  opsOpacity: 55,     // 常显时的不透明度（20-100），只对 'always' 生效
   // v2.8.0：下载。默认值抽在 DOWNLOAD_DEFAULTS 里（理由见那里的注释）。
   download: Object.assign({}, DOWNLOAD_DEFAULTS),
 };
@@ -642,6 +664,11 @@ function migrateSettings() {
     keys: sanitizeKeys(old.keys),
     // v2.8.0：下载设置。老存档没有这一项 → 全默认（dir 为 null，第一次下载时才问）。
     download: sanitizeDownload(old.download),
+    // v2.9.0：歌曲行工具条。老存档没有 → 'hover'（和以前完全一样）。
+    listOps: old.listOps === 'always' ? 'always' : DEFAULT_SETTINGS.listOps,
+    // 亮度：只认 20-100 的数字，其余（手改坏了的存档）回落到默认 55
+    opsOpacity: (typeof old.opsOpacity === 'number' && old.opsOpacity >= 20 && old.opsOpacity <= 100)
+      ? Math.round(old.opsOpacity) : DEFAULT_SETTINGS.opsOpacity,
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -810,6 +837,30 @@ function syncGlassImage() {
   else glassImgTimer = setTimeout(run, 300);   // 只是拖强度滑杆：攒 300ms 再糊一次
 }
 
+/**
+ * v2.9.0：歌曲行右侧那排小按钮（♡ / ＋ / 下载 / 详情 / 移除）的显示方式。
+ *
+ *   listOps = 'hover'  → 鼠标移到这一行才显示（老行为）
+ *   listOps = 'always' → 一直显示，但压暗到 opsOpacity；鼠标到这一行再提亮
+ *
+ * ★ 为什么"一直显示"能做得这么轻：.track .ops 原本用的是 `opacity: 0` 而不是
+ *   `display: none` —— 那 4 个按钮**一直占着宽度**，只是透明。所以切成常显
+ *   **不会引起任何布局跳动**，只是把不透明度提上来。别哪天图省事把它改成
+ *   display: none，那这个功能就会连带把整行挤一下。
+ *
+ * ★ 为什么常显时默认只给 55%：一屏十几行、每行 4 个实心按钮，全亮会变成"按钮墙"，
+ *   歌名的视觉重心会被抢走。压暗 + 悬停提亮是 Apple Music / Spotify 的处理方式。
+ *   觉得暗的人可以自己去设置里把亮度拉满（opsOpacity）。
+ */
+function applyOpsMode() {
+  const s = DB.settings;
+  const always = s.listOps === 'always';
+  document.body.classList.toggle('ops-always', always);
+  // 亮度用 CSS 变量传下去，CSS 里只写 opacity: var(--ops-alpha)
+  const a = Math.min(100, Math.max(20, Number(s.opsOpacity) || 55));
+  document.documentElement.style.setProperty('--ops-alpha', String(a / 100));
+}
+
 /** 把 DB.settings 里的外观设置"刷"到界面上 */
 function applyAppearance() {
   const s = DB.settings;
@@ -831,6 +882,9 @@ function applyAppearance() {
   document.body.classList.toggle('glass-live',    glassMode === 'live');
   document.body.classList.toggle('glass-prebake', glassMode === 'prebake');
   document.body.classList.toggle('glass-plain',   glassMode === 'plain');
+
+  // 2.5) v2.9.0：歌曲行右侧那排小按钮 —— 悬停显示 / 一直显示，以及常显时的亮度。
+  applyOpsMode();
 
   // 3) 背景：图片走 .bg-image 的 CSS 背景（--bg-image），视频走 <video id="bgVideo">；同一时刻只用一种
   const layer = $('bgLayer');
@@ -1381,9 +1435,11 @@ function trackRow(track, i, opts = {}) {
   //   不显式传就退回导入页那个 —— 这样导入页那三屏一个字都不用改。
   // v2.8.0 修订：本地歌曲批量选择也用这套，但本地歌**没有 bvid**，
   //   所以按 opts.pickKey（默认 'bvid'）取身份键 —— 本地歌传 'localPath' 进来。
+  // ★ v2.9.0：再给一个 opts.pickIdOf(track) 的口子 —— "批量选择"模式下歌单里可能
+  //   同时躺着 B 站歌和本地歌，一个固定的字段名取不到统一身份，只能由调用方给函数。
   const pickKey = opts.pickKey || 'bvid';
   const pickSet = opts.pick ? (opts.pickSet || (impState && impState.selected) || null) : null;
-  const pickId = track[pickKey];
+  const pickId = opts.pickIdOf ? opts.pickIdOf(track) : track[pickKey];
   const picked = !!(pickSet && pickId && pickSet.has(pickId));
 
   // 作者名：知道 UP 的 mid 就做成可点的（点开看这个 UP 的全部视频），
@@ -1740,7 +1796,7 @@ let collectState = null;   // 面板开着时才有值：{ bvid, title, baseSub,
 
 /**
  * 选集面板的「批量下载」勾选态（v2.8.0）。
- * ★ 为什么单独一份、不复用 dlPick：dlPick 是**绑在某个列表视图上**的
+ * ★ 为什么单独一份、不复用 selPick：selPick 是**绑在某个列表视图上**的
  *   （它按 `currentTracks()[i]` 取曲目），而面板里的条目是"这个合集的第 N 集"，
  *   压根不在当前视图的列表里。硬塞进去会取到别的歌。
  *   形状：{ selected: Map<entryKey, entry> }；null = 不在勾选态。
@@ -2242,9 +2298,11 @@ function renderMiniList() {
 /** 绑定 mini 模式的所有交互 */
 function bindMini() {
   $('btnMini').addEventListener('click', () => setMini(true, false));
-  // mini 窗右上角那两个：▢ 回完整模式、✕ 关程序
+  // mini 窗右上角那两个：「词」开关（桌面歌词）+ ▢ 回完整模式
+  // ★ v2.9.0：原来左边那个是 ✕（关程序），换成了「词」。关程序的入口还剩三条：
+  //   托盘菜单的「退出」、Alt+F4、回完整模式后点右上角 ✕ —— 所以没有"关不掉"的风险。
   $('btnRestoreFull').addEventListener('click', () => setMini(false, false));
-  $('miniClose').addEventListener('click', () => window.neko.winClose());
+  $('miniLyric').addEventListener('click', () => toggleDesktopLyric());
 
   // 展开态列表里：点整行跳播、点垃圾桶从队列拿掉（和右侧抽屉同一套动作）
   $('miniList').addEventListener('click', (e) => {
@@ -2817,7 +2875,7 @@ function renderParsed() {
 /* ---------- 页面 3：我的收藏 ---------- */
 function renderFavorites() {
   currentView = 'favorites';
-  const picking = !!dlPick;   // v2.8.0：正在批量勾选
+  const picking = !!selPick;   // v2.9.0：正在批量选择
   content().innerHTML = `
     <div class="block-head">
       <div>
@@ -2826,15 +2884,18 @@ function renderFavorites() {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayFav">${ic('i-play')}<span>播放全部</span></button>
-        <button class="ghost-btn${picking ? ' on' : ''}" id="btnDownloadFav">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
+        <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectFav">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
       </div>
     </div>
-    ${picking ? dlBarHTML() : ''}
+    ${picking ? selBarHTML() : ''}
     ${trackListHTML(DB.favorites, {
       // 勾选模式下把「移除」收起来：一行里"点一下是勾选、旁边那个点一下是删掉"太容易点错
       remove: !picking,
       pick: picking,
-      pickSet: picking ? dlPick.selected : null,
+      pickSet: picking ? selPick.selected : null,
+      // v2.9.0：键由 selKey() 统一算（B 站歌 b: + bvid，本地歌 l: + localPath）——
+      //   歌单里两种歌可能混着，固定字段名取不到统一身份。
+      pickIdOf: selKey,
       emptyIcon: 'i-heart',
       emptyText: '还没有收藏任何歌',
       emptyHint: '在列表里点「收藏」，或者按播放条上的小爱心',
@@ -2862,7 +2923,7 @@ function renderPlaylist(playlistId) {
   const pl = DB.playlists.find((p) => p.id === playlistId);
   if (!pl) { currentView = 'discovery'; return renderAll(); }   // 歌单没了（被删）→ 回「发现」首页
   currentView = 'playlist:' + playlistId;
-  const picking = !!dlPick;   // v2.8.0：正在批量勾选
+  const picking = !!selPick;   // v2.9.0：正在批量选择
   content().innerHTML = `
     <div class="block-head">
       <div>
@@ -2871,16 +2932,17 @@ function renderPlaylist(playlistId) {
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayPl">${ic('i-play')}<span>播放全部</span></button>
-        <button class="ghost-btn${picking ? ' on' : ''}" id="btnDownloadPl">${ic('i-download')}<span>${picking ? '退出批量下载' : '批量下载'}</span></button>
+        <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectPl">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
         <button class="ghost-btn" id="btnRenamePl">重命名</button>
         <button class="ghost-btn" id="btnDelPl">删除歌单</button>
       </div>
     </div>
-    ${picking ? dlBarHTML() : ''}
+    ${picking ? selBarHTML() : ''}
     ${trackListHTML(pl.tracks, {
       remove: !picking,
       pick: picking,
-      pickSet: picking ? dlPick.selected : null,
+      pickSet: picking ? selPick.selected : null,
+      pickIdOf: selKey,   // 歌单里可能混着本地歌，键由 selKey() 统一算
       emptyIcon: 'i-note',
       emptyText: '这个歌单还是空的',
       emptyHint: '去搜索页面，用「＋歌单」把歌加进来',
@@ -3466,21 +3528,119 @@ function impDefaultName() {
 }
 
 /* ---------- 屏 5：命名 + 落地 ---------- */
+/**
+ * v2.9.0：导入到哪儿 —— 新建一个歌单，还是并进已有的那个。
+ *
+ * 以前只有"新建"一条路，想并进已有歌单得导完再逐首「加入歌单」，很别扭。
+ * 现在落地前先问一句，两个选项就在同一个弹窗里。
+ *
+ * @returns {Promise<{mode:'new', name:string} | {mode:'existing', id:string} | null>}
+ *          null = 用户取消（调用方要原样退出，**不要**清选择集）
+ *
+ * ★ 为什么不直接复用 pickPlaylistFor()：那个函数自己就会 closePrompt() + toast，
+ *   而导入这条流程收尾还要"清选择集 + 跳到目标歌单"，两套收尾硬套在一起会打架。
+ *   但**样式沿用同一套**（.pl-row / .pl-new / .pl-list），所以看起来完全一致。
+ */
+async function askImportTarget() {
+  const count = impState ? impState.selected.size : 0;
+  const defName = impDefaultName();
+  const list = DB.playlists;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; closePrompt(v); };
+
+    /* ★ 这里必须自己挂等待者（promptResolve = resolve），不能用 showPrompt() ——
+       那个函数是给"弹完就算了、不需要返回值"的弹窗用的，它会把 promptResolve 清成 null，
+       于是 closePrompt(v) 找不到人接，await 就永远不返回（整条导入流程静默卡住）。
+       第一版就是踩了这个坑：弹窗关了、歌没进去、选择集也没清。 */
+    const show = (title, bodyHTML, footHTML) => {
+      renderPrompt(title, bodyHTML, footHTML);
+      promptResolve = resolve;          // 每换一屏都重新挂一次
+      $('promptMask').classList.add('show');
+    };
+
+    /* 视图 1：选择落地方式 */
+    const showPick = () => {
+      const rows = list.map((p) => `
+        <button class="pl-row" data-pl="${p.id}">
+          <span>${esc(p.name)}</span><span class="n">${p.tracks.length}</span>
+        </button>`).join('');
+
+      show(`导入 ${count} 首到哪儿`,
+        `<div class="pl-list">${rows || ''}</div>` +
+        (rows ? `<div class="pl-sep">或者</div>` : '') +
+        `<button class="pl-new" id="impNew">${ic('i-plus')}<span>新建一个歌单…</span></button>`,
+        `<button class="ghost-btn" id="impCancel">取消</button>`);
+
+      $('impCancel').addEventListener('click', () => done(null));
+      $('impNew').addEventListener('click', showNew);
+      $('promptBody').querySelectorAll('.pl-row').forEach((el) => {
+        el.addEventListener('click', () => done({ mode: 'existing', id: el.dataset.pl }));
+      });
+    };
+
+    /* 视图 2：新建（名字预填，回车即导入） */
+    const showNew = () => {
+      show('新建歌单',
+        `<input class="prompt-input" id="impName" type="text" value="${esc(defName)}" />`,
+        `<button class="ghost-btn" id="impBack">返回</button>` +
+        `<button class="primary-btn" id="impOk">导入</button>`);
+      const input = $('impName');
+      input.focus();
+      input.select();
+      const submit = () => {
+        const v = (input.value || '').trim();
+        if (!v) { toast('名字不能为空'); return; }
+        done({ mode: 'new', name: v });
+      };
+      $('impOk').addEventListener('click', submit);
+      $('impBack').addEventListener('click', showPick);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    };
+
+    // 一个歌单都没有 → 直接进"新建"，少点一下
+    if (list.length) showPick(); else showNew();
+  });
+}
+
 async function importPicked() {
   if (!impState) return;
   const picked = [...impState.selected.values()].map((v) => v.track);
   if (!picked.length) { toast('还没选任何视频'); return; }
 
-  const name = await askName('新建歌单', impDefaultName(), '导入');
-  if (!name) return;
+  const target = await askImportTarget();
+  if (!target) return;                     // 取消 → 选择集原样留着，用户还能接着挑
 
-  const pl = { id: uid(), name, tracks: picked };
-  DB.playlists.push(pl);
+  let pl = null;
+  let added = 0;
+
+  if (target.mode === 'new') {
+    pl = { id: uid(), name: target.name, tracks: picked.slice() };
+    DB.playlists.push(pl);
+    added = picked.length;
+  } else {
+    pl = DB.playlists.find((p) => p.id === target.id);
+    if (!pl) { toast('那个歌单已经不在了'); return; }
+    // ★ 判重走全局唯一的 sameTrack()（本地歌按 localPath、网络歌按 bvid），
+    //   和「加入歌单」弹窗用的是同一条规则 —— 两处各写一套判等，迟早对不上。
+    picked.forEach((t) => {
+      if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added += 1; }
+    });
+  }
+
   await persist();
   // ★ 导入成功 = 选择集该清空的时刻之一（另一个是「清空选择」）
   impState.selected.clear();
-  toast(`已导入 ${picked.length} 首到新歌单「${name}」`);
-  // 跳到刚建好的歌单（走 renderAll 才会把侧栏的歌单列表一起刷出来）
+
+  // 提示必须说清"进没进去、进去几首" —— 只说"已导入"会让人以为重复的也被塞进去了
+  const skipped = picked.length - added;
+  if (target.mode === 'new') toast(`已导入 ${added} 首到新歌单「${pl.name}」`);
+  else if (!added) toast(`这 ${picked.length} 首都已经在「${pl.name}」里了`);
+  else if (skipped) toast(`已把 ${added} 首加入「${pl.name}」，${skipped} 首已在歌单里`);
+  else toast(`已把 ${added} 首加入「${pl.name}」`);
+
+  // 跳到目标歌单（走 renderAll 才会把侧栏的歌单列表一起刷出来）
   currentView = 'playlist:' + pl.id;
   renderAll();
 }
@@ -3831,9 +3991,12 @@ async function enqueueDownloads(tracks, opts = {}) {
   if (res.skipped)    parts.push(`${res.skipped} 首本地已有`);
   if (res.duplicates) parts.push(`${res.duplicates} 首已在队列`);
   if (failed)         parts.push(`${failed} 首取不到`);
+  // ★ v2.9.0：调用方可以补一句"另外还有 N 首没送进来"（比如批量选择时混着本地歌）。
+  //   必须拼进同一条 toast —— toast 是"后来居上"的，先弹一句再调这个函数会被立刻盖掉。
+  if (opts.note)      parts.push(opts.note);
   toast(parts.length ? parts.join(' · ') : '没有新的可下载曲目');
 
-  if (dlPick) dlPick = null;                     // 批量勾选干完了 → 退出勾选模式
+  if (selPick) selPick = null;                   // 批量选择干完了 → 退出选择模式
   if (collectPick) collectPick = null;           // 选集面板的勾选态同理
   await refreshDownloads();
   if (jump && res.added) currentView = 'downloads';
@@ -3888,57 +4051,176 @@ function syncDownloadBtn() {
   }
 }
 
-/* ---------------- 批量勾选模式 ---------------- */
+/* ---------------- 列表的「批量选择」模式（我喜欢 / 歌单） ---------------- */
 
-/** 工具条上「批量下载」：进入 / 退出勾选模式（我喜欢、歌单两个视图共用） */
-function toggleDlPick() {
-  if (dlPick) { dlPick = null; renderAll(); return; }
+/** 工具条上「批量选择」：进入 / 退出选择模式（我喜欢、歌单两个视图共用）。
+ *  ★ v2.9.0：原来叫 toggleDlPick（那条工具条上只有"批量下载"一个动作），
+ *    现在同一条条上挂了 下载 / 加入歌单 / 喜欢 / 移出 四种动作，所以整体改成 sel 前缀。 */
+function toggleSelPick() {
+  if (selPick) { selPick = null; renderAll(); return; }
   // 把"从哪个视图进来的"记下来：换页就自动退出，不然跑到「发现」会发现每行都带勾选框
-  dlPick = { view: currentView, selected: new Map() };
+  selPick = { view: currentView, selected: new Map() };
   renderAll();
 }
 
-/** 勾选模式下那条「已选 N 首 · 全选 · 清空 · 开始下载」（复用导入页 .imp-bar 的样式） */
-function dlBarHTML() {
-  const n = dlPick ? dlPick.selected.size : 0;
+/** 勾选态那条工具条。动作按钮按当前视图变（见 selActions）。 */
+function selBarHTML() {
+  const n = selPick ? selPick.selected.size : 0;
+  return pickBarHTML(n, selActions(), { allId: 'btnSelPickAll', noneId: 'btnSelPickNone' });
+}
+
+/**
+ * 当前视图下「批量选择」能做的几件事。
+ *
+ * ★ 为什么按视图变，而不是四个按钮永远都在：
+ *   · 「我喜欢」页里每一首都已经喜欢了 —— 再放一个「喜欢」就是个永远点不出反应的死按钮，
+ *     所以那一页换成「取消喜欢」（= 从我喜欢里移除，和「移出」本来就是同一件事）。
+ *   · 「歌单」页里没有"喜欢/不喜欢"的概念负担，给「喜欢」正好能一次性把整批收进我喜欢。
+ *   · 破坏性的那个按钮固定排在最后，并且用 danger 配色 —— 位置和颜色都别跟着视图变，
+ *     否则肌肉记忆会点错（这是"移除"类操作最容易出事的地方）。
+ */
+function selActions() {
+  const acts = [
+    { id: 'btnSelDownload', icon: 'i-download', label: '下载' },
+    { id: 'btnSelAddPl', icon: 'i-plus', label: '加入歌单' },
+  ];
+  if (currentView !== 'favorites') {
+    acts.push({ id: 'btnSelFav', icon: 'i-heart', label: '喜欢' });
+  }
+  acts.push({
+    id: 'btnSelRemove',
+    icon: 'i-trash',
+    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',
+    danger: true,
+  });
+  return acts;
+}
+
+/**
+ * 选择工具条的统一渲染器（「批量选择」和「本地歌曲的批量选择」共用）。
+ *
+ * ★ 为什么抽出来：这两条条原来各写一份，按钮顺序、间距、"已选 0 首时置灰"
+ *   全是各写各的，改一处忘一处。抽成一个函数之后，两边**永远长得一样**。
+ *
+ * @param {number} n   已选几首
+ * @param {{id:string, icon:string, label:string, danger?:boolean}[]} actions 动作按钮（从左到右）
+ * @param {{allId:string, noneId:string, cls?:string}} opts 全选 / 清空 的 id（两边命名不同）
+ */
+function pickBarHTML(n, actions, opts) {
+  const dis = n ? '' : ' disabled';
+  const btns = actions.map((a) =>
+    `<button class="ghost-btn${a.danger ? ' danger' : ''}" id="${a.id}"${dis}>${ic(a.icon)}<span>${esc(a.label)}</span></button>`
+  ).join('');
   return `
-    <div class="imp-bar">
+    <div class="imp-bar pick-bar ${opts.cls || ''}">
       <span class="imp-count">已选 <b>${n}</b> 首</span>
       <span class="imp-bar-actions">
-        <button class="ghost-btn" id="btnDlPickAll">全选</button>
-        <button class="ghost-btn" id="btnDlPickNone"${n ? '' : ' disabled'}>清空选择</button>
-        <button class="primary-btn" id="btnDlPickDo"${n ? '' : ' disabled'}>下载选中的 ${n} 首</button>
+        <button class="ghost-btn" id="${opts.allId}">全选</button>
+        <button class="ghost-btn" id="${opts.noneId}"${dis}>清空选择</button>
+        <span class="bar-sep"></span>
+        ${btns}
       </span>
     </div>`;
 }
 
 /** 点整行 = 勾 / 取消（和导入页 impToggle 一套逻辑，只是换了个选择集） */
-function dlToggle(i) {
-  if (!dlPick) return;
+function selToggle(i) {
+  if (!selPick) return;
   const t = currentTracks()[i];
-  if (!t || !t.bvid) return;
-  if (dlPick.selected.has(t.bvid)) dlPick.selected.delete(t.bvid);
-  else dlPick.selected.set(t.bvid, t);
+  const k = selKey(t);
+  if (!k) return;
+  if (selPick.selected.has(k)) selPick.selected.delete(k);
+  else selPick.selected.set(k, t);
   rerenderKeepScroll();
 }
 
-function dlPickAll() {
-  if (!dlPick) return;
-  for (const t of currentTracks()) if (t && t.bvid) dlPick.selected.set(t.bvid, t);
+function selPickAll() {
+  if (!selPick) return;
+  for (const t of currentTracks()) {
+    const k = selKey(t);
+    if (k) selPick.selected.set(k, t);
+  }
   rerenderKeepScroll();
 }
 
-function dlPickNone() {
-  if (!dlPick) return;
-  dlPick.selected.clear();
+function selPickNone() {
+  if (!selPick) return;
+  selPick.selected.clear();
   rerenderKeepScroll();
 }
 
-async function dlDoPicked() {
-  if (!dlPick) return;
-  const list = Array.from(dlPick.selected.values());
+/** 选择集里的歌（按勾选顺序）。 */
+function selPickedTracks() {
+  return selPick ? Array.from(selPick.selected.values()).filter(Boolean) : [];
+}
+
+/**
+ * 「下载」：只挑有 bvid 的去下。
+ * ★ 歌单里可能混着本地歌（「加入歌单」对本地歌也开放）—— 本地文件本来就在盘上，
+ *   送去下载只会让主进程报错。这里先筛一遍，并且**把跳过的数量说出来**，
+ *   否则用户会以为"我选了 5 首怎么只下了 3 首"。
+ */
+async function selDoDownload() {
+  const list = selPickedTracks();
   if (!list.length) return;
-  await enqueueDownloads(list);
+  const dlAble = list.filter((t) => t && t.bvid);
+  const localN = list.length - dlAble.length;
+  if (!dlAble.length) { toast('选中的都是本地歌，文件已经在电脑上了，不用下载'); return; }
+  await enqueueDownloads(dlAble, { note: localN ? `${localN} 首本地歌跳过` : '' });
+  // enqueueDownloads 内部已经退出选择模式（它知道下载完就没必要继续勾着）
+}
+
+/**
+ * 「喜欢」：批量加进「我喜欢」，已经在里面的跳过。
+ * ★ 干完**不退模式**：收藏不是"把选中的东西拿走"，用户常常接着还要下载 / 加歌单。
+ *   （和本地歌曲那边的 localDoFavPicked 一个口径。）
+ */
+async function selDoFav() {
+  const list = selPickedTracks();
+  if (!list.length) return;
+  let added = 0;
+  for (const t of list) {
+    if (isFav(t)) continue;
+    DB.favorites = [t, ...DB.favorites];
+    added++;
+  }
+  await persist();
+  renderAll();
+  toast(added ? `已收藏 ${added} 首` : '选中的都已经在「我喜欢」里了');
+}
+
+/** 「加入歌单」：走那个"选现有歌单 / 新建一个"的弹窗（多选版），干完不退模式。 */
+function selDoAddPl() {
+  const list = selPickedTracks();
+  if (!list.length) return;
+  addManyToPlaylist(list);
+}
+
+/**
+ * 「取消喜欢」/「移出歌单」：把这批从**当前列表**里摘掉（歌本身不删，别处还能找到）。
+ *
+ * ★ 不弹确认框：和行内那个垃圾桶一个口径 —— 摘错了重新加回来就行。
+ *   批量操作再加一层"确定吗"只会让人以为"是不是把歌从硬盘删了"。
+ * ★ 干完必须退出选择模式：选择集里的行已经从列表上消失了，留着它只会指向不存在的行。
+ */
+async function selDoRemove() {
+  const list = selPickedTracks();
+  if (!list.length) return;
+  const inFav = currentView === 'favorites';
+  const hit = (t) => list.some((x) => sameTrack(x, t));
+  if (inFav) {
+    DB.favorites = DB.favorites.filter((t) => !hit(t));
+  } else if (currentView.startsWith('playlist:')) {
+    const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
+    if (!pl) return;
+    pl.tracks = pl.tracks.filter((t) => !hit(t));
+  } else {
+    return;   // 别的页面不该有这颗按钮（防手滑）
+  }
+  selPick = null;
+  await persist();
+  renderAll();
+  toast(inFav ? `已取消喜欢 ${list.length} 首` : `已从歌单移出 ${list.length} 首`);
 }
 
 /* ---------------- 本地歌曲的批量选择（v2.8.0 修订） ----------------
@@ -3952,21 +4234,15 @@ function toggleLocalPick() {
   renderLocal();
 }
 
-/** 批量选择工具条：「已选 N 首 · 全选 · 清空 · 移出库 · 加入歌单 · 收藏」 */
+/** 批量选择工具条：和列表页那条**同一个渲染器**，只是动作换成本地库能做的事。
+ *  ★ 顺序和列表页保持一致：先说"要干什么"（收藏 / 加入歌单），破坏性的「移出库」永远排最后。 */
 function localBarHTML() {
   const n = localPick ? localPick.selected.size : 0;
-  const dis = n ? '' : ' disabled';
-  return `
-    <div class="imp-bar local-bar">
-      <span class="imp-count">已选 <b>${n}</b> 首</span>
-      <span class="imp-bar-actions">
-        <button class="ghost-btn" id="btnLocalPickAll">全选</button>
-        <button class="ghost-btn" id="btnLocalPickNone"${dis}>清空选择</button>
-        <button class="ghost-btn" id="btnLocalFav"${dis}>${ic('i-heart')}<span>收藏</span></button>
-        <button class="ghost-btn" id="btnLocalAddPl"${dis}>${ic('i-plus')}<span>加入歌单</span></button>
-        <button class="ghost-btn danger" id="btnLocalRemove"${dis}>${ic('i-trash')}<span>移出库</span></button>
-      </span>
-    </div>`;
+  return pickBarHTML(n, [
+    { id: 'btnLocalFav', icon: 'i-heart', label: '收藏' },
+    { id: 'btnLocalAddPl', icon: 'i-plus', label: '加入歌单' },
+    { id: 'btnLocalRemove', icon: 'i-trash', label: '移出库', danger: true },
+  ], { allId: 'btnLocalPickAll', noneId: 'btnLocalPickNone', cls: 'local-bar' });
 }
 
 /** 点整行 = 勾 / 取消（键是 localPath —— 本地歌没有 bvid）。 */
@@ -4758,10 +5034,10 @@ function renderPlaylistSidebar() {
 
 /** 根据 currentView 重新画整个界面 */
 function renderAll() {
-  // v2.8.0：批量勾选模式是**绑定在某个视图上**的（进的时候记下了 dlPick.view）。
+  // v2.9.0：批量选择模式是**绑定在某个视图上**的（进的时候记下了 selPick.view）。
   //   换到别的页面就自动退出 —— 不然跑到「发现」会发现每行都带着勾选框、
   //   点一下还会弹出下载，看着像界面坏了。
-  if (dlPick && dlPick.view !== currentView) dlPick = null;
+  if (selPick && selPick.view !== currentView) selPick = null;
   // v2.8.0 修订：本地歌曲的批量选择同理 —— 离开这一页就退出。
   if (localPick && currentView !== 'local') localPick = null;
 
@@ -5338,6 +5614,18 @@ function syncSettingsUI() {
   $('rngGlassAlpha').value = Math.round((s.glass.frameAlpha ?? 0.12) * 100);
   $('valAlpha').textContent = $('rngGlassAlpha').value + '%';
 
+  // ---- v2.9.0：歌曲行右侧按钮（悬停 / 常显 + 常显亮度） ----
+  const selOps = $('selListOps');
+  if (selOps) selOps.value = s.listOps === 'always' ? 'always' : 'hover';
+  const rngOps = $('rngOpsAlpha');
+  if (rngOps) {
+    rngOps.value = Math.min(100, Math.max(20, Number(s.opsOpacity) || 55));
+    $('valOpsAlpha').textContent = rngOps.value + '%';
+  }
+  // 只有选了「一直显示」，亮度才是有意义的 → 其余时候置灰（不是隐藏，免得设置页上下跳）
+  const fOps = $('fieldOpsAlpha');
+  if (fOps) fOps.classList.toggle('is-off', s.listOps !== 'always');
+
   // 自动歌词开关
   const chk = $('chkAutoLyric');
   if (chk) chk.checked = !!s.autoLyric;
@@ -5527,6 +5815,17 @@ function bindSettings() {
   bindRange('rngBgBlur',     'valBgBlur', 'px', (v) => { DB.settings.bg.blur = v; });
   bindRange('rngGlassBlur',  'valGlass',  'px', (v) => { DB.settings.glass.blur = v; });
   bindRange('rngGlassAlpha', 'valAlpha',  '%',  (v) => { DB.settings.glass.frameAlpha = v / 100; });
+  // v2.9.0：常显时的亮度（只影响 body.ops-always 那条规则）
+  bindRange('rngOpsAlpha',   'valOpsAlpha', '%', (v) => { DB.settings.opsOpacity = v; });
+
+  /* ---- v2.9.0：歌曲行右侧按钮 悬停 / 常显 ---- */
+  const selOps = $('selListOps');
+  if (selOps) selOps.addEventListener('change', () => {
+    DB.settings.listOps = selOps.value === 'always' ? 'always' : 'hover';
+    applyOpsMode();          // 立即生效，不用重启
+    syncSettingsUI();        // 亮度那一行的置灰状态跟着变
+    persist();
+  });
 
   /* ---- 恢复默认外观 ---- */
   $('btnResetAppearance').addEventListener('click', () => {
@@ -5534,6 +5833,9 @@ function bindSettings() {
     DB.settings.bg    = { file: null, kind: 'image', dim: 0.55, blur: 0, video: { muted: true, loop: true, speed: 1 },
                           pauseOnBlur: true };
     DB.settings.glass = { blur: 12, frameAlpha: 0.12, mode: 'prebake' };
+    // v2.9.0：歌曲行按钮的显示方式也属于"外观"，一起回到默认（悬停 + 55%）
+    DB.settings.listOps = DEFAULT_SETTINGS.listOps;
+    DB.settings.opsOpacity = DEFAULT_SETTINGS.opsOpacity;
     api('clearBackground').catch(() => {});
     applyAppearance(); syncSettingsUI(); persist();
     toast('外观已恢复默认');
@@ -5960,12 +6262,16 @@ function bindEvents() {
       return;
     }
 
-    // ---- v2.8.0：批量下载 ----
-    // 我喜欢 / 歌单：点一下进勾选模式（再点退出）；详情页：整批直接排（那一页本来就是一个视频的全部曲目）
-    if (id === 'btnDownloadFav' || id === 'btnDownloadPl') { toggleDlPick(); return; }
-    if (id === 'btnDlPickAll') { dlPickAll(); return; }
-    if (id === 'btnDlPickNone') { dlPickNone(); return; }
-    if (id === 'btnDlPickDo') { dlDoPicked(); return; }
+    // ---- v2.9.0：列表的「批量选择」----
+    // 我喜欢 / 歌单：点一下进选择模式（再点退出）；详情页那个「批量下载」是另一回事，
+    // 它把整个视频的曲目一次排进下载队列（那一页本来就是一个视频的全部曲目，没什么可选）。
+    if (id === 'btnSelectFav' || id === 'btnSelectPl') { toggleSelPick(); return; }
+    if (id === 'btnSelPickAll') { selPickAll(); return; }
+    if (id === 'btnSelPickNone') { selPickNone(); return; }
+    if (id === 'btnSelDownload') { selDoDownload(); return; }
+    if (id === 'btnSelAddPl') { selDoAddPl(); return; }
+    if (id === 'btnSelFav') { selDoFav(); return; }
+    if (id === 'btnSelRemove') { selDoRemove(); return; }
     if (id === 'btnDownloadParsed') {
       if (parsedView) enqueueDownloads(parsedView.tracks);
       return;
@@ -6023,12 +6329,12 @@ function bindEvents() {
 
     // 挑歌模式（v2.6.0）：点整行 = 勾选 / 取消，**不播放**。
     // ★ 必须放在下面"点整行 = 播放"之前 —— 否则在导入页点一下行就把歌播了。
-    // v2.8.0：下载的批量勾选复用了同一套行渲染（.track.pickable），靠 dlPick 分辨是谁在用。
+    // v2.9.0：列表的批量选择复用了同一套行渲染（.track.pickable），靠 selPick 分辨是谁在用。
     // v2.8.0 修订：本地歌曲的批量选择也走这套，靠 localPick 分辨。
     const pickRow = e.target.closest('.track.pickable');
     if (pickRow) {
       const i = Number(pickRow.dataset.i);
-      if (dlPick) dlToggle(i);
+      if (selPick) selToggle(i);
       else if (localPick) localToggle(i);
       else impToggle(i);
       return;
@@ -6615,6 +6921,18 @@ function updateLyricBtn() {
   // v2.3.0：键位改成从表里现拼（改了键位提示就跟着变）
   btn.title = lyricState.loading ? '正在取歌词…'
     : (desktopOn ? '关闭桌面歌词' : '桌面歌词') + keyHint('toggleDeskLyric');
+
+  // ★ v2.9.0：mini 条上那个「词」按钮跟着**同一个状态**走（同一个真相来源）。
+  //   以前 mini 里根本没有歌词入口，想开桌面歌词必须回完整模式。
+  //   样式沿用 .lyric-btn 那三态（loading / on / none），只是套在 .win-btn 上。
+  const mb = $('miniLyric');
+  if (mb) {
+    mb.classList.toggle('loading', lyricState.loading);
+    mb.classList.toggle('on', desktopOn && !lyricState.loading);
+    mb.classList.toggle('none', !desktopOn && !lyricState.loading && lyricState.failed);
+    mb.title = lyricState.loading ? '正在取歌词…'
+      : (desktopOn ? '关闭桌面歌词' : '在桌面上挂一个悬浮歌词窗');
+  }
 }
 
 /**

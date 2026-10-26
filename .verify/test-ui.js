@@ -474,26 +474,29 @@ app.whenReady().then(async () => {
   else bad('绿勾状态不对（薄荷绿主题下会不会混成主题色？）：' + JSON.stringify(green));
   await evalJS(`(() => { document.documentElement.dataset.theme = 'pink'; return true; })()`);
 
-  /* ⑤ 批量下载的勾选模式：进得去、每行有勾选框、能全选 */
+  /* ⑤ 批量选择模式：进得去、每行有勾选框、能全选 */
   const pick = await evalJS(`(() => {
     DB.favorites = searchResults.slice();
     currentView = 'favorites';
     renderAll();
-    document.getElementById('btnDownloadFav').click();
-    return { picking: !!dlPick,
+    document.getElementById('btnSelectFav').click();
+    return { picking: !!selPick,
              pickable: document.querySelectorAll('#content .track.pickable').length,
              bar: !!document.querySelector('#content .imp-bar') };
   })()`);
   await sleep(200);
   const pick2 = await evalJS(`(() => {
-    document.getElementById('btnDlPickAll').click();
-    return { n: dlPick ? dlPick.selected.size : -1,
-             doText: (document.getElementById('btnDlPickDo') || {}).textContent || '' };
+    document.getElementById('btnSelPickAll').click();
+    const doBtn = document.getElementById('btnSelDownload');
+    return { n: selPick ? selPick.selected.size : -1,
+             doText: (doBtn || {}).textContent || '',
+             doEnabled: !!(doBtn && !doBtn.disabled),
+             count: ((document.querySelector('.pick-bar .imp-count') || {}).textContent || '') };
   })()`);
-  if (pick && pick.picking && pick.pickable === 2 && pick.bar && pick2.n === 2 && /下载选中的 2 首/.test(pick2.doText))
-    ok('「我喜欢」点「批量下载」进入勾选模式；全选后工具条写着「下载选中的 2 首」');
-  else bad('批量勾选模式不对：' + JSON.stringify(pick) + ' / ' + JSON.stringify(pick2));
-  await evalJS(`(() => { if (dlPick) { dlPick = null; renderAll(); } return true; })()`);
+  if (pick && pick.picking && pick.pickable === 2 && pick.bar && pick2.n === 2 && /下载/.test(pick2.doText) && pick2.doEnabled && /2/.test(pick2.count))
+    ok('「我喜欢」点「批量选择」进入选择模式；全选后工具条写着「已选 2 首」且「下载」可点');
+  else bad('批量选择模式不对：' + JSON.stringify(pick) + ' / ' + JSON.stringify(pick2));
+  await evalJS(`(() => { if (selPick) { selPick = null; renderAll(); } return true; })()`);
 
   /* ⑥ 闭环：点行内下载按钮 → 主进程真的收到了这首歌（这才是"能下"的实质）。
      ★ 光断言"按钮点得动"是不够的 —— 真正要守住的是"点了以后发出去的是哪首"。
@@ -522,9 +525,9 @@ app.whenReady().then(async () => {
   /* ================= v2.8.0 修订（真机反馈） ================= */
 
   /* ⑦ 收起的整页歌词不能接鼠标 —— 它的「桌面歌词」按钮正好压在工具栏最右侧
-     「批量下载」那个 ↓ 图标上面。之前点那个图标会莫名其妙把悬浮歌词开出来。 */
+     「批量选择」那个 ✓ 图标上面。之前点那个图标会莫名其妙把悬浮歌词开出来。 */
   await evalJS(`(() => {
-    if (dlPick) dlPick = null;
+    if (selPick) selPick = null;
     closeQueue();
     currentView = 'favorites'; renderAll();
     DB.settings.lyricWin = DB.settings.lyricWin || {};
@@ -534,39 +537,39 @@ app.whenReady().then(async () => {
   await sleep(300);
   {
     const icPos = await evalJS(`(() => {
-      const s = document.getElementById('btnDownloadFav').querySelector('svg.ic').getBoundingClientRect();
+      const s = document.getElementById('btnSelectFav').querySelector('svg.ic').getBoundingClientRect();
       return { x: Math.round(s.x + s.width / 2), y: Math.round(s.y + s.height / 2) };
     })()`);
     await clickAt(icPos.x, icPos.y);
     const after = await evalJS(`({
       lyricOn: !!(DB.settings.lyricWin && DB.settings.lyricWin.on),
       overlay: document.getElementById('lyricOverlay').classList.contains('show'),
-      picking: !!document.getElementById('btnDlPickDo'),
+      picking: !!document.getElementById('btnSelDownload'),
     })`);
     if (!after.lyricOn && !after.overlay && after.picking)
-      ok('★ 点「批量下载」前面的 ↓ 图标 → 进勾选模式，不再误开悬浮歌词');
+      ok('★ 点「批量选择」前面的 ✓ 图标 → 进选择模式，不再误开悬浮歌词');
     else bad('点那个图标的行为不对（疑似又落在隐藏歌词浮层的按钮上）：' + JSON.stringify(after));
-    await evalJS(`(() => { if (dlPick) { dlPick = null; renderAll(); } return true; })()`);
+    await evalJS(`(() => { if (selPick) { selPick = null; renderAll(); } return true; })()`);
     await sleep(250);
   }
 
   /* ⑧ 勾选态下按钮**不许变形**（真机反馈"变形变高"）。
      量的是同一颗按钮在两种状态下的高度 + 图标文字是否还在同一行。 */
   {
-    const b1 = await evalJS(`Math.round(document.getElementById('btnDownloadFav').getBoundingClientRect().height)`);
-    await evalJS(`document.getElementById('btnDownloadFav').click()`);
+    const b1 = await evalJS(`Math.round(document.getElementById('btnSelectFav').getBoundingClientRect().height)`);
+    await evalJS(`document.getElementById('btnSelectFav').click()`);
     await sleep(320);
     const b2 = await evalJS(`(() => {
-      const b = document.getElementById('btnDownloadFav');
+      const b = document.getElementById('btnSelectFav');
       const i = b.querySelector('svg.ic').getBoundingClientRect();
       const s = b.querySelector('span').getBoundingClientRect();
       return { h: Math.round(b.getBoundingClientRect().height), text: b.textContent, cls: b.className,
                oneRow: Math.abs((i.top + i.height / 2) - (s.top + s.height / 2)) < 6 };
     })()`);
-    if (b2.h === b1 && b2.oneRow && /退出批量下载/.test(b2.text) && /\bon\b/.test(b2.cls))
+    if (b2.h === b1 && b2.oneRow && /退出批量选择/.test(b2.text) && /\bon\b/.test(b2.cls))
       ok(`★ 勾选态下按钮不变形：${b1}px → ${b2.h}px，图标和文字仍在同一行（class="${b2.cls}"）`);
     else bad('勾选态按钮变形了：' + JSON.stringify({ before: b1, after: b2 }));
-    await evalJS(`(() => { if (dlPick) { dlPick = null; renderAll(); } return true; })()`);
+    await evalJS(`(() => { if (selPick) { selPick = null; renderAll(); } return true; })()`);
     await sleep(250);
   }
 
@@ -752,10 +755,10 @@ app.whenReady().then(async () => {
   }
 
   /* 勾选模式的那张图：要的是"已选 2 首"的样子，所以先重进一次勾选模式再截 */
-  await evalJS(`(() => { closeQueue(); if (dlPick) dlPick = null;
+  await evalJS(`(() => { closeQueue(); if (selPick) selPick = null;
     currentView = 'favorites'; renderAll();
-    document.getElementById('btnDownloadFav').click();
-    document.getElementById('btnDlPickAll').click();
+    document.getElementById('btnSelectFav').click();
+    document.getElementById('btnSelPickAll').click();
     return true; })()`);
   await sleep(400);
   fs.writeFileSync(path.join(__dirname, 'shot-dl-pick.png'), (await win.webContents.capturePage()).toPNG());

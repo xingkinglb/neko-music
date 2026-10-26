@@ -98,6 +98,14 @@ function migrate(data, opts) {
   s.glass  = Object.assign({ blur: 18, alpha: 0.55 }, old.glass || {});
   s.autoLyric = typeof old.autoLyric === 'boolean' ? old.autoLyric : false;
 
+  // v2.9.0：歌曲行右侧按钮的显示方式 + 常显亮度。
+  // ★ 老存档没有这两项 → 'hover' / 55，行为和以前一模一样（不给人"更新完界面变吵"的惊吓）。
+  //   合法性（值是不是那两种之一、亮度在不在 20-100）由界面那边的 migrateSettings 严格夹，
+  //   这里只兜"有没有这一项"，免得主进程把存档写回去时把字段弄丢。
+  s.listOps = old.listOps === 'always' ? 'always' : 'hover';
+  s.opsOpacity = (typeof old.opsOpacity === 'number' && old.opsOpacity >= 20 && old.opsOpacity <= 100)
+    ? Math.round(old.opsOpacity) : 55;
+
   // v2.2.0：关窗行为。这里只兜一个默认值，真正的合法性由界面那边的 migrateSettings 管。
   s.close = Object.assign({ action: 'ask' },
     (old.close && typeof old.close === 'object') ? old.close : {});
