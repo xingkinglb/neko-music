@@ -157,9 +157,12 @@ app.whenReady().then(async () => {
     if (!bar) return { has: false, ids: [], disabled: [], labels: [] };
     const btns = [...bar.querySelectorAll('.imp-bar-actions .ghost-btn')];
     // 前两个是「全选 / 清空选择」，从 .bar-sep 后面才是动作按钮
+    // ★ v2.10.1：条子最右边又多了一个「退出」（它前面也有一个 .bar-sep），
+    //   所以不能只按"第一个 bar-sep 之后"取 —— 那会把退出也算成动作按钮。
+    //   这里按 id 明确排掉它：它是"结束这件事"，不是"对选中的歌做什么"。
     const sep = bar.querySelector('.bar-sep');
     const acts = sep ? [...sep.parentElement.children].slice([...sep.parentElement.children].indexOf(sep) + 1) : [];
-    const actBtns = acts.filter((el) => el.classList && el.classList.contains('ghost-btn'));
+    const actBtns = acts.filter((el) => el.classList && el.classList.contains('ghost-btn') && el.id !== 'btnSelPickExit');
     return {
       has: true,
       ids: actBtns.map((b) => b.id),

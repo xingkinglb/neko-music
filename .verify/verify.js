@@ -3885,7 +3885,7 @@ console.log('\n[61] v2.9.0 · 列表的「批量选择」：');
   if (!/function pickBarHTML\(n, actions, opts\)/.test(appjs))
     err('★ 没有统一的 pickBarHTML() —— 两条选择条又会各写一份，早晚不一致');
   else ok('★ 有统一的 pickBarHTML(n, actions, opts)');
-  if (!/return pickBarHTML\(n, selActions\(\), \{ allId: 'btnSelPickAll'/.test(appjs))
+  if (!/return pickBarHTML\(n, selActions\(\), \{[\s\S]{0,160}?allId: 'btnSelPickAll'/.test(appjs))
     err('★ 列表那条选择条没走 pickBarHTML');
   else ok('★ 列表的选择条走 pickBarHTML');
   if (!/return pickBarHTML\(n, \[/.test(appjs))
@@ -4007,6 +4007,22 @@ console.log('\n[62] v2.10.0 · 吸顶 + 拖选 + 禁选文字 + 搜索 + 定位�
   if (!/\.pick-bar\s*\{[^}]*z-index:\s*30/.test(css))
     err('★ .pick-bar 没有 z-index —— 吸顶后会被下面的歌曲行盖住');
   else ok('★ .pick-bar 有 z-index（压得住歌曲行）');
+  // ★ v2.10.1：退出按钮必须在**吸顶的那条**里 ——
+  //   不然条子吸住了、"退出"却跟着标题滚走，滚到列表下半部分想退出还是得先滚回顶部。
+  if (!/exitId: 'btnSelPickExit'/.test(appjs))
+    err('★ 「退出」没放进吸顶条 —— 选到列表下半部分想退出还得滚回顶部');
+  else ok('★ 「退出」在吸顶条里（滚到哪儿都能退出）');
+  if (!/id === 'btnSelPickExit'\) \{ toggleSelPick\(\); return; \}/.test(appjs))
+    err('★ 吸顶条的「退出」没绑事件 —— 按钮画出来了，点了没反应');
+  else ok('★ 吸顶条的「退出」已绑定');
+  if (!/exitId: 'btnLocalPickExit'/.test(appjs) || !/id === 'btnLocalPickExit'\) \{ toggleLocalPick\(\); return; \}/.test(appjs))
+    err('★ 本地歌曲那条的「退出」没接上');
+  else ok('★ 本地歌曲那条也有「退出」');
+  // 反向：退出按钮必须由 opts.exitId 控制 —— 导入页没有"退出选择模式"这个概念，不该画
+  if (!/const exitBtn = opts\.exitId/.test(appjs))
+    err('★ 退出按钮不是可选的 —— 导入页会被塞一个没意义的「退出」');
+  else ok('★ 退出按钮由 opts.exitId 控制（导入页不画）');
+
   // 导入页那条也得吸（同一个类）
   if (!/<div class="imp-bar pick-bar">/.test(appjs))
     err('★ 导入页那条"已选 N 个"没加 pick-bar 类 —— 它同样很长，却没吸顶');

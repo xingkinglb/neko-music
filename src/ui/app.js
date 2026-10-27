@@ -4330,7 +4330,10 @@ function toggleSelPick() {
 /** 勾选态那条工具条。动作按钮按当前视图变（见 selActions）。 */
 function selBarHTML() {
   const n = selPick ? selPick.selected.size : 0;
-  return pickBarHTML(n, selActions(), { allId: 'btnSelPickAll', noneId: 'btnSelPickNone' });
+  return pickBarHTML(n, selActions(), {
+    allId: 'btnSelPickAll', noneId: 'btnSelPickNone',
+    exitId: 'btnSelPickExit',          // 吸顶条里的「退出」（v2.10.1）
+  });
 }
 
 /**
@@ -4375,6 +4378,13 @@ function pickBarHTML(n, actions, opts) {
   const btns = actions.map((a) =>
     `<button class="ghost-btn${a.danger ? ' danger' : ''}" id="${a.id}"${dis}>${ic(a.icon)}<span>${esc(a.label)}</span></button>`
   ).join('');
+  // ★ v2.10.1：退出按钮要在这条**吸顶的**工具条里。
+  //   以前它只挂在页面顶部那个「退出批量选择」上 —— 条子吸顶了、那个按钮却跟着标题滚走了，
+  //   于是"选到列表下半部分想退出"还是得先滚回顶部，等于白吸顶。
+  //   用 bar-sep 和动作组隔开：右边那几颗是"对选中的歌做什么"，这颗是"结束这件事"，不是一类。
+  const exitBtn = opts.exitId
+    ? `<span class="bar-sep"></span><button class="ghost-btn bar-exit" id="${opts.exitId}" title="退出选择模式（已勾的不会生效）">✕<span>退出</span></button>`
+    : '';
   return `
     <div class="imp-bar pick-bar ${opts.cls || ''}">
       <span class="imp-count">已选 <b>${n}</b> 首</span>
@@ -4382,7 +4392,7 @@ function pickBarHTML(n, actions, opts) {
         <button class="ghost-btn" id="${opts.allId}">全选</button>
         <button class="ghost-btn" id="${opts.noneId}"${dis}>清空选择</button>
         <span class="bar-sep"></span>
-        ${btns}
+        ${btns}${exitBtn}
       </span>
     </div>`;
 }
@@ -4714,7 +4724,11 @@ function localBarHTML() {
     { id: 'btnLocalFav', icon: 'i-heart', label: '收藏' },
     { id: 'btnLocalAddPl', icon: 'i-plus', label: '加入歌单' },
     { id: 'btnLocalRemove', icon: 'i-trash', label: '移出库', danger: true },
-  ], { allId: 'btnLocalPickAll', noneId: 'btnLocalPickNone', cls: 'local-bar' });
+  ], {
+    allId: 'btnLocalPickAll', noneId: 'btnLocalPickNone',
+    cls: 'local-bar',
+    exitId: 'btnLocalPickExit',        // 吸顶条里的「退出」（v2.10.1）
+  });
 }
 
 /** 点整行 = 勾 / 取消（键是 localPath —— 本地歌没有 bvid）。 */
@@ -6779,6 +6793,9 @@ function bindEvents() {
     if (id === 'btnSelectFav' || id === 'btnSelectPl') { toggleSelPick(); return; }
     if (id === 'btnSelPickAll') { selPickAll(); return; }
     if (id === 'btnSelPickNone') { selPickNone(); return; }
+    // ★ v2.10.1：吸顶条里的「退出」。和顶部那颗开关走同一个函数（它本来就是"进/出"的开关），
+    //   所以两处点出来的行为完全一致：退出并丢掉选择集。
+    if (id === 'btnSelPickExit') { toggleSelPick(); return; }
     if (id === 'btnSelDownload') { selDoDownload(); return; }
     if (id === 'btnSelAddPl') { selDoAddPl(); return; }
     if (id === 'btnSelFav') { selDoFav(); return; }
@@ -6834,6 +6851,7 @@ function bindEvents() {
     if (id === 'btnLocalPick') { toggleLocalPick(); return; }
     if (id === 'btnLocalPickAll') { localPickAll(); return; }
     if (id === 'btnLocalPickNone') { localPickNone(); return; }
+    if (id === 'btnLocalPickExit') { toggleLocalPick(); return; }   // v2.10.1：吸顶条里的「退出」
     if (id === 'btnLocalRemove') { localDoRemovePicked(); return; }
     if (id === 'btnLocalFav') { localDoFavPicked(); return; }
     if (id === 'btnLocalAddPl') { localDoAddPlPicked(); return; }

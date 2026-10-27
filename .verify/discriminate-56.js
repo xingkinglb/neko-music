@@ -558,6 +558,23 @@ const CASES = [
     to:   ".filter(({ e, i }) => !q || (e.title || '').toLowerCase().includes(q) || String(i + 1) === q);",
     expect: '面板搜索只匹配标题',
   },
+  {
+    name: '★ v2.10.1：退出按钮从吸顶条里拿掉（滚下去又退不出了）',
+    file: 'src/ui/app.js',
+    // ★ 要改的是**传参那一处**（selBarHTML 里的 exitId: 'btnSelPickExit'）——
+    //   改 pickBarHTML 里的 `const exitBtn = opts.exitId` 不会让断言响：
+    //   断言查的是"有没有把 exitId 传进来"，传了但没用它画，断言看不出来。
+    from: "    exitId: 'btnSelPickExit',",
+    to:   "    exitId: '',",
+    expect: '「退出」没放进吸顶条',
+  },
+  {
+    name: '★ v2.10.1：吸顶条的「退出」没绑事件（画出来但点了没反应）',
+    file: 'src/ui/app.js',
+    from: "if (id === 'btnSelPickExit') { toggleSelPick(); return; }",
+    to:   "if (id === 'btnSelPickExitX') { toggleSelPick(); return; }",
+    expect: '吸顶条的「退出」没绑事件',
+  },
 ];
 
 let pass = 0, fail = 0;

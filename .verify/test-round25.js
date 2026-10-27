@@ -277,6 +277,41 @@ app.whenReady().then(async () => {
   await evalJS(`(() => { document.getElementById('content').scrollTop = 0; selPick = null; renderAll(); return true; })()`);
   await sleep(250);
 
+  /* ---- B2 滚下去以后还能直接退出（v2.10.1） ---- */
+  {
+    // ★ B1 那段结尾把 selPick 清掉了（它只是量 sticky），所以这里要重新进一次选择模式
+    await click('#btnSelectFav');
+    await sleep(300);
+    // 滚到中间 —— 此时标题已经滚走了，顶部那颗「退出批量选择」看不到
+    await evalJS(`(() => { document.getElementById('content').scrollTop = 400; return true; })()`);
+    await sleep(350);
+    const m = await evalJS(`(() => {
+      const box = document.getElementById('content').getBoundingClientRect();
+      const exit = document.getElementById('btnSelPickExit');
+      if (!exit) return { has: false };
+      const rb = exit.getBoundingClientRect();
+      const head = document.querySelector('#content .block-head').getBoundingClientRect();
+      return {
+        has: true,
+        exitInView: rb.top >= box.top - 2 && rb.bottom <= box.bottom + 2,
+        headGone: head.top - box.top < -50,
+      };
+    })()`);
+    if (!m.has) bad('[B2] ★ 吸顶条里没有「退出」按钮');
+    else {
+      if (m.exitInView && m.headGone)
+        ok('[B2] ★ 滚到 400px 后「退出」仍在可视区（顶部那颗已经滚走了）');
+      else bad(`[B2] ★ 退出按钮没跟着吸顶：${JSON.stringify(m)}`);
+      await click('#btnSelPickExit');
+      await sleep(350);
+      const after = await evalJS(`({ pick: !!selPick, rows: document.querySelectorAll('#content .track.pickable').length })`);
+      if (!after.pick && after.rows === 0) ok('[B2] ★ 点吸顶条里的「退出」→ 真的退出了选择模式');
+      else bad(`[B2] ★ 点了退出没生效：${JSON.stringify(after)}`);
+    }
+    await evalJS(`(() => { document.getElementById('content').scrollTop = 0; return true; })()`);
+    await sleep(250);
+  }
+
   /* ============================================================
      C. 拖动多选
      ============================================================ */

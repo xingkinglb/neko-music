@@ -6,7 +6,7 @@
 
 把 B 站视频里的音频在线播放出来 —— 搜歌、合集、歌单、收藏、歌词、动态背景，一个不少。
 
-![version](https://img.shields.io/badge/version-2.10.0-ff6fa5)
+![version](https://img.shields.io/badge/version-2.10.1-ff6fa5)
 ![license](https://img.shields.io/badge/license-MIT-7c5cff)
 ![platform](https://img.shields.io/badge/platform-Windows-4c8dff)
 ![electron](https://img.shields.io/badge/Electron-33-37d6c0)
@@ -386,7 +386,20 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 
 ## 更新日志
 
-### 最近更新（v2.10.0）
+### 最近更新（v2.10.1）
+
+v2.10.0 上线后马上发现的一个漏：
+
+- ✕ **吸顶的选择条最右边多了个「退出」**。以前滚到列表下半部分想退出，只能滚回顶部点那颗
+  「退出批量选择」—— 条子吸住了、"退出"没吸住，等于只吸了一半。现在两处都能退（同一个开关）。
+  「本地歌曲」那条也一样。
+
+<details>
+<summary>上一个版本（v2.10.0）改了什么</summary>
+
+### v2.10.0
+
+
 
 五条都是"用起来别扭"的地方 —— 三条是手感问题，两条是新功能。
 
@@ -403,6 +416,8 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 - ❌ 「我喜欢」和歌单的**「播放全部」按钮去掉了** —— 想顺序播就点第几首，之后自动往下走
 - ✅ 静态自检 **62 大类**通过（第 62 类 40 条含 4 条反向）；**判别力实测 75/75 会响、还原后全绿**；
   新增离线实测 `test-round25`（33 条，拖选用真实鼠标事件）全过；全量回归 **28 个脚本全绿**
+
+</details>
 
 <details>
 <summary>上一个版本（v2.9.0）改了什么</summary>
