@@ -1404,9 +1404,13 @@ function prevTrack() {
  * ★ 队列存的是**副本**：源列表（收藏 / 歌单 / 搜索结果）之后怎么增删，
  *   都不会悄悄改掉正在播的这一份。想同步，重新点一次"播放全部"。
  */
-function playTracks(tracks, startIndex = 0, name = '') {
+/* ★ v2.10.0：第 4 个参数 source 记"这次是从哪个页面点进来的"，播放条上的「定位」按钮靠它跳回去。
+   形状 { view: 'favorites' | 'playlist:xx' | 'search' | … }，**只存内存、不写存档** ——
+   重启之后队列本来就是空的，没有"回去"这回事。
+   不传 = 来源不明（比如下载管理里点播一首），那时定位按钮会退化成"打开播放队列抽屉"。 */
+function playTracks(tracks, startIndex = 0, name = '', source = null) {
   if (!tracks || !tracks.length) return false;
-  queue = { tracks: tracks.slice(), index: -1, name };
+  queue = { tracks: tracks.slice(), index: -1, name, source };
   playStack = [];
   playAt(Math.max(0, startIndex));
   return true;
@@ -1450,6 +1454,14 @@ function trackRow(track, i, opts = {}) {
       : esc(track.author))
     : '';
 
+  // ★ v2.10.0：列表内搜索时，如果只有**合集内部**有匹配，这一行本身是"因为里面有一集匹配"
+  //   才留下的。挂一个小标说清楚，不然用户会疑惑"这一行的标题明明没有我搜的词"。
+  //   为什么不塞进徽章：徽章已经占着网格第 4 列，再挤会让那几行又对不齐（v2.9.0 刚修过）。
+  const inner = opts.innerHits ? opts.innerHits(track) : 0;
+  const innerChip = inner
+    ? `<span class="hit-chip" title="这个合集里还有 ${inner} 集匹配">内含 ${inner} 集</span>`
+    : '';
+
   return `
     <div class="track ${playing ? 'playing' : ''} ${opts.pick ? 'pickable' : ''} ${picked ? 'picked' : ''} ${track.missing ? 'missing' : ''}" data-i="${i}">
       ${opts.pick ? `<span class="pick${picked ? ' on' : ''}" role="checkbox" aria-checked="${picked ? 'true' : 'false'}" data-pick="${i}">${ic('i-check')}</span>` : ''}
@@ -1457,7 +1469,7 @@ function trackRow(track, i, opts = {}) {
       <div class="cover" style="background-image:url('${esc(track.cover || '')}')"></div>
       <div class="info">
         <div class="t">${esc(track.title)}</div>
-        <div class="a">${authorHTML}</div>
+        <div class="a">${authorHTML}${innerChip}</div>
       </div>
       ${track.missing ? `<span class="miss-chip">文件不见了</span>` : ''}
       ${showBadge ? `<button class="badge" data-act="expand" data-i="${i}" title="展开选集 / 合集">${badgeLabel}</button>` : ''}
@@ -1818,7 +1830,11 @@ async function expandCollection(track, fallback) {
   collectPick = null;   // 换一个合集 → 上次的勾选不能带过来
   $('collectTitle').textContent = track.title;
   $('collectSub').textContent = '正在读取选集…';
-  $('collectSearch').value = '';
+  // ★ v2.10.0 修订：从"列表页搜索"点进来的合集，把搜索词**自动带进面板的搜索框**。
+  //   用户在列表里搜了「光」、看到某个合集标着「内含 22 集」，点开就是为了看"哪几集带光" ——
+  //   再让他手打一遍纯属添乱。
+  //   只在「我喜欢 / 歌单」两页带（搜索词只属于这两页）；别的页面 listSearch 一定是空的。
+  $('collectSearch').value = listSearchCarry();
   $('collectList').innerHTML = `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
   $('collectMask').classList.add('show');
 
@@ -1847,7 +1863,7 @@ async function expandCollection(track, fallback) {
       : `${entries.length} 个分P`) + ` · 共 ${fmtTime(total)}`,
     entries,
   };
-  renderCollectList('');
+  renderCollectList($('collectSearch').value);
   renderAll();   // 让行上的徽章同步成「选集 N」
 }
 
@@ -1873,7 +1889,11 @@ function renderCollectList(filter) {
   const picking = !!collectPick;   // v2.8.0：面板里的「批量下载」勾选态
   const rows = entries
     .map((e, i) => ({ e, i }))
-    .filter(({ e, i }) => !q || (e.title || '').toLowerCase().includes(q) || String(i + 1) === q);
+    // ★ v2.10.0 修订：匹配规则要和列表页那条**完全一致**（title + author）。
+    //   否则会出现"列表页说内含 22 集，点开面板一集都搜不到"—— 因为列表页是按作者名
+    //   匹配到内部的（一个合集里作者基本一致 → 22 集全算命中），而面板原来只搜标题。
+    //   按序号匹配（搜 "12" 跳到第 12 集）保留。
+    .filter(({ e, i }) => !q || searchBlob(e).includes(q) || String(i + 1) === q);
 
   $('collectList').innerHTML = rows.length
     ? rows.map(({ e, i }) => {
@@ -2150,6 +2170,106 @@ function openQueue() {
 
 function closeQueue() {
   $('queueMask').classList.remove('show');
+}
+
+/* ---------------- 定位到当前播放的这一首（v2.10.0） ----------------
+   播放条上那个准星按钮：这首歌是从哪个列表点进来的，就跳回那个列表、滚到这一行、闪一下。
+
+   ★ 为什么"跳回来源页面"就够了、不用再去所有歌单里搜一遍：
+     来源本来就是"用户当时在看的那个列表"。从歌单点的 → 跳回去就是打开那个歌单，
+     用户想要的"顺便打开歌单列表并定位"就是这个动作的自然结果。
+   ★ 什么时候退化成"打开播放队列抽屉"：来源不明（下载管理里点播的），
+     或者那次的数据已经没了（重启过 → 搜索页/发现页/UP主页的内存结果都是空的）。
+     按钮点了必须有反应，不能一声不吭。 */
+
+/** 这个来源视图现在还能不能重建出来。
+ *  favorites / history / local / playlist 直接从 DB 画；
+ *  search / discovery / up / parsed 靠内存里的结果 —— 重启后就是空的。 */
+function locateCanRestore(view) {
+  if (!view) return false;
+  if (view === 'favorites' || view === 'history' || view === 'local') return true;
+  if (view.startsWith('playlist:')) {
+    const id = view.slice('playlist:'.length);
+    return DB.playlists.some((p) => p.id === id);
+  }
+  if (view === 'search') return searchResults.length > 0;
+  if (view === 'discovery') return discoveryResults.length > 0;
+  if (view === 'up') return !!(upState && upState.list.length);
+  if (view === 'parsed') return !!(parsedView && parsedView.tracks.length);
+  return false;
+}
+
+/** 把某个元素滚到滚动容器的正中间。
+ *  ★ 故意**不用 scrollIntoView**：它会把所有可滚动的祖先一起滚一遍
+ *    （`.main` / `.app` / body 都参与），在浮层或抽屉里会整页抖一下。
+ *    这也是 verify 里那条红线 —— 整个 app.js 不许出现 scrollIntoView。
+ *    自己算 scrollTop 只动目标容器，稳。 */
+function centerInScroll(box, el) {
+  if (!box || !el) return;
+  const rb = el.getBoundingClientRect();
+  const cb = box.getBoundingClientRect();
+  box.scrollTop += (rb.top - cb.top) - (cb.height - rb.height) / 2;
+}
+
+/** 给一行闪一下高亮（1.8 秒后自己褪掉）。
+ *  ★ 先 remove 再强制回流再加 —— 否则连续点两次定位时，第二次不会重放动画。 */
+function flashRow(row) {
+  if (!row) return;
+  row.classList.remove('locate-flash');
+  void row.offsetWidth;
+  row.classList.add('locate-flash');
+  setTimeout(() => row.classList.remove('locate-flash'), 1800);
+}
+
+/** 在队列抽屉里定位当前这一项 */
+function flashQueueCurrent() {
+  const row = document.querySelector('#queueList .collect-row[data-qi="' + queue.index + '"]');
+  if (!row) return false;
+  centerInScroll($('queueList'), row);
+  flashRow(row);
+  return true;
+}
+
+/** 在当前列表里找到这首歌，滚过去并闪一下。找不到返回 false。
+ *  ★ 用瞬时定位而不是平滑滚动：定位是"跳过去"不是"慢慢滚"，
+ *    一个上千首的歌单平滑滚到第 800 行要滚好几秒，反而不像"定位"。 */
+function scrollToCurrentRow(cur) {
+  const tracks = currentTracks();
+  const i = tracks.findIndex((t) => sameTrack(t, cur));
+  if (i < 0) return false;
+  const row = document.querySelectorAll('#content .track')[i];
+  if (!row) return false;
+  centerInScroll(content(), row);
+  flashRow(row);
+  return true;
+}
+
+/** 播放条上的「定位」按钮 */
+function locateCurrentTrack() {
+  const cur = queue.tracks[queue.index];
+  if (!cur) { toast('还没有在播的歌'); return; }
+  const src = queue.source && queue.source.view;
+
+  // ① 来源不明 / 那次的数据已经没了 → 退回打开队列抽屉并定位
+  if (!src || !locateCanRestore(src)) {
+    openQueue();
+    const okInQueue = flashQueueCurrent();
+    if (!okInQueue) toast('找不到这首歌在队列里的位置');
+    else if (!src) toast('这首歌不是从某个列表里点的，已打开播放队列');
+    else toast('原来那个列表已经不在了，已打开播放队列');
+    return;
+  }
+
+  // ② 已经在那一页了 → 只滚动 + 高亮，不重画（重画会把滚动位置和手感全打乱）
+  if (currentView !== src) {
+    currentView = src;
+    renderAll();
+  }
+  if (!scrollToCurrentRow(cur)) {
+    openQueue();
+    flashQueueCurrent();
+    toast('这个列表里已经找不到这一首了，已打开播放队列');
+  }
 }
 
 /** 从队列里拿掉一首。拿掉的正是"正在播"那首时，接着播原来位置的下一首 */
@@ -2872,34 +2992,185 @@ function renderParsed() {
     ${trackListHTML(tracks, {})}`;
 }
 
-/* ---------- 页面 3：我的收藏 ---------- */
-function renderFavorites() {
-  currentView = 'favorites';
-  const picking = !!selPick;   // v2.9.0：正在批量选择
-  content().innerHTML = `
-    <div class="block-head">
-      <div>
-        <div class="block-title">我喜欢</div>
-        <div class="block-sub">共 ${DB.favorites.length} 首</div>
-      </div>
-      <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayFav">${ic('i-play')}<span>播放全部</span></button>
-        <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectFav">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
-      </div>
-    </div>
-    ${picking ? selBarHTML() : ''}
-    ${trackListHTML(DB.favorites, {
+/* ============================================================
+   v2.10.0：列表内搜索（只用于「我喜欢」和「歌单」两页）
+   ------------------------------------------------------------
+   只搜当前这一个列表，不跨页面。三种匹配：
+
+     ① 标题 / 作者
+     ② **已展开过的合集内部**（`DB.collectParts` 里缓存着的那些集）
+     ③ 都匹配不上就不显示
+
+   ② 是"顺手能搜到"的赠品：合集在列表里只占一行，里面的集平时看不到，
+   但**展开过一次**之后就缓存在本地了，搜一下成本几乎为零，所以直接算进去。
+   从没展开过的合集搜不到内部 —— 那要联网逐个问 B 站，一个歌单十几个合集就是
+   十几次请求，慢且容易被限流。这一点是明确接受的取舍，不是漏了。
+
+   ★ 为什么搜到合集内部时不"把匹配的那几集摊成行"：那会凭空造出一种只在这个
+     状态下存在的行 —— 它没有父行的位置、点播放要往队列里塞什么、批量选择要不要认它，
+     全是新问题。现在只给合集行挂一个「内含 N 集」小标，点开面板时把搜索词带进去
+     （面板本来就有搜索框），既诚实又不用发明新东西。
+   ============================================================ */
+
+let listSearch = '';        // 当前搜索词（空 = 没在搜）
+let listSearchOpen = false; // 搜索框是不是展开着
+let listSearchView = '';    // 这个词属于哪个视图（换页面就清空）
+
+/** 换页面就把搜索清掉 —— 免得从「我的歌单」切到「我喜欢」看到一屏"怎么只有三首" */
+function syncListSearchView() {
+  if (listSearchView !== currentView) {
+    listSearchView = currentView;
+    listSearch = '';
+    listSearchOpen = false;
+  }
+}
+
+function listSearchQuery() {
+  return (listSearch || '').trim().toLowerCase();
+}
+
+/** 打开合集面板时要不要把列表页的搜索词带过去。
+ *  ★ 只有「我喜欢 / 歌单」两页有列表搜索，别的页面一律不带 ——
+ *    否则从歌单切到「发现」再点开一个合集，会把歌单里的搜索词莫名其妙带进面板。 */
+function listSearchCarry() {
+  if (currentView !== 'favorites' && !currentView.startsWith('playlist:')) return '';
+  return listSearch || '';
+}
+
+/** 一行用来匹配的文字（标题 + 作者） */
+function searchBlob(t) {
+  return (((t && t.title) || '') + ' ' + ((t && t.author) || '')).toLowerCase();
+}
+
+/** 这个合集里有多少集匹配（只算已经展开过、本地有缓存的） */
+function collectInnerHits(track, q) {
+  if (!q || !track || !track.bvid) return 0;
+  const parts = DB.collectParts && DB.collectParts[track.bvid];
+  if (!parts || !parts.length) return 0;
+  let n = 0;
+  for (const e of parts) if (searchBlob(e).includes(q)) n++;
+  return n;
+}
+
+/** 按搜索词过滤一个列表。没有搜索词就原样返回（连数组都不新建） */
+function listSearchFilter(tracks) {
+  const q = listSearchQuery();
+  if (!q) return tracks;
+  return tracks.filter((t) => t && (searchBlob(t).includes(q) || collectInnerHits(t, q) > 0));
+}
+
+/** 这个列表没过滤之前一共多少首 */
+function listSearchTotal() {
+  if (currentView === 'favorites') return DB.favorites.length;
+  if (currentView.startsWith('playlist:')) {
+    const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
+    return pl ? pl.tracks.length : 0;
+  }
+  return 0;
+}
+
+/** 副标题那句「共 N 首」/「找到 K 首 / 共 N 首」 */
+function listSubText() {
+  const total = listSearchTotal();
+  if (!listSearchQuery()) return `共 ${total} 首`;
+  return `找到 ${currentTracks().length} 首 / 共 ${total} 首`;
+}
+
+/** 头部那块搜索区：收起时只有一个小图标，展开后占满中间。
+ *  ★ 只有「我喜欢」「歌单」两页用，别的页面的 .block-head 一个字都没动
+ *    （给 .block-head 加 has-search 修饰类，避免影响另外 11 处布局）。 */
+function listSearchHTML() {
+  if (!listSearchOpen && !listSearch) {
+    return `<div class="bh-search"><button class="ghost-btn bh-search-btn" id="btnListSearch" title="在这个列表里搜歌">${ic('i-search')}</button></div>`;
+  }
+  return `
+    <div class="bh-search open">
+      <input class="bh-search-input" id="listSearchInput" type="text"
+             placeholder="搜这个列表里的歌名 / UP 主…" value="${esc(listSearch)}" />
+      <button class="ghost-btn bh-search-clear" id="btnListSearchClear" title="清空并收起">✕</button>
+    </div>`;
+}
+
+/** 当前页面的列表区 HTML。
+ *  ★ 搜索时**只替换这一块**（见 refreshListOnly）—— 重画整个 content 会让输入框
+ *    失焦、光标跳到开头，一个字都打不连续。 */
+function currentListHTML() {
+  const picking = !!selPick;
+  const list = currentTracks();
+  const q = listSearchQuery();
+  const innerHits = q ? (t) => collectInnerHits(t, q) : null;
+  const emptyHint = q ? '换个关键词试试，或者点右边的 ✕ 清空搜索' : '';
+  if (currentView === 'favorites') {
+    return trackListHTML(list, {
       // 勾选模式下把「移除」收起来：一行里"点一下是勾选、旁边那个点一下是删掉"太容易点错
       remove: !picking,
       pick: picking,
       pickSet: picking ? selPick.selected : null,
-      // v2.9.0：键由 selKey() 统一算（B 站歌 b: + bvid，本地歌 l: + localPath）——
-      //   歌单里两种歌可能混着，固定字段名取不到统一身份。
+      // v2.9.0：键由 selKey() 统一算（B 站歌 b: + bvid，本地歌 l: + localPath）
       pickIdOf: selKey,
+      innerHits,
       emptyIcon: 'i-heart',
-      emptyText: '还没有收藏任何歌',
-      emptyHint: '在列表里点「收藏」，或者按播放条上的小爱心',
-    })}`;
+      emptyText: q ? '没有匹配的歌' : '还没有收藏任何歌',
+      emptyHint: q ? emptyHint : '在列表里点「收藏」，或者按播放条上的小爱心',
+    });
+  }
+  if (currentView.startsWith('playlist:')) {
+    return trackListHTML(list, {
+      remove: !picking,
+      pick: picking,
+      pickSet: picking ? selPick.selected : null,
+      pickIdOf: selKey,
+      innerHits,
+      emptyIcon: 'i-note',
+      emptyText: q ? '这个歌单里没有匹配的歌' : '这个歌单还是空的',
+      emptyHint: q ? emptyHint : '去搜索页面，用「＋歌单」把歌加进来',
+    });
+  }
+  return '';
+}
+
+/** 只重画列表 + 副标题那句数字，头部（含输入框）一个字都不动 */
+function refreshListOnly() {
+  const box = $('listBody');
+  if (!box) { renderAll(); return; }
+  box.innerHTML = currentListHTML();
+  const sub = document.querySelector('#content .block-sub');
+  if (sub) sub.textContent = listSubText();
+}
+
+/** 展开搜索框并聚焦 */
+function openListSearch() {
+  listSearchOpen = true;
+  rerenderKeepScroll();
+  const el = $('listSearchInput');
+  if (el) { el.focus(); el.select(); }
+}
+
+/** 清空并收起 */
+function closeListSearch() {
+  listSearch = '';
+  listSearchOpen = false;
+  rerenderKeepScroll();
+}
+
+/* ---------- 页面 3：我的收藏 ---------- */
+function renderFavorites() {
+  currentView = 'favorites';
+  syncListSearchView();
+  const picking = !!selPick;   // v2.9.0：正在批量选择
+  content().innerHTML = `
+    <div class="block-head has-search">
+      <div>
+        <div class="block-title">我喜欢</div>
+        <div class="block-sub">${listSubText()}</div>
+      </div>
+      ${listSearchHTML()}
+      <div class="block-actions">
+        <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectFav">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
+      </div>
+    </div>
+    ${picking ? selBarHTML() : ''}
+    <div id="listBody">${currentListHTML()}</div>`;
 }
 
 /* ---------- 页面 4：最近播放 ---------- */
@@ -2923,30 +3194,23 @@ function renderPlaylist(playlistId) {
   const pl = DB.playlists.find((p) => p.id === playlistId);
   if (!pl) { currentView = 'discovery'; return renderAll(); }   // 歌单没了（被删）→ 回「发现」首页
   currentView = 'playlist:' + playlistId;
+  syncListSearchView();
   const picking = !!selPick;   // v2.9.0：正在批量选择
   content().innerHTML = `
-    <div class="block-head">
+    <div class="block-head has-search">
       <div>
         <div class="block-title">${esc(pl.name)}</div>
-        <div class="block-sub">共 ${pl.tracks.length} 首</div>
+        <div class="block-sub">${listSubText()}</div>
       </div>
+      ${listSearchHTML()}
       <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayPl">${ic('i-play')}<span>播放全部</span></button>
         <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectPl">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
         <button class="ghost-btn" id="btnRenamePl">重命名</button>
         <button class="ghost-btn" id="btnDelPl">删除歌单</button>
       </div>
     </div>
     ${picking ? selBarHTML() : ''}
-    ${trackListHTML(pl.tracks, {
-      remove: !picking,
-      pick: picking,
-      pickSet: picking ? selPick.selected : null,
-      pickIdOf: selKey,   // 歌单里可能混着本地歌，键由 selKey() 统一算
-      emptyIcon: 'i-note',
-      emptyText: '这个歌单还是空的',
-      emptyHint: '去搜索页面，用「＋歌单」把歌加进来',
-    })}`;
+    <div id="listBody">${currentListHTML()}</div>`;
 }
 
 /* ---------- 页面 6：导入收藏夹 ---------- */
@@ -3143,7 +3407,7 @@ function impSimpleHead(title, sub = '') {
 function impBarHTML() {
   const n = impState ? impState.selected.size : 0;
   return `
-    <div class="imp-bar">
+    <div class="imp-bar pick-bar">
       <span class="imp-count">已选 <b>${n}</b> 个</span>
       <span class="imp-bar-actions">
         <button class="ghost-btn" id="btnImpClear"${n ? '' : ' disabled'}>清空选择</button>
@@ -4123,6 +4387,214 @@ function pickBarHTML(n, actions, opts) {
     </div>`;
 }
 
+/* ---------------- 拖动多选（v2.10.0） ----------------
+   按住鼠标往下/往上拖，经过的整段一起勾上（或一起取消）。
+
+   ★ 为什么必须"整段置位"，不能"经过一行就切换一次"：
+     手一抖在同一行上来回动，那一行就会反复勾上又取消 —— 这是所有拖动多选最经典的 bug。
+     所以按下时先记下"这一行现在是勾着还是没勾"，整个拖动过程只做"设为 X"，不做"切换"。
+   ★ 为什么还要记快照：鼠标退回去的时候，已经离开区间的行要能**恢复原样**，
+     否则"拖过头再拖回来"会留下一串被误勾的行。
+   ★ 拖动期间**不重画整个列表**（一千行每帧重画会卡成幻灯片），只改那一行的类；
+     松手时才统一重画一次，保证数据和渲染函数一致。
+   ★ 三种选择模式（我喜欢/歌单、本地歌曲、导入页挑视频）的曲目数组和身份键都不一样，
+     所以统一收口到 pickOps() 那 4 个函数里，拖选逻辑只认它们。 */
+
+const DRAG_THRESHOLD = 4;    // 移动超过 4px 才算"在拖"，否则当成单击
+const DRAG_EDGE = 40;        // 指针离内容区上下边缘多近时开始自动滚动
+const DRAG_SPEED = 14;       // 自动滚动每帧滚多少像素
+
+const dragSel = {
+  ops: null,          // pickOps() 的返回值
+  rows: null,         // 拖动开始时抓的一把行（期间列表不重画，所以可以放心缓存）
+  anchor: -1,         // 起点行号
+  target: false,      // 这一段要设成"勾上"(true) 还是"取消"(false)
+  snap: null,         // Map<行号, 拖动前是否勾着>
+  touched: null,      // Set<行号> 本次拖动改过的
+  moved: false,       // 是否已超过阈值、算真正在拖
+  downX: 0, downY: 0,
+  lastX: 0, lastY: 0,
+  raf: 0, dir: 0,
+  suppressClick: false,
+};
+
+/** 当前处在哪种选择模式；返回"按行号读写勾选"的一组函数。
+ *  没有选择模式时返回 null（拖选直接不生效，普通列表该怎么滚还怎么滚）。 */
+function pickOps() {
+  if (selPick) {
+    const tracks = currentTracks();
+    return {
+      keyOf: (i) => selKey(tracks[i]),
+      has: (k) => selPick.selected.has(k),
+      set: (k, i, on) => { if (on) selPick.selected.set(k, tracks[i]); else selPick.selected.delete(k); },
+    };
+  }
+  if (localPick) {
+    const tracks = currentTracks();
+    return {
+      keyOf: (i) => (tracks[i] || {}).localPath,
+      has: (k) => localPick.selected.has(k),
+      set: (k, i, on) => { if (on) localPick.selected.set(k, tracks[i]); else localPick.selected.delete(k); },
+    };
+  }
+  // 导入页的挑视频屏：曲目在 impState.list 里（不是 currentTracks()），值是 { track, from }
+  if (impState && impState.selected) {
+    const tracks = impState.list || [];
+    return {
+      keyOf: (i) => (tracks[i] || {}).bvid,
+      has: (k) => impState.selected.has(k),
+      set: (k, i, on) => {
+        if (on) impState.selected.set(k, { track: tracks[i], from: impFrom() });
+        else impState.selected.delete(k);
+      },
+    };
+  }
+  return null;
+}
+
+/** 把某一行的 DOM 刷成"勾上 / 没勾"的样子（不重画整个列表）。 */
+function paintPickRow(el, on) {
+  if (!el) return;
+  el.classList.toggle('picked', on);
+  const box = el.querySelector('.pick');
+  if (box) {
+    box.classList.toggle('on', on);
+    box.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+}
+
+/** 指针现在压着第几行（-1 = 不在任何行上）。
+ *  ★ 用 elementFromPoint 而不是 e.target：自动滚动的时候指针没动、是内容在动，
+ *    只有重新"打一枪"才知道现在压着谁。 */
+function rowIndexAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const row = el && el.closest ? el.closest('.track.pickable') : null;
+  if (!row) return -1;
+  const i = Number(row.dataset.i);
+  return Number.isFinite(i) ? i : -1;
+}
+
+/** 「已选 N 首」和按钮置灰只依赖数量 —— 数量没变就别重建这条 bar（省得每帧抖一下） */
+let pickBarLastN = -1;
+function refreshPickBarOnly() {
+  const n = selPick ? selPick.selected.size
+    : localPick ? localPick.selected.size
+    : impState ? impState.selected.size : -1;
+  if (n === pickBarLastN) return;
+  pickBarLastN = n;
+  const bar = document.querySelector('#content .pick-bar');
+  if (!bar) return;
+  if (selPick) bar.outerHTML = selBarHTML();
+  else if (localPick) bar.outerHTML = localBarHTML();
+  else if (impState) bar.outerHTML = impBarHTML();
+}
+
+/** 把 [anchor .. cur] 整段设成 target；离开区间的行恢复拖动前的样子。 */
+function applyDragRange(cur) {
+  const d = dragSel;
+  if (!d.ops || cur < 0 || !d.rows) return;
+  const lo = Math.min(d.anchor, cur);
+  const hi = Math.max(d.anchor, cur);
+
+  // ① 先把"上次改过、这次已经不在区间里"的行恢复原状（拖过头再拖回来的情况）
+  for (const i of d.touched) {
+    if (i >= lo && i <= hi) continue;
+    const k = d.ops.keyOf(i);
+    if (k) d.ops.set(k, i, d.snap.get(i));
+    paintPickRow(d.rows[i], d.snap.get(i));
+    d.touched.delete(i);
+  }
+  // ② 区间内一律设成 target（第一次碰到的行先记快照）
+  for (let i = lo; i <= hi; i++) {
+    const k = d.ops.keyOf(i);
+    if (!k) continue;
+    if (!d.touched.has(i)) { d.snap.set(i, d.ops.has(k)); d.touched.add(i); }
+    d.ops.set(k, i, d.target);
+    paintPickRow(d.rows[i], d.target);
+  }
+  // ③ 计数 / 按钮置灰实时跟上
+  refreshPickBarOnly();
+}
+
+/** 指针贴近上下边缘时自动滚动（"按着鼠标滑动滚动"就是这个） */
+function updateDragAutoScroll(y) {
+  const box = content().getBoundingClientRect();
+  let dir = 0;
+  if (y < box.top + DRAG_EDGE) dir = -1;
+  else if (y > box.bottom - DRAG_EDGE) dir = 1;
+  dragSel.dir = dir;
+  if (dir && !dragSel.raf) dragSel.raf = requestAnimationFrame(dragScrollTick);
+}
+
+function dragScrollTick() {
+  dragSel.raf = 0;
+  if (!dragSel.moved || !dragSel.dir) return;
+  const box = content();
+  const before = box.scrollTop;
+  box.scrollTop = before + dragSel.dir * DRAG_SPEED;
+  // 滚完内容位置变了 → 重新算"指针现在压着哪一行"，否则会一直停在原来那行上
+  if (box.scrollTop !== before) applyDragRange(rowIndexAt(dragSel.lastX, dragSel.lastY));
+  dragSel.raf = requestAnimationFrame(dragScrollTick);
+}
+
+function onPickPointerDown(e) {
+  if (e.button !== 0) return;                       // 只认左键
+  const row = e.target.closest ? e.target.closest('.track.pickable') : null;
+  if (!row) return;
+  const ops = pickOps();
+  if (!ops) return;
+  const i = Number(row.dataset.i);
+  if (!Number.isFinite(i)) return;
+  const k = ops.keyOf(i);
+  if (!k) return;                                   // 这一行没有身份键（本地歌缺路径之类）
+
+  dragSel.ops = ops;
+  dragSel.rows = document.querySelectorAll('#content .track.pickable');
+  dragSel.anchor = i;
+  // 单击会翻转这一行 → 拖动就把整段设成"翻转后"的样子，两种操作的语义才一致
+  dragSel.target = !ops.has(k);
+  dragSel.snap = new Map();
+  dragSel.touched = new Set();
+  dragSel.moved = false;
+  dragSel.downX = e.clientX; dragSel.downY = e.clientY;
+  dragSel.lastX = e.clientX; dragSel.lastY = e.clientY;
+  dragSel.dir = 0;
+  dragSel.suppressClick = false;
+  pickBarLastN = -1;
+}
+
+function onPickPointerMove(e) {
+  if (dragSel.anchor < 0) return;
+  dragSel.lastX = e.clientX; dragSel.lastY = e.clientY;
+  if (!dragSel.moved) {
+    if (Math.abs(e.clientX - dragSel.downX) < DRAG_THRESHOLD &&
+        Math.abs(e.clientY - dragSel.downY) < DRAG_THRESHOLD) return;
+    dragSel.moved = true;
+  }
+  e.preventDefault();                               // 拖选中别顺手把文字选中（CSS 已经挡了一层，这里双保险）
+  applyDragRange(rowIndexAt(e.clientX, e.clientY));
+  updateDragAutoScroll(e.clientY);
+}
+
+function onPickPointerUp() {
+  if (dragSel.anchor < 0) return;
+  const wasDragging = dragSel.moved;
+  if (dragSel.raf) { cancelAnimationFrame(dragSel.raf); dragSel.raf = 0; }
+  dragSel.dir = 0;
+  dragSel.anchor = -1;
+  dragSel.moved = false;
+  dragSel.ops = null;
+  dragSel.rows = null;
+  if (wasDragging) {
+    // 松手后浏览器还会补发一次 click —— 别让它把这一段的第一行又翻回去。
+    // ★ 这个标记**不靠定时器清**，而是等下一次 pointerdown 时清（见 onPickPointerDown）。
+    //   原因：任何一次 click 都必然由一次 pointerdown 引起，所以"下一次按下"一定早于
+    //   "下一次 click"。用 setTimeout 清的话，定时器一响、click 还没来，就会漏吃。
+    dragSel.suppressClick = true;
+    rerenderKeepScroll();                           // 数据定下来了，统一重画一次
+  }
+}
+
 /** 点整行 = 勾 / 取消（和导入页 impToggle 一套逻辑，只是换了个选择集） */
 function selToggle(i) {
   if (!selPick) return;
@@ -5040,6 +5512,14 @@ function renderAll() {
   if (selPick && selPick.view !== currentView) selPick = null;
   // v2.8.0 修订：本地歌曲的批量选择同理 —— 离开这一页就退出。
   if (localPick && currentView !== 'local') localPick = null;
+  // ★ v2.10.0：搜索词只属于「我喜欢」「歌单」两页 —— 停在别的页面时清掉。
+  //   不这样的话：在歌单里搜了「光」，切到「发现」再点开一个合集，
+  //   面板的搜索框会莫名其妙带着「光」（用户压根没在这页搜过）。
+  if (currentView !== 'favorites' && !currentView.startsWith('playlist:')) {
+    listSearch = '';
+    listSearchOpen = false;
+    listSearchView = '';
+  }
 
   renderPlaylistSidebar();
   syncNavHighlight();   // 侧栏高亮永远跟着"当前在哪一页"走（不再只在点侧栏时才更新）
@@ -6002,6 +6482,9 @@ function bindEvents() {
   /* ---- 播放条上的下载按钮（v2.8.0）----
      行为随当前状态变：没下过 → 排队下载；在下 → 跳「下载管理」；已下好 → 打开所在文件夹。
      和按钮的 title 一一对应（见 syncDownloadBtn）。 */
+  // v2.10.0：定位到当前这首在列表里的位置（跳回来源页面 + 滚过去 + 闪一下）
+  $('btnLocate').addEventListener('click', locateCurrentTrack);
+
   $('btnDownload').addEventListener('click', async () => {
     const t = currentBarTrack();
     if (!t || !t.bvid) { toast('先选一首歌吧'); return; }
@@ -6119,6 +6602,32 @@ function bindEvents() {
 
   /* ---- 导入我的 B 站收藏夹（v2.6.0）—— 侧栏「我的歌单」那一行的导入按钮 ---- */
   $('btnImportMine').addEventListener('click', openImportMine);
+
+  /* ---- 内容区：拖动多选（v2.10.0）----
+     ★ 用 pointer 事件而不是 mousedown：一套代码同时管鼠标和触摸，而且 pointerdown
+       在行上按下时就能拿到坐标，不用等 mousedown 的兼容层。
+     ★ pointermove / pointerup 挂在 document 上：拖动过程中指针完全可能跑到内容区外面
+       （甚至跑到播放条上），挂在行上会直接收不到后续事件。
+     ★ 这里**不** preventDefault：CSS 的 user-select:none 已经挡住了"按下就开始选文字"，
+       在这里拦反而会把某些浏览器的 click 派发一起拦掉（单击就失灵了）。 */
+  $('content').addEventListener('pointerdown', onPickPointerDown);
+  document.addEventListener('pointermove', onPickPointerMove);
+  document.addEventListener('pointerup', onPickPointerUp);
+  document.addEventListener('pointercancel', onPickPointerUp);
+
+  /* ---- 内容区：列表内搜索的输入（v2.10.0）----
+     ★ 只重画列表那一块（refreshListOnly），**不能** renderAll ——
+       否则每敲一个字输入框就被重建一次，焦点丢失、光标跳回开头，根本打不连续。 */
+  $('content').addEventListener('input', (e) => {
+    if (e.target.id !== 'listSearchInput') return;
+    listSearch = e.target.value;
+    refreshListOnly();
+  });
+  $('content').addEventListener('keydown', (e) => {
+    if (e.target.id !== 'listSearchInput') return;
+    // Esc = 清空并收起（全局快捷键对 Esc 不 preventDefault，所以这里收得到）
+    if (e.key === 'Escape') { e.preventDefault(); closeListSearch(); }
+  });
 
   /* ---- 内容区：列表点击（事件委托，一次绑定管所有动态行） ---- */
   $('content').addEventListener('click', async (e) => {
@@ -6255,12 +6764,14 @@ function bindEvents() {
     if (id === 'btnPlayUp') { if (upState) startFromView(upState.list, 0); return; }
     if (id === 'btnPlayParsed') { startFromView(parsedView.tracks, 0); return; }
     if (id === 'btnAddParsed') { addManyToPlaylist(parsedView.tracks); return; }
-    if (id === 'btnPlayFav') { startFromView(DB.favorites, 0); return; }
-    if (id === 'btnPlayPl') {
-      const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
-      if (pl) startFromView(pl.tracks, 0);
-      return;
-    }
+    // ★ v2.10.0：「我喜欢」和「歌单」两页的「播放全部」**删掉了**（Neo 拍板：彻底不要）。
+    //   想顺序播就点第几首，之后自动往下走。这里原来那两行 `startFromView(...)` 一并删掉，
+    //   留着就是永远走不到的死代码（verify 第 62 类有反向断言盯着它俩不许复活）。
+    //   发现页 / UP 主页 / 解析页的「播放全部」没动 —— 那几页没有搜索框要腾位置。
+
+    // ---- v2.10.0：列表内搜索 ----
+    if (id === 'btnListSearch') { openListSearch(); return; }
+    if (id === 'btnListSearchClear') { closeListSearch(); return; }
 
     // ---- v2.9.0：列表的「批量选择」----
     // 我喜欢 / 歌单：点一下进选择模式（再点退出）；详情页那个「批量下载」是另一回事，
@@ -6333,6 +6844,9 @@ function bindEvents() {
     // v2.8.0 修订：本地歌曲的批量选择也走这套，靠 localPick 分辨。
     const pickRow = e.target.closest('.track.pickable');
     if (pickRow) {
+      // ★ v2.10.0：刚刚是一次拖动多选 → 浏览器松手后补发的这一下 click 要吃掉。
+      //   不吃的话，拖完的第一行会被再翻一次（拖了 5 行，结果第 1 行没选上）。
+      if (dragSel.suppressClick) { dragSel.suppressClick = false; return; }
       const i = Number(pickRow.dataset.i);
       if (selPick) selToggle(i);
       else if (localPick) localToggle(i);
@@ -6528,6 +7042,21 @@ function bindEvents() {
     //   各个面板自己的 Esc 监听照旧能收到。
     const key = keyFromEvent(e);
     if (!key) return;                                   // 只按了修饰键
+
+    // ★ v2.10.0：Ctrl+A 不许变成"全选界面文字"。
+    //   以前这个键**没被表占用**，按下去就是 Chromium 的"全选"—— 整个窗口的歌名、按钮全变蓝。
+    //   CSS 的 user-select:none 已经能挡住大部分，但那是"能不能选"的问题；
+    //   这里再拦一道，是因为 Ctrl+A 还会顺带把**焦点/选区**搞乱，光靠 CSS 不保险。
+    //   顺带把语义做正：批量选择模式下 = 全选歌曲（同一个键，更合理）。
+    //   注意这条在 isTypingTarget 之后 —— 输入框里按 Ctrl+A 必须还能全选文字。
+    if (key === 'Ctrl+a') {
+      e.preventDefault();
+      if (selPick) selPickAll();
+      else if (localPick) localPickAll();
+      else if (impState && impState.selected) impPickAll();
+      return;
+    }
+
     const hit = KEY_ACTIONS.find((a) => keyOf(a.id) === key);
     if (!hit) return;                                   // 没绑这个键
     e.preventDefault();   // 空格 / 方向键会滚页面，Ctrl+D 之类浏览器也有默认行为 → 一律挡掉
@@ -7365,7 +7894,10 @@ function totalDuration() {
 /** 当前页面正在显示的那组曲目 */
 function currentTracks() {
   if (currentView === 'discovery') return discoveryResults;
-  if (currentView === 'favorites') return DB.favorites;
+  // ★ v2.10.0：这两页有列表内搜索 —— 搜索中返回**筛选后**的数组。
+  //   这样点行播放、全选、拖选、批量操作全都自动对齐（看到什么就是什么），
+  //   不用在每处单独判一次。trackRow 的 data-i 也是按这个数组编的，所以索引天然一致。
+  if (currentView === 'favorites') return listSearchFilter(DB.favorites);
   if (currentView === 'history') return DB.history;
   // v2.8.0：下载管理页的行是任务行（.dl-row），不是曲目行，没有"当前曲目"这回事。
   //   返回空数组而不是落到底下的 searchResults —— 否则在下载页点空白处
@@ -7376,7 +7908,7 @@ function currentTracks() {
   if (currentView === 'parsed' && parsedView) return parsedView.tracks;
   if (currentView.startsWith('playlist:')) {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
-    return pl ? pl.tracks : [];
+    return pl ? listSearchFilter(pl.tracks) : [];
   }
   return searchResults;
 }
@@ -7412,7 +7944,7 @@ async function startFromView(tracks, index) {
   if (!seq.list.length) { toast('这个列表里没有可播放的曲目'); return; }
   const at = seq.startOf[index];
   if (at < 0) { toast('这一行的曲目都被禁用了（在合集面板里可以重新启用）'); return; }
-  playTracks(seq.list, at, viewLabel());
+  playTracks(seq.list, at, viewLabel(), { view: currentView });
 }
 
 /** 收藏 / 取消收藏 */

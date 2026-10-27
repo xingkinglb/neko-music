@@ -31,6 +31,13 @@
       <path d="M20.2 20.2 16.4 16.4"/>
     </symbol>
 
+    <!-- v2.10.0：播放条上的「定位到这首歌」——准星形状，一眼能看出是"指回某处" -->
+    <symbol id="i-locate" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="7"/>
+      <circle cx="12" cy="12" r="2.1"/>
+      <path d="M12 1.8v3.4M12 18.8v3.4M1.8 12h3.4M18.8 12h3.4"/>
+    </symbol>
+
     <symbol id="i-settings" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="12" cy="12" r="3.4"/>
       <path d="M12 7.8V5.8M12 16.2v2M7.8 12H5.8M16.2 12h2M14.97 9.03l1.41-1.41M9.03 9.03 7.62 7.62M14.97 14.97l1.41 1.41M9.03 14.97l-1.41 1.41"/>
@@ -384,6 +391,17 @@
 
     <!-- 右：歌词按钮 + 音量 -->
     <div class="volume">
+      <!--
+        v2.10.0：定位到"这首歌在列表里的位置"。
+        · 这首歌是从哪个列表点进来的（歌单 / 我喜欢 / 搜索页…），就切回那个页面，
+          滚到这一行、闪一下高亮。
+        · 来源是歌单的话，等于"顺带把那个歌单打开了并定位到这首"。
+        · 那次的数据已经没了（重启过、搜索页被清空）→ 退化成打开「播放队列」抽屉并定位。
+        ★ mini 下必须收起来（见 style.css），否则会插队把 ✕▢ 挤到第二行。
+      -->
+      <button class="ico-btn" id="btnLocate" title="定位到这首歌在列表里的位置">
+        <svg class="ic"><use href="#i-locate"/></svg>
+      </button>
       <!--
         「词」按钮：点一下展开整页歌词
         · 里面的 .lyric-tip 是"没有字幕"之类的一次性提示，

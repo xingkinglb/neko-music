@@ -493,6 +493,71 @@ const CASES = [
     to:   "  acts.unshift({\n    id: 'btnSelRemove',\n    icon: 'i-trash',\n    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n    danger: true,\n  });",
     expect: '不是最后 push 进去的按钮',
   },
+
+  /* ===== v2.10.0：吸顶 / 拖选 / 禁选文字 / 搜索 / 定位 ===== */
+  {
+    name: '★ v2.10.0：选择条不吸顶了（选到下半部分还得滚回顶部）',
+    file: 'src/ui/style.css',
+    from: '.pick-bar {\n  position: sticky;',
+    to:   '.pick-bar {\n  position: static;',
+    expect: '没有 position: sticky',
+  },
+  {
+    name: '★ v2.10.0：拖选改成逐行 toggle（手一抖就来回翻）',
+    file: 'src/ui/app.js',
+    from: '  const lo = Math.min(d.anchor, cur);',
+    to:   '  selToggle(0);\n  const lo = Math.min(d.anchor, cur);',
+    expect: '拖选里调用了逐行 toggle',
+  },
+  {
+    name: '★ v2.10.0：去掉全局 user-select:none（鼠标一划就选蓝）',
+    file: 'src/ui/style.css',
+    from: 'html, body { user-select: none; -webkit-user-select: none; }',
+    to:   'html, body { user-select: auto; -webkit-user-select: auto; }',
+    expect: '没有全局 user-select: none',
+  },
+  {
+    name: '★ v2.10.0：搜索时改成整页重画（每敲一个字输入框就失焦）',
+    file: 'src/ui/app.js',
+    from: '  box.innerHTML = currentListHTML();\n  const sub = document.querySelector',
+    to:   '  renderAll();\n  box.innerHTML = currentListHTML();\n  const sub = document.querySelector',
+    expect: 'refreshListOnly 里无条件调了 renderAll',
+  },
+  {
+    name: '★ v2.10.0：队列不记来源（定位按钮无从下手）',
+    file: 'src/ui/app.js',
+    from: "function playTracks(tracks, startIndex = 0, name = '', source = null) {",
+    to:   "function playTracks(tracks, startIndex = 0, name = '') {",
+    expect: 'playTracks 没有 source 参数',
+  },
+  {
+    name: '★ v2.10.0：把「播放全部」加回来（已经删掉的入口不许复活）',
+    file: 'src/ui/app.js',
+    from: "        <button class=\"ghost-btn${picking ? ' on' : ''}\" id=\"btnSelectFav\">",
+    to:   "        <button class=\"ghost-btn\" id=\"btnPlayFav\">播放全部</button>\n        <button class=\"ghost-btn${picking ? ' on' : ''}\" id=\"btnSelectFav\">",
+    expect: 'btnPlayFav / btnPlayPl 又回来了',
+  },
+  {
+    name: '★ v2.10.0：mini 下不收起定位按钮（会把 ✕▢ 挤到第二行）',
+    file: 'src/ui/style.css',
+    from: 'body.mini #btnLocate { display: none; }',
+    to:   'body.mini #btnLocate { display: inline-flex; }',
+    expect: 'mini 下没把 #btnLocate 收起来',
+  },
+  {
+    name: '★ v2.10.0 修订：打开合集面板不带搜索词（还得在面板里手打一遍）',
+    file: 'src/ui/app.js',
+    from: "$('collectSearch').value = listSearchCarry();",
+    to:   "$('collectSearch').value = '';",
+    expect: '打开合集面板时没把列表搜索词带过去',
+  },
+  {
+    name: '★ v2.10.0 修订：面板搜索只匹配标题（和列表页的「内含 N 集」对不上）',
+    file: 'src/ui/app.js',
+    from: '.filter(({ e, i }) => !q || searchBlob(e).includes(q) || String(i + 1) === q);',
+    to:   ".filter(({ e, i }) => !q || (e.title || '').toLowerCase().includes(q) || String(i + 1) === q);",
+    expect: '面板搜索只匹配标题',
+  },
 ];
 
 let pass = 0, fail = 0;

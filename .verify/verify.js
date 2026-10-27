@@ -1057,9 +1057,14 @@ console.log('\n[30] 播放队列跟随"你点播放的那个界面"：');
   }
 
   // 所有播放"整张列表"的入口都要经过 startFromView（否则又是旧的 queue.name）
+  // ★ v2.10.0：「我喜欢」「歌单」两页的「播放全部」删掉了（Neo 拍板），调用点从 7 处降到 6 处。
+  //   这里改成"点名要求这几个入口必须在"，比死守一个数字有意义 ——
+  //   数量会因为加/删按钮一直变，而"哪几个入口必须统一"才是真正要守的东西。
   const starts = [...appjs.matchAll(/startFromView\(([^,]+),/g)].map((m) => m[1].trim());
-  if (starts.length < 7) err(`只有 ${starts.length} 处走 startFromView()，播放入口没统一`);
-  else ok(`${starts.length} 处播放入口统一走 startFromView()`);
+  const needStarts = ['searchResults', 'discoveryResults', 'upState.list', 'parsedView.tracks', 'tracks'];
+  const missStarts = needStarts.filter((x) => !starts.includes(x));
+  if (missStarts.length) err(`这些播放入口没走 startFromView()：${missStarts.join(' / ')}`);
+  else ok(`${starts.length} 处播放入口统一走 startFromView()（发现 / UP主页 / 解析页 / 点行播放都在）`);
 
   if (/playTracks\([^)]*queue\.name/.test(appjs)) err('还有播放入口在传旧队列名 queue.name');
   else ok('没有任何播放入口再传旧队列名');
@@ -2482,9 +2487,13 @@ console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
     err('录制键位时没有先拦下这一下 —— 会把"新键位"当成"执行功能"');
   } else ok('录制中按下的键会被吃掉（不会顺手执行功能）');
 
-  if (!/document\.addEventListener\('keydown',[\s\S]{0,900}?if \(recordingKeyId\) \{ captureRecordedKey\(e\); return; \}[\s\S]{0,400}?\}, true\)/.test(appjs)) {
-    err('录制监听没有在捕获阶段先接键 —— Esc 可能先被其它面板当成"关闭"处理');
-  } else ok('录制键盘监听在捕获阶段运行（录制 Esc 不会被面板抢先处理）');
+  // ★ v2.10.0 修：这条原来用"到 `}, true)` 不超过 400 字符"来间接判断"录制检查靠前"，
+  //   太脆 —— 中间插一段别的逻辑（这次是 Ctrl+A 拦截）就误报。
+  //   改成直接断言**先后顺序**：recordingKeyId 那句必须排在 KEY_ACTIONS.find 之前，
+  //   这才是"先接键、再执行"的真正含义。
+  if (!/document\.addEventListener\('keydown',[\s\S]{0,900}?if \(recordingKeyId\) \{ captureRecordedKey\(e\); return; \}[\s\S]{0,1600}?KEY_ACTIONS\.find\(/.test(appjs)) {
+    err('录制监听没有先于"查表执行"接键 —— Esc 可能先被其它面板当成"关闭"处理，或者新键位被当成执行功能');
+  } else ok('录制键盘监听先于查表执行（录制 Esc 不会被面板抢先处理）');
 
   /* ---- ④ 界面那一页 ---- */
   if (!/data-tab="keys"/.test(html)) err('设置面板没有「快捷键」标签');
@@ -3944,5 +3953,186 @@ console.log('\n[61] v2.9.0 · 列表的「批量选择」：');
   else err('缺少 .verify/test-round24.js —— 四个动作必须真的点一遍');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 61 大类检查）');
+/* ---- 62) v2.10.0：吸顶 / 拖选 / 禁止选中文字 / 列表搜索 / 快速定位 ---- */
+console.log('\n[62] v2.10.0 · 吸顶 + 拖选 + 禁选文字 + 搜索 + 定位：');
+{
+  /** 切出一段函数体（从函数签名到下一个顶层 `\n}`）。必须切开查 —— 全局 grep 会被别处同名写法骗过。 */
+  const bodyOf = (sig) => {
+    const i = appjs.indexOf(sig);
+    if (i < 0) return '';
+    const j = appjs.indexOf('\n}\n', i);
+    return appjs.slice(i, j < 0 ? appjs.length : j);
+  };
+
+  /* ===== ① 禁止选中界面文字 ===== */
+  if (!/html,\s*body\s*\{[^}]*user-select:\s*none/.test(css))
+    err('★ 没有全局 user-select: none —— 鼠标一划就把歌名/按钮整片选蓝');
+  else ok('★ 全局禁止选中文字（html, body）');
+  // 白名单：输入框必须能选，否则没法正常输入
+  if (!/input,\s*textarea,\s*select,\s*\[contenteditable="true"\]/.test(css))
+    err('★ 输入框没开 user-select: text —— 输入框里选不了字了');
+  else ok('★ 输入框仍然能选文字（白名单）');
+  if (!/\.lyric-box[^{]*\{[^}]*user-select:\s*text/.test(css))
+    err('★ 整页歌词没开 user-select: text —— 想复制一句歌词复制不了');
+  else ok('★ 整页歌词能选（要复制歌词）');
+  if (!/\.err[^{]*\{[^}]*user-select:\s*text/.test(css))
+    err('★ 报错信息没开 user-select: text —— 出错时没法复制出来查');
+  else ok('★ 报错信息能选（要复制出来查）');
+
+  // Ctrl+A：光靠 CSS 不保险，还要在 keydown 里拦
+  if (!/if \(key === 'Ctrl\+a'\)\s*\{\s*e\.preventDefault\(\);/.test(appjs))
+    err('★ 没有拦下 Ctrl+A —— 它还会触发 Chromium 的"全选"，把选区/焦点搞乱');
+  else ok('★ Ctrl+A 在全局 keydown 里被拦下（不再全选界面文字）');
+  if (!/if \(key === 'Ctrl\+a'\)[\s\S]{0,260}?selPickAll\(\)/.test(appjs))
+    err('★ 批量选择模式下 Ctrl+A 没有做成「全选歌曲」');
+  else ok('★ 批量选择模式下 Ctrl+A = 全选歌曲（同一个键，语义更合理）');
+  // 反向：Ctrl+A 的处理必须在 isTypingTarget 之后，否则输入框里按 Ctrl+A 全选不了文字
+  {
+    // ★ 锚点用 `if (recordingKeyId) { captureRecordedKey(e); return; }` —— 这句只有
+    //   全局 keydown handler 里有。别拿 `keyFromEvent(e)` 当锚点：captureRecordedKey
+    //   里也有一句一样的，indexOf 会先撞上它（踩过）。
+    const anchor = appjs.indexOf('if (recordingKeyId) { captureRecordedKey(e); return; }');
+    const kd = anchor < 0 ? '' : appjs.slice(Math.max(0, anchor - 700), anchor + 1600);
+    const typingAt = kd.indexOf('isTypingTarget(e.target)');
+    const ctrlAAt = kd.indexOf("if (key === 'Ctrl+a')");
+    if (typingAt < 0 || ctrlAAt < 0 || ctrlAAt < typingAt)
+      err('★ Ctrl+A 的拦截排在 isTypingTarget 之前 —— 输入框里按 Ctrl+A 就选不了文字了');
+    else ok('★ Ctrl+A 拦截排在"输入框放行"之后（输入框里仍能全选文字）');
+  }
+
+  /* ===== ② 选择条吸顶 ===== */
+  if (!/\.pick-bar\s*\{[^}]*position:\s*sticky/.test(css))
+    err('★ .pick-bar 没有 position: sticky —— 选到列表下半部分还得滚回顶部才能点动作');
+  else ok('★ .pick-bar 吸顶（position: sticky）');
+  if (!/\.pick-bar\s*\{[^}]*z-index:\s*30/.test(css))
+    err('★ .pick-bar 没有 z-index —— 吸顶后会被下面的歌曲行盖住');
+  else ok('★ .pick-bar 有 z-index（压得住歌曲行）');
+  // 导入页那条也得吸（同一个类）
+  if (!/<div class="imp-bar pick-bar">/.test(appjs))
+    err('★ 导入页那条"已选 N 个"没加 pick-bar 类 —— 它同样很长，却没吸顶');
+  else ok('★ 导入页的"已选 N 个"也一起吸顶');
+
+  /* ===== ③ 拖动多选 ===== */
+  if (!/const DRAG_THRESHOLD = \d+/.test(appjs))
+    err('★ 没有拖动阈值 —— 手一抖就变成拖选，单击会失灵');
+  else ok('★ 有拖动阈值（超过才算是拖选）');
+  if (!/function pickOps\(\)/.test(appjs))
+    err('★ 没有 pickOps() —— 三种选择模式的读写没统一');
+  else ok('★ pickOps() 统一了三种选择模式的读写');
+  {
+    const fn = bodyOf('function applyDragRange(cur) {');
+    if (!/const lo = Math\.min\(d\.anchor, cur\)/.test(fn) || !/const hi = Math\.max\(d\.anchor, cur\)/.test(fn))
+      err('★ 拖选没按"行区间"算 —— 往上拖会失效');
+    else ok('★ 拖选按行区间算（上下两个方向都支持）');
+    if (!/d\.snap\.get\(i\)/.test(fn))
+      err('★ 拖选没恢复快照 —— 拖过头再拖回来，中间那些行会留下误勾');
+    else ok('★ 拖选能恢复拖动前的快照（拖过头再拖回来不会留脏）');
+    // ★ 反向断言：拖选里不许调用 selToggle / localToggle —— 那是"逐行切换"，手一抖就来回翻
+    if (/selToggle\(|localToggle\(|impToggle\(/.test(fn))
+      err('★ 拖选里调用了逐行 toggle —— 鼠标在同一行上来回动会让它反复勾上又取消');
+    else ok('★ 反向断言：拖选用的是"整段置位"，不是逐行 toggle');
+  }
+  if (!/function updateDragAutoScroll/.test(appjs) || !/requestAnimationFrame\(dragScrollTick\)/.test(appjs))
+    err('★ 拖到边缘没有自动滚动 —— "按着鼠标滑到底"就用不了');
+  else ok('★ 拖到内容区边缘会自动滚动');
+  if (!/if \(dragSel\.suppressClick\) \{ dragSel\.suppressClick = false; return; \}/.test(appjs))
+    err('★ 拖选结束后没吃掉补发的 click —— 拖 5 行会有 1 行被翻回去');
+  else ok('★ 拖选结束后吃掉补发的 click（不会把第一行翻回去）');
+  // 定位滚动必须自己算 scrollTop，不许 scrollIntoView（第 16 类那条红线的延伸）
+  if (!/function centerInScroll\(box, el\)/.test(appjs))
+    err('★ 没有 centerInScroll() —— 定位滚动会退回 scrollIntoView（整页抖）');
+  else ok('★ 有 centerInScroll()（自己算 scrollTop，不碰 scrollIntoView）');
+
+  /* ===== ④ 列表内搜索 ===== */
+  if (!/function listSearchFilter\(tracks\)/.test(appjs) || !/function collectInnerHits\(track, q\)/.test(appjs))
+    err('★ 没有 listSearchFilter / collectInnerHits —— 搜索没接上');
+  else ok('★ 有 listSearchFilter() + collectInnerHits()');
+  if (!/if \(currentView === 'favorites'\) return listSearchFilter\(DB\.favorites\);/.test(appjs) ||
+      !/return pl \? listSearchFilter\(pl\.tracks\) : \[\];/.test(appjs))
+    err('★ currentTracks() 没走搜索过滤 —— 搜索时点行播放/全选会作用于全部，和"看到什么就是什么"不符');
+  else ok('★ currentTracks() 在两页走搜索过滤（播放/全选/拖选自动对齐）');
+  // 关键：输入时只能重画列表，不能 renderAll（否则输入框失焦）
+  {
+    const fn = bodyOf('function refreshListOnly() {');
+    if (!/box\.innerHTML = currentListHTML\(\)/.test(fn))
+      err('★ refreshListOnly 没有只替换列表那一块');
+    else ok('★ refreshListOnly 只替换列表那一块');
+    if (/^\s*renderAll\(\);/m.test(fn))
+      err('★ refreshListOnly 里无条件调了 renderAll —— 每敲一个字输入框就失焦一次');
+    else ok('★ 反向断言：refreshListOnly 没有无条件 renderAll（输入框不会失焦）');
+  }
+  if (!/addEventListener\('input', \(e\) => \{[\s\S]{0,200}?listSearchInput[\s\S]{0,200}?refreshListOnly\(\)/.test(appjs))
+    err('★ 搜索框的 input 没接 refreshListOnly');
+  else ok('★ 搜索框输入即筛（走 refreshListOnly）');
+  // ★ v2.10.0 修订：搜索词要自动带进合集面板
+  if (!/\$\('collectSearch'\)\.value = listSearchCarry\(\);/.test(appjs))
+    err('★ 打开合集面板时没把列表搜索词带过去 —— 用户还得在面板里再打一遍');
+  else ok('★ 打开合集面板时自动带上列表搜索词');
+  if (!/function listSearchCarry\(\)/.test(appjs) ||
+      !/if \(currentView !== 'favorites' && !currentView\.startsWith\('playlist:'\)\) return '';/.test(appjs))
+    err('★ listSearchCarry 没限定"只在这两页带" —— 从歌单切到发现页再点合集会带上莫名其妙的搜索词');
+  else ok('★ 只有「我喜欢 / 歌单」两页才带搜索词');
+  if (/renderCollectList\(''\);/.test(appjs))
+    err('★ 打开面板后还是用空串渲染 —— 搜索框填了字，列表却没过滤');
+  else ok('★ 面板用搜索框里的词渲染（填了字就真的过滤）');
+  // 面板的匹配规则必须和列表页一致（title + author），否则"内含 22 集"点开一集都搜不到
+  {
+    const fn = bodyOf('function renderCollectList(filter) {');
+    if (!/searchBlob\(e\)\.includes\(q\)/.test(fn))
+      err('★ 面板搜索只匹配标题 —— 列表页按作者名算出的「内含 N 集」点开会对不上');
+    else ok('★ 面板搜索和列表页同一套规则（标题 + 作者）');
+  }
+  // 离开这两页要清空，否则会把搜索词带到别的页面
+  if (!/if \(currentView !== 'favorites' && !currentView\.startsWith\('playlist:'\)\) \{[\s\S]{0,120}?listSearch = '';/.test(appjs))
+    err('★ 离开这两页没清空搜索词 —— 切到发现页再点合集会把歌单的搜索词带进去');
+  else ok('★ 离开这两页自动清空搜索词');
+
+  if (!/\.hit-chip/.test(css) || !/内含 \$\{inner\} 集/.test(appjs))
+    err('★ 没有「内含 N 集」小标 —— 合集内部匹配时用户看不懂这一行为什么留下');
+  else ok('★ 有「内含 N 集」小标');
+  if (!/\.block-head\.has-search/.test(css))
+    err('★ 没有 .block-head.has-search —— 三栏布局会连另外 11 处 block-head 一起改');
+  else ok('★ 搜索用的三栏布局只作用于 .has-search（不影响其他页面）');
+  // ★ 反向断言：「播放全部」不许复活
+  if (/btnPlayFav|btnPlayPl/.test(appjs))
+    err('★ btnPlayFav / btnPlayPl 又回来了 —— 这两页的「播放全部」已经删掉（Neo 拍板）');
+  else ok('★ 反向断言：btnPlayFav / btnPlayPl 没有复活');
+
+  /* ===== ⑤ 播放条「定位」 ===== */
+  if (!/function playTracks\(tracks, startIndex = 0, name = '', source = null\)/.test(appjs))
+    err('★ playTracks 没有 source 参数 —— 队列不知道"这次是从哪个列表点进来的"，定位就无从谈起');
+  else ok('★ playTracks 记了来源 source');
+  if (!/playTracks\(seq\.list, at, viewLabel\(\), \{ view: currentView \}\)/.test(appjs))
+    err('★ startFromView 没把当前视图传给 playTracks');
+  else ok('★ startFromView 传了 { view: currentView }');
+  if (!/function locateCurrentTrack\(\)/.test(appjs) || !/function locateCanRestore\(view\)/.test(appjs))
+    err('★ 没有 locateCurrentTrack / locateCanRestore');
+  else ok('★ 有 locateCurrentTrack() + locateCanRestore()');
+  // 数据没了必须退回队列抽屉（不能点了没反应）
+  {
+    const fn = bodyOf('function locateCurrentTrack() {');
+    if (!/openQueue\(\)/.test(fn))
+      err('★ 定位失败时没退回打开播放队列 —— 按钮会点了没反应');
+    else ok('★ 定位失败时退回打开播放队列（按钮永远有反应）');
+  }
+  if (!/\$\('btnLocate'\)\.addEventListener\('click', locateCurrentTrack\)/.test(appjs))
+    err('★ #btnLocate 没绑到 locateCurrentTrack');
+  else ok('★ #btnLocate 已绑定');
+  // mini 下必须收起（第 48 类那条哨兵的延伸，这里再钉一次）
+  if (!/body\.mini\s+#btnLocate\s*\{[^}]*display:\s*none/.test(css))
+    err('★ mini 下没把 #btnLocate 收起来 —— 它会插队把 ✕▢ 挤到第二行');
+  else ok('★ mini 下 #btnLocate 已收起');
+  if (!/symbol id="i-locate"/.test(html))
+    err('★ 没有 i-locate 图标');
+  else ok('★ 有 i-locate 图标');
+  if (!/\.locate-flash/.test(css) || !/function flashRow\(row\)/.test(appjs))
+    err('★ 定位后没有高亮反馈 —— 滚过去也看不出是哪一行');
+  else ok('★ 定位后有高亮闪一下');
+
+  /* ===== ⑥ 离线实测必须在 ===== */
+  if (fs.existsSync(path.join(ROOT, '.verify', 'test-round25.js'))) ok('有 .verify/test-round25.js（本轮五项改动的离线实测）');
+  else err('缺少 .verify/test-round25.js —— 拖选/搜索/定位必须真的点一遍');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 62 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

@@ -114,6 +114,28 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ---------- v2.10.0：这是个应用，不是网页 ----------
+   以前鼠标按住一划，歌名 / 作者 / 时长整片变蓝；Ctrl+A 更是把整个窗口的文字全选上。
+   两件事都很难看，而且会让人误以为"是不是能复制"。
+
+   ★ 为什么写在 html, body 而不是 *：`*` 会连输入框一起禁掉（虽然可以用白名单盖回来，
+     但那是靠"后写的规则"赢，容易在某次改样式时被意外覆盖）。写在根上只禁一次，
+     白名单只对真正需要的地方开，意图更清楚。
+
+   ★ 下面那个白名单是**唯一**允许选文字的地方，加新东西前先问一句"用户真的会复制它吗"。 */
+html, body { user-select: none; -webkit-user-select: none; }
+
+input, textarea, select, [contenteditable="true"],
+/* 整页歌词：有人会想复制一句歌词（user-select 是继承属性，给容器开一次就够） */
+.lyric-box,
+/* 报错信息：出问题时得能复制出来查 */
+.err,
+/* 设置里显示的路径 / 版本号这类"要拿去用"的文字 */
+.copyable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
 input { font-family: inherit; outline: none; }
 ul { list-style: none; }
@@ -527,6 +549,41 @@ body.glass-prebake.has-imgbg .player {
 .block-title { font-size: 18px; font-weight: 700; }
 .block-sub { font-size: 12.5px; color: var(--muted); }
 .block-actions { display: flex; gap: 8px; }
+
+/* ---------- v2.10.0：列表页头部的搜索区（只有「我喜欢」「歌单」两页用） ----------
+   ★ 为什么要一个 .has-search 修饰类、而不是直接改 .block-head：
+     另外 11 处 .block-head 都是"标题 + 按钮"两栏、靠 space-between 撑开的。
+     改成三栏会连它们一起动，而这次只有这两页要加搜索框。 */
+.block-head.has-search { justify-content: flex-start; gap: 12px; }
+.block-head.has-search > div:first-child { flex: 0 0 auto; }
+.block-head.has-search .block-actions { margin-left: auto; flex: 0 0 auto; }
+
+/* 收起时只占一个图标的位置；展开后 flex:1 吃掉中间所有空隙 */
+.bh-search { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.bh-search.open { flex: 1 1 auto; }
+.bh-search-btn { padding: 7px 10px; }
+.bh-search-btn .ic { width: 15px; height: 15px; }
+.bh-search-input {
+  display: none; min-width: 0; width: 100%;
+  background: var(--panel); border: 1px solid var(--line);
+  color: var(--text); font-size: 12.5px; padding: 7px 12px; border-radius: 9px;
+  transition: border-color 0.16s;
+}
+.bh-search.open .bh-search-input { display: block; }
+.bh-search.open .bh-search-btn { display: none; }
+.bh-search-input::placeholder { color: var(--muted-2); }
+.bh-search-input:focus { border-color: rgb(var(--accent-rgb) / 0.55); }
+.bh-search-clear { display: none; padding: 7px 10px; font-size: 12px; }
+.bh-search.open .bh-search-clear { display: inline-flex; }
+
+/* 搜索时"这一行是因为合集里有匹配才留下的"的小标（v2.10.0）。
+   挂在作者名后面而不是徽章旁边 —— 徽章占着网格第 4 列，再挤会让那几行又对不齐。 */
+.hit-chip {
+  display: inline-block; margin-left: 7px; padding: 1px 6px;
+  font-size: 10.5px; border-radius: 5px; vertical-align: 1px;
+  background: rgb(var(--accent-rgb) / 0.16); color: var(--accent);
+  border: 1px solid rgb(var(--accent-rgb) / 0.35);
+}
 .ghost-btn {
   background: var(--panel); border: 1px solid var(--line);
   color: var(--text-2); font-size: 12.5px; padding: 7px 14px; border-radius: 9px;
@@ -588,6 +645,25 @@ body.glass-prebake.has-imgbg .player {
   align-items: center; gap: 13px;
   padding: 9px 12px; border-radius: 11px;
   cursor: pointer; transition: background 0.15s;
+}
+
+/* ---------- v2.10.0：播放条「定位」按钮 ----------
+   ★ mini 下必须收起来：`.volume` 在 mini 里是 display:contents，子元素会全部上浮到
+     播放条第一行；多一个按钮就会把 ✕▢ 挤到第二行（v2.8.0 的 #btnDownload 就是这么翻的车，
+     现在 verify 第 48 类专门盯着这条，漏写会直接报错）。 */
+body.mini #btnLocate { display: none; }
+
+/* 定位过去之后，那一行闪一下高亮再褪掉 —— 让眼睛知道"到了，就是这一行"。
+   ★ 用 animation 而不是加一个常驻的类：动画结束自动回到原样，不用 JS 记状态，
+     也不会和 .playing / .picked 那些背景色打架（动画期间盖住，结束就还回去）。 */
+.track.locate-flash,
+.collect-row.locate-flash {
+  animation: locateFlash 1.8s ease-out;
+}
+@keyframes locateFlash {
+  0%   { background: rgb(var(--accent-rgb) / 0.34); }
+  60%  { background: rgb(var(--accent-rgb) / 0.18); }
+  100% { background: transparent; }
 }
 
 /* ★★ v2.9.0 修订：时长 / 操作 / 徽章**必须钉死在固定列上**。
@@ -805,6 +881,40 @@ body.ops-always .track:hover .ops { opacity: 1; }
 .bar-sep {
   width: 1px; height: 18px; flex: 0 0 auto;
   background: var(--line); margin: 0 2px;
+}
+
+/* ---------- v2.10.0：选择条吸顶 ----------
+   「已选 N 首 + 五个动作」这条，选到列表下半部分时还得滚回顶部才能点 —— 太别扭。
+   现在滚到哪儿它都贴在内容区顶部。
+
+   ★ 为什么能直接 sticky：.pick-bar 是 .content（唯一那个 overflow-y:auto 的滚动容器）
+     的**直接子元素**，中间没有任何 overflow:hidden 的祖先拦着。要是哪天给它套了一层
+     带 overflow 的 div，这条就悄悄失效了（verify 第 62 类盯着 z-index 和 sticky）。
+
+   ★ 为什么 top 是 0 而不是 8：试过 8，实测条子会停在距内容区上沿 26px 的地方
+     （8 + .content 的 padding-top 18），滚动时歌曲行会从它**上方**那 26px 里露出来，
+     看着像"字从条子背后冒头"。所以干脆贴死，再靠圆角 + 阴影做层次。
+
+   ★ 为什么下面还要动 .content 的 padding-top：`.content` 本身有 18px 上边距，
+     sticky 是相对内容区算的，这 18px 会一直留在条子上方当"缝"。所以出现选择条时
+     把这 18px 挪到 .block-head 的 padding 上 —— 视觉完全一样，但条子能真正贴到顶。
+     用 :has() 是为了**只影响有选择条的页面**，其他页面一个像素都不动。 */
+.content:has(.pick-bar) { padding-top: 0; }
+.content:has(.pick-bar) .block-head { padding-top: 18px; }
+
+/* ★ 为什么背景要单独换成"近乎不透明"的：原来 var(--panel) 是 4.5% 白的半透明卡片，
+   吸顶之后歌曲行会从它下面穿过去 —— 实测截图里"已选 3 首"和下面那行的歌名直接叠在一起，
+   还露出半个时长数字，看着像界面坏了。所以这里用 --bg-soft（侧栏同色）压到 94%，
+   再叠一层 backdrop-filter 兜住剩下那点通透感；拿不到模糊时也基本能读。 */
+.pick-bar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--bg-soft) 94%, transparent);
+  backdrop-filter: blur(18px) saturate(1.1);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.45);
+  /* 吸顶时下面那条留白收一点：条子浮着的时候，14px 的间距会显得它和内容"断开" */
+  margin-bottom: 12px;
 }
 /* 已选 0 个时「导入」置灰，点不动 */
 .primary-btn:disabled { opacity: 0.4; cursor: not-allowed; }
