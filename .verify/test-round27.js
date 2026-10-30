@@ -136,7 +136,7 @@ const SRV = http.createServer((req, res) => {
       }
       if (scenario.polish === 'lines') return json(arr.map(fixed).join('\n'));
       // ★ 实测复现：54 行字幕，模型把 6240 个 token 全花在思考上（正文空 + finish=length）
-      if (scenario.polish === 'truncated') {
+      if (scenario.polish === 'truncated' || scenario.polish === 'truncated-short') {
         if (idx === 1) {
           return send(200, { choices: [{
             message: { content: '', reasoning_content: 'We need answer JSON array length ' + arr.length + ', correct lyrics. Need align lines…' },
@@ -427,18 +427,30 @@ async function groupA() {
       genReq.length ? genReq[0].prompt.split('\n').slice(0, 4).join(' / ') : '没发请求');
   }
 
-  // A9q 整理也会被截断（实测：54 行、6240 token 全花在思考上）→ 要能加预算重试
+  // A9q 整理被截断：长块（54 行）→ 折半分别送（行数少，模型想得少）
   scenario = { polish: 'truncated' };
   polishChunkNo = 0;
   reqLog = [];
   const pTrunc = await ai.polishLyrics({ baseURL: srvBase, key: KEY, model: 'm', title: 't', lines: lines.slice(0, 54) });
   const pReqs = reqLog.filter((r) => r.kind === 'polish');
-  is(pTrunc.length === 54 && pReqs.length === 2 && pReqs[1].maxTokens > pReqs[0].maxTokens,
-    'A9q ★ 整理被截断 → 自动加预算重试一次（第二次 max_tokens 更大）',
-    JSON.stringify(pReqs.map((r) => r.maxTokens)));
-  is(pReqs.length === 2 && pReqs[1].prompt.indexOf('直接输出最终答案，不要输出任何思考过程') === 0,
-    'A9r ★ 重试时加了"别想了，直接给答案"',
-    pReqs.length === 2 ? pReqs[1].prompt.slice(0, 26) : '');
+  is(pTrunc.length === 54 && pReqs.length === 3,
+    'A9q ★ 整理被截断 → 长块折半重来（1 次大块失败 + 2 次半块成功）',
+    `行数 ${pTrunc.length} / 请求 ${pReqs.length}`);
+  is(pReqs.length >= 2 && pReqs[1].prompt.indexOf('不要输出任何思考过程') >= 0 &&
+     pReqs[1].prompt.indexOf('只改明显的错别字') >= 0 &&
+     pReqs[1].prompt.length < pReqs[0].prompt.length,
+    'A9r ★ 折半重来用的是精简提示词（比原来短一半，且明确"不要思考"）',
+    pReqs.length >= 2 ? `原 ${pReqs[0].prompt.length} 字 → 重试 ${pReqs[1].prompt.length} 字` : '');
+
+  // A9s 短块（20 行）被截断：不折半，改成"加预算 + 精简提示词"再来一次
+  scenario = { polish: 'truncated-short' };
+  polishChunkNo = 0;
+  reqLog = [];
+  const pShort = await ai.polishLyrics({ baseURL: srvBase, key: KEY, model: 'm', title: 't', lines: lines.slice(0, 20) });
+  const sReqs = reqLog.filter((r) => r.kind === 'polish');
+  is(pShort.length === 20 && sReqs.length === 2 && sReqs[1].maxTokens > sReqs[0].maxTokens,
+    'A9s ★ 短块被截断 → 加预算重试（不折半）',
+    JSON.stringify(sReqs.map((r) => r.maxTokens)));
 
   // A10 生成 + 元数据 + 递增 + 越界
   scenario = { gen: 'meta' };

@@ -2441,6 +2441,11 @@ function applyMiniUI(on, expanded) {
   document.body.classList.toggle('mini', mini.on);
   document.body.classList.toggle('mini-open', mini.on && mini.expanded);
 
+  // ★ 进 mini 时把整页歌词关掉：那套布局是按完整窗口铺的，小窗里根本没法看
+  //   （CSS 里还有一条 body.mini .lyric-overlay{display:none} 兜底，
+  //    但状态也要一起收，否则退出 mini 时会突然弹出来）
+  if (mini.on && lyricState.showing) toggleLyrics(false);
+
   const bm = $('btnMini');
   if (bm) {
     // v2.3.0：键位改成从表里现拼（改了键位提示就跟着变）

@@ -4736,9 +4736,19 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
     if (!/for \(let attempt = 0; attempt < 2; attempt\+\+\)/.test(fn))
       err('★ ★ 整理没有"被截断就重试一次"—— 实测 54 行字幕把 token 全花在思考上，整首直接失败');
     else ok('★ ★ 整理被截断会重试一次');
-    if (!/budget = Math\.min\(20000, budget \* 2\)/.test(fn))
+    if (!/budget = Math\.min\(32000, budget \* 2\)/.test(fn))
       err('★ 整理重试时没加大预算');
-    else ok('★ 整理重试时预算翻倍（上限 20000）');
+    else ok('★ 整理重试时预算翻倍（上限 32000）');
+    // ★ 实测第二轮：52 行把 8160 也花光了 —— 光加预算不够，得让模型少想
+    if (!/const LEAN_PROMPT_POLISH = `你是歌词校对员。/.test(ailyrics))
+      err('★ 没有"精简提示词"—— 长规则 + 示例会让推理模型越想越多');
+    else ok('★ 有精简提示词（砍掉长规则和示例）');
+    if (!/o\.lean \? LEAN_PROMPT_POLISH/.test(fn) || !/只改明显的错别字/.test(ailyrics))
+      err('★ 重试时没换精简提示词');
+    else ok('★ 重试时换精简提示词');
+    if (!/chunk\.length > 24/.test(fn) || !/chunk\.slice\(0, mid\)/.test(fn))
+      err('★ ★ 长块被截断时没折半 —— 52 行想不完，26 行就写得完（实测最有效的一招）');
+    else ok('★ ★ 长块被截断会折半重来（行数少 → 想得少）');
     if (!/直接输出最终答案，不要输出任何思考过程/.test(fn))
       err('★ 整理重试时没加"别想了，直接给答案"');
     else ok('★ 整理重试时加了"别想了，直接给答案"');
@@ -4805,6 +4815,14 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
   if (!/enabled: \(typeof o\.enabled === 'boolean'\) \? o\.enabled : \(polish \|\| generate\)/.test(appjs))
     err('★ sanitizeAiLyrics 没算总开关（只存两个子开关的话，老存档/新存档会打架）');
   else ok('★ 总开关在 sanitize 里补算（缺省 = 两个子开关有一个开）');
+
+  /* ===== ⑫d mini 模式下整页歌词必须藏掉（v2.12.1 实测反馈）===== */
+  if (!/body\.mini \.lyric-overlay \{ display: none/.test(css))
+    err('★ ★ mini 下没把整页歌词藏掉 —— 取歌词时空状态会整个糊在 420×132 的小窗上');
+  else ok('★ ★ mini 下整页歌词 display:none');
+  if (!/if \(mini\.on && lyricState\.showing\) toggleLyrics\(false\)/.test(appjs))
+    err('★ 进 mini 时没把歌词页收起来（退出 mini 会突然弹出来）');
+  else ok('★ 进 mini 时顺手收起歌词页');
 
   /* ===== ⑬ 离线实测必须在 ===== */
   if (fs.existsSync(path.join(ROOT, '.verify', 'test-round27.js')))

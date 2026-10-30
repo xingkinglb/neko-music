@@ -649,6 +649,14 @@ const DEFAULT_PROMPT_GENERATE = `你是歌词整理助手。请给出下面这�
 
 现在请给出这首歌的 LRC 歌词：`;
 
+// 被截断时用的"精简版"：把长规则和示例全砍掉，只留"改错字 + 行数不变 + 别思考"。
+// ★ 为什么有用：推理型模型的思考量跟提示词复杂度强相关 —— 规则越多、示例越长，
+//   它越想越多（实测 52 行、8160 token 全花在思考上）。砍短之后思考量明显下降。
+const LEAN_PROMPT_POLISH = `你是歌词校对员。下面是 {n} 行歌词（JSON 数组），可能有错别字和断句错误。
+只改明显的错别字，不改行数、不合并、不新增、不润色；拿不准就原样照抄。
+输出长度正好 {n} 的 JSON 字符串数组，放在 <json></json> 里。不要输出任何思考过程。
+{lines}`;
+
 // 联网时自动拼在用户提示词前面的那段（不改用户自己写的内容）
 const WEB_SEARCH_PREFIX =
   '【先联网搜索】请先联网搜索这首歌的歌词原文，再按下面的要求整理输出。\n' +
@@ -922,7 +930,7 @@ function getDebug(key) {
 /** 整理一块（≤80 行），返回等长数组 */
 async function polishChunk(o) {
   const chunk = o.chunk;
-  const tpl = o.prompt || DEFAULT_PROMPT_POLISH;
+  const tpl = o.lean ? LEAN_PROMPT_POLISH : (o.prompt || DEFAULT_PROMPT_POLISH);
   const prompt = fill(tpl, {
     // ★ 发出去的是**猜出来的歌名**（计划书 §3.0）：整串标题里有 UP 主名 / 书名号 / 序号 / 编码后缀，
     //   直接丢给模型它可能把「真栗」「A零距离」当歌手去回忆别人的歌。
@@ -931,20 +939,29 @@ async function polishChunk(o) {
     n: chunk.length,
     lines: JSON.stringify(chunk, null, 0),
   });
-  const sent = o.webSearch ? WEB_SEARCH_PREFIX + prompt : prompt;
+  // 精简版不带联网前缀（它已经把话说到最少了）
+  const sent = (o.webSearch && !o.lean) ? WEB_SEARCH_PREFIX + prompt : prompt;
 
   // ★★ 和"生成"那条路一样要给预算阶梯：推理型模型会先花几千 token 想，
-  //   实测一份 54 行的字幕，模型把 6240 个 token 全花在思考上（completion_thinking_tokens
-  //   正好等于 max_tokens），正文一个字都没剩，finish_reason = length。
-  //   所以：起步预算给宽，被截断就**翻倍重试一次**，重试时还要明确说"别想了"。
-  let budget = Math.min(20000, 4000 + chunk.length * 80);
+  //   实测 54 行 / 52 行的字幕，模型把 6240 / 8160 个 token 全花在思考上
+  //   （completion_thinking_tokens 正好等于 max_tokens），正文一个字都没剩。
+  //   所以：起步预算给宽，被截断就换精简提示词 + 加预算再来一次；
+  //   如果这一块本来就长（> 24 行），干脆**折半**分别送 —— 行数少，它想得也少。
+  let budget = o.budget || Math.min(20000, 4000 + chunk.length * 80);
   let r = null;
   let ans = null;
   let text = '';
   for (let attempt = 0; attempt < 2; attempt++) {
-    const sentFor = attempt === 0
-      ? sent
-      : '直接输出最终答案，不要输出任何思考过程。\n\n' + sent;
+    let sentFor = sent;
+    if (attempt > 0) {
+      // 重试换成精简提示词（长规则 + 示例会让推理模型想更多）
+      const leanPrompt = fill(LEAN_PROMPT_POLISH, {
+        title: guessSongName(o.title) || o.title,
+        n: chunk.length,
+        lines: JSON.stringify(chunk, null, 0),
+      });
+      sentFor = '直接输出最终答案，不要输出任何思考过程。\n\n' + leanPrompt;
+    }
     r = await chat({
       baseURL: o.baseURL, key: o.key, model: o.model,
       prompt: sentFor,
@@ -961,7 +978,16 @@ async function polishChunk(o) {
     ans = pickAnswer(r, 'json');
     text = ans.body;
     if (!String(text).trim() && r.finish === 'length' && attempt === 0) {
-      budget = Math.min(20000, budget * 2);   // 被截断 → 加预算再来一次
+      // ① 长块：折半分别送（行数少 → 模型想得少），这是最有效的一招
+      if (!o.lean && chunk.length > 24) {
+        const mid = Math.ceil(chunk.length / 2);
+        const base = Object.assign({}, o, { lean: true });
+        const a = await polishChunk(Object.assign({}, base, { chunk: chunk.slice(0, mid), chunkNo: (o.chunkNo || 1) + '.1' }));
+        const b = await polishChunk(Object.assign({}, base, { chunk: chunk.slice(mid), chunkNo: (o.chunkNo || 1) + '.2' }));
+        return a.concat(b);
+      }
+      // ② 短块（或已经是精简版）：加预算 + 精简提示词再来一次
+      budget = Math.min(32000, budget * 2);
       continue;
     }
     break;
