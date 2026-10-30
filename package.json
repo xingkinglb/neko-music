@@ -1,6 +1,6 @@
 {
   "name": "neko-music",
-  "version": "2.12.1",
+  "version": "2.12.2",
   "description": "Neko Music - 用 B 站视频当曲库的桌面音乐播放器",
   "main": "src/main.js",
   "scripts": {

@@ -6,7 +6,7 @@
 
 把 B 站视频里的音频在线播放出来 —— 搜歌、合集、歌单、收藏、歌词、动态背景，一个不少。
 
-![version](https://img.shields.io/badge/version-2.12.1-ff6fa5)
+![version](https://img.shields.io/badge/version-2.12.2-ff6fa5)
 ![license](https://img.shields.io/badge/license-MIT-7c5cff)
 ![platform](https://img.shields.io/badge/platform-Windows-4c8dff)
 ![electron](https://img.shields.io/badge/Electron-33-37d6c0)
@@ -418,7 +418,17 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
 
 ## 更新日志
 
-### 最近更新（v2.12.1）
+### 最近更新（v2.12.2）
+
+- ⚙️ **「输出上限」可以自己调了**（设置 → 歌词 → AI 歌词）：自动 / 16k / 32k / 64k / 128k。
+  推理型模型额度不够时正文会是空的，模型越能想越该调大。默认（自动）也调高了：
+  整理 6000 + 100/行、生成 12000；被截断重试上限 128k；给太大被老模型 400 拒时**对半降**再试。
+- ✅ 静态自检 **64 大类**（第 64 类 143 条）；`test-round27` **99 条**全过；全量回归 **30 个脚本全绿**
+
+<details>
+<summary>上一个版本（v2.12.1）改了什么</summary>
+
+### v2.12.1
 
 - 🪟 **修：mini 模式下取歌词时界面糊成一团**。整页歌词是按完整窗口的偏移铺开的，
   进了 mini 那些偏移全不成立，而它没被藏掉。现在进 mini 自动收起歌词页，CSS 里也彻底藏掉。
@@ -426,6 +436,8 @@ C:\Users\<你的用户名>\AppData\Roaming\neko-music\neko-data.json
   现在预算不够就换精简提示词 + 加预算，**长块直接折半分别送**（52 行想不完，26 行就写得完）。
 - ✅ 静态自检 **64 大类**通过（第 64 类 139 条含 10 条反向）；`test-round27` **98 条**全过；
   全量回归 **30 个脚本全绿**
+
+</details>
 
 <details>
 <summary>上一个版本（v2.12.0）改了什么</summary>

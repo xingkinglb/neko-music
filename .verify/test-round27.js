@@ -442,6 +442,16 @@ async function groupA() {
     'A9r ★ 折半重来用的是精简提示词（比原来短一半，且明确"不要思考"）',
     pReqs.length >= 2 ? `原 ${pReqs[0].prompt.length} 字 → 重试 ${pReqs[1].prompt.length} 字` : '');
 
+  // A9t 用户设了"输出上限"→ 第一次请求就得按他设的来（不是按行数算）
+  scenario = {};
+  polishChunkNo = 0;
+  reqLog = [];
+  await ai.polishLyrics({ baseURL: srvBase, key: KEY, model: 'm', title: 't', lines: lines.slice(0, 10), maxTokens: 64000 });
+  const tReqs = reqLog.filter((r) => r.kind === 'polish');
+  is(tReqs.length === 1 && tReqs[0].maxTokens === 64000,
+    'A9t ★ 用户在设置里设的上限会真的用上（10 行也按 64000 发）',
+    tReqs.length ? String(tReqs[0].maxTokens) : '没发请求');
+
   // A9s 短块（20 行）被截断：不折半，改成"加预算 + 精简提示词"再来一次
   scenario = { polish: 'truncated-short' };
   polishChunkNo = 0;

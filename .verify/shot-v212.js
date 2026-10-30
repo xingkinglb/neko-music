@@ -112,7 +112,7 @@ app.whenReady().then(async () => {
   // 这些元素的 offsetParent 是 .modal-mask（fixed），offsetTop 会带上一截偏移。
   await ev(`(() => {
     const box = document.querySelector('.modal-body');
-    const el = document.getElementById('chkAiEnabled').closest('.field');
+    const el = document.getElementById('selAiTokens').closest('.ai-row');
     if (box && el) box.scrollTop += el.getBoundingClientRect().top - box.getBoundingClientRect().top - 8;
     return true;
   })()`);

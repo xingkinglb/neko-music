@@ -903,20 +903,27 @@
             「能不能联网」取决于模型和服务商，事先不知道，只能探一次。
           </div>
 
+          <div class="ai-row">
+            <div class="ai-label">输出上限</div>
+            <select id="selAiTokens">
+              <option value="0">自动（推荐）</option>
+              <option value="16000">16k token</option>
+              <option value="32000">32k token</option>
+              <option value="64000">64k token</option>
+              <option value="128000">128k token</option>
+            </select>
+          </div>
+          <div class="field-hint">
+            推理型模型会先"想"再写，额度不够时正文会是<b>空的</b>（报错里会说"被截断"）。
+            调大能减少失败，但单次调用会更慢、也更费。<br />
+            不确定就留「自动」—— 它按行数给，被截断还会自动折半 / 重试。
+          </div>
+
           <div class="btn-row">
             <button class="ghost-btn" id="btnAiTest">测试连接</button>
             <button class="ghost-btn" id="btnAiPrompts">查看 / 编辑提示词</button>
           </div>
           <div class="field-hint ai-msg" id="aiMsg"></div>
-
-          <label class="switch-row" style="margin-top:14px">
-            <span class="switch-label">AI 优先（有字幕时也交给 AI 整理）</span>
-            <input type="checkbox" id="chkAiPrefer" />
-            <span class="switch"></span>
-          </label>
-          <div class="field-hint">
-            开着 = 字幕照取（要它的时间轴），但文字交给 AI 校对；关着 = 字幕优先，取不到才让 AI 生成。
-          </div>
 
           <div class="ai-line ai-cache-line">
             <span class="ai-cache-text" id="aiCacheLine">已缓存 0 首</span>

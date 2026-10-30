@@ -111,7 +111,7 @@ let DB = {
     // v2.12.0：AI 歌词（默认全关，见 DEFAULT_SETTINGS.aiLyrics）
     aiLyrics: {
       enabled: false, aiPolish: false, aiGenerate: false, baseURL: '', model: '',
-      webSearch: 'unknown', promptPolish: '', promptGenerate: '',
+      maxTokens: 0, webSearch: 'unknown', promptPolish: '', promptGenerate: '',
     },
   },
 };
@@ -595,6 +595,8 @@ const DEFAULT_SETTINGS = {
     aiGenerate: false,
     baseURL: '',
     model: '',
+    // 单次输出上限（token）。0 = 自动（按行数给 + 被截断时自动折半/重试）
+    maxTokens: 0,
     webSearch: 'unknown',
     promptPolish: '',
     promptGenerate: '',
@@ -690,6 +692,8 @@ function sanitizeAiLyrics(raw) {
     aiGenerate: generate,
     baseURL: (typeof o.baseURL === 'string') ? o.baseURL.trim() : '',
     model: (typeof o.model === 'string') ? o.model.trim() : '',
+    // 只认这几个档位（手改坏的存档 / 老存档一律回落到"自动"）
+    maxTokens: [0, 16000, 32000, 64000, 128000].includes(Number(o.maxTokens)) ? Number(o.maxTokens) : 0,
     webSearch: AI_WEB_STATES.includes(o.webSearch) ? o.webSearch : 'unknown',
     promptPolish: (typeof o.promptPolish === 'string' && o.promptPolish.trim()) ? o.promptPolish : '',
     promptGenerate: (typeof o.promptGenerate === 'string' && o.promptGenerate.trim()) ? o.promptGenerate : '',
@@ -6630,6 +6634,8 @@ function syncAiUI() {
   $('chkAiGenerate').checked = !!a.aiGenerate;
   $('inpAiBase').value = a.baseURL || '';
   $('inpAiModel').value = a.model || '';
+  const selTok = $('selAiTokens');
+  if (selTok) selTok.value = String(a.maxTokens || 0);
   // 每次打开面板都把"修改 Key"那一行收起来，输入框清空 —— 不把上一次的残值留在屏幕上
   $('aiKeyEditRow').style.display = 'none';
   $('inpAiKey').value = '';
@@ -6748,6 +6754,11 @@ function bindAiSettings() {
     resetAiWebState();
     persist();
   });
+  $('selAiTokens').addEventListener('change', (e) => {
+    aiCfg().maxTokens = Number(e.target.value) || 0;
+    persist();
+  });
+
   $('inpAiModel').addEventListener('change', (e) => {
     aiCfg().model = String(e.target.value || '').trim();
     resetAiWebState();
@@ -8008,7 +8019,7 @@ async function loadLyrics(byUser, fresh) {
         try {
           const out = await aiRequest('polish', track, {
             base: aiCacheBase(track),   // 本地歌不会走到这条分支，但统一传 base 防以后改坏
-            baseURL: ai.baseURL, model: ai.model,
+            baseURL: ai.baseURL, model: ai.model, maxTokens: ai.maxTokens || 0,
             title: track.title || '', lines: rawLines,
           });
           // ★ 切歌了就直接丢弃：分 7 块要两三分钟，回来时早就不是这首歌了，
@@ -8074,7 +8085,7 @@ async function loadLyrics(byUser, fresh) {
         // #|gen，所有本地歌共享同一份缓存（A 歌的词出现在 B 歌上）
         const out = await aiRequest('gen', track, {
           base: aiCacheBase(track),
-          baseURL: ai.baseURL, model: ai.model,
+          baseURL: ai.baseURL, model: ai.model, maxTokens: ai.maxTokens || 0,
           title: track.title || '', duration,
         });
         if (lyricState.trackKey !== key) return;

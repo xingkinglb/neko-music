@@ -4446,16 +4446,16 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
   /* ★★ 实测第二轮反馈：正文空 + finish=length（想太久被截断）。三条对策都要在 */
   {
     const fn = bodyOf(ailyrics, 'async function generateLyrics(o) {');
-    if (!/let budget = 8000/.test(fn))
-      err('★ ★ 生成起步预算还是 4000 —— 推理模型"想完就没额度了"，正文必然是空的');
-    else ok('★ ★ 生成起步预算 8000（推理模型要先花几千 token 想）');
+    if (!/let budget = opts\.maxTokens \|\| 12000/.test(fn))
+      err('★ ★ 生成的起步预算不是"用户设置优先 / 默认 12000"');
+    else ok('★ ★ 生成起步预算：用户设了就用他的，否则 12000');
     if (!/budget \* 2/.test(fn) || !/attempt < 2/.test(fn))
       err('★ 截断后没有"加大预算重试一次"');
     else ok('★ 截断后自动加大预算重试一次');
   }
-  if (!/_tokenFallback/.test(ailyrics) || !/max_?tokens|max_completion_tokens/.test(ailyrics))
-    err('★ 没处理"预算给太大 → 老模型 400"（不自动降到 4000 的话，新预算反而会让它彻底不能用）');
-  else ok('★ 预算给太大被 400 时自动降到 4000 重试（老模型也能用）');
+  if (!/_tokenTry/.test(ailyrics) || !/Math\.floor\(asked \/ 2\)/.test(ailyrics))
+    err('★ 没处理"预算给太大 → 老模型 400"（而且应该对半降，不能一上来砸到 4000）');
+  else ok('★ 预算给太大被 400 时对半降重试（最多 4 次，老模型也能用）');
   if (!/function salvageFromReasoning\(reasoning, duration\)/.test(ailyrics))
     err('★ 没有"从思考过程里捞歌词"的兜底（有的模型把整首 LRC 写在思考里，正文空）');
   else ok('★ 有"从思考过程里捞歌词"的兜底');
@@ -4693,6 +4693,12 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
     if (!/AI_WEB_STATES\.includes\(o\.webSearch\)/.test(fn)) err('★ webSearch 没夹到四态');
     else ok('★ webSearch 只认四态，其余回落 unknown');
   }
+  // ★ 反向断言：老的「AI 优先」开关不许复活（它已经被拆成两个子开关，
+  //   留着就是一个点了没反应的死控件 —— 实测截图里就露出来过一次）
+  if (/chkAiPrefer/.test(html) || /AI 优先/.test(html))
+    err('★ ★ 设置页还有「AI 优先」—— 已经被拆成 AI 整理 / AI 生成，留着就是死控件');
+  else ok('★ ★ 反向断言：没有残留的「AI 优先」死控件');
+
   if (!/id="chkAiPolish"/.test(html) || !/id="chkAiGenerate"/.test(html) || !/id="aiBox"/.test(html))
     err('★ 设置页没有「AI 整理 / AI 生成」两个开关（或配置区）');
   else ok('★ 设置页有两个独立开关（整理 / 生成）+ 配置区');
@@ -4736,9 +4742,9 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
     if (!/for \(let attempt = 0; attempt < 2; attempt\+\+\)/.test(fn))
       err('★ ★ 整理没有"被截断就重试一次"—— 实测 54 行字幕把 token 全花在思考上，整首直接失败');
     else ok('★ ★ 整理被截断会重试一次');
-    if (!/budget = Math\.min\(32000, budget \* 2\)/.test(fn))
+    if (!/budget = Math\.min\(128000, budget \* 2\)/.test(fn))
       err('★ 整理重试时没加大预算');
-    else ok('★ 整理重试时预算翻倍（上限 32000）');
+    else ok('★ 整理重试时预算翻倍（上限 128000）');
     // ★ 实测第二轮：52 行把 8160 也花光了 —— 光加预算不够，得让模型少想
     if (!/const LEAN_PROMPT_POLISH = `你是歌词校对员。/.test(ailyrics))
       err('★ 没有"精简提示词"—— 长规则 + 示例会让推理模型越想越多');
@@ -4752,9 +4758,9 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
     if (!/直接输出最终答案，不要输出任何思考过程/.test(fn))
       err('★ 整理重试时没加"别想了，直接给答案"');
     else ok('★ 整理重试时加了"别想了，直接给答案"');
-    if (!/4000 \+ chunk\.length \* 80/.test(fn))
-      err('★ 整理的起步预算还是按 60/行算的 —— 推理模型不够用');
-    else ok('★ 整理起步预算按 80/行（推理模型要先想）');
+    if (!/let budget = o\.maxTokens \|\| o\.budget \|\| Math\.min\(32000, 6000 \+ chunk\.length \* 100\)/.test(fn))
+      err('★ 整理的起步预算不是"用户设置优先 / 自动按行数给"');
+    else ok('★ 整理起步预算：用户设了就用他的，否则 6000 + 100/行（上限 32000）');
   }
 
   /* ===== ⑫b 看 AI 到底回了什么（v2.12.0 追加）===== */
@@ -4815,6 +4821,17 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
   if (!/enabled: \(typeof o\.enabled === 'boolean'\) \? o\.enabled : \(polish \|\| generate\)/.test(appjs))
     err('★ sanitizeAiLyrics 没算总开关（只存两个子开关的话，老存档/新存档会打架）');
   else ok('★ 总开关在 sanitize 里补算（缺省 = 两个子开关有一个开）');
+
+  /* ===== ⑫c2 输出上限可调（v2.12.1 实测反馈：推理模型额度不够）===== */
+  if (!/id="selAiTokens"/.test(html))
+    err('★ 设置页没有「输出上限」—— 推理模型的额度用户调不了');
+  else ok('★ 设置页有「输出上限」下拉');
+  if (!/maxTokens: \[0, 16000, 32000, 64000, 128000\]\.includes\(Number\(o\.maxTokens\)\)/.test(appjs))
+    err('★ maxTokens 没夹到固定档位（手改坏的存档会传个离谱值进去）');
+  else ok('★ maxTokens 只认固定档位，其余回落"自动"');
+  if (!/maxTokens: ai\.maxTokens \|\| 0/.test(appjs))
+    err('★ 请求里没把用户设的上限带上（设了等于没设）');
+  else ok('★ 两条请求都带上用户设的上限');
 
   /* ===== ⑫d mini 模式下整页歌词必须藏掉（v2.12.1 实测反馈）===== */
   if (!/body\.mini \.lyric-overlay \{ display: none/.test(css))

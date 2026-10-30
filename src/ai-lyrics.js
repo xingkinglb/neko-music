@@ -348,10 +348,15 @@ async function chat(opts) {
     const code = (wrapped && (wrapped.code || wrapped.status || wrapped.type)) || res.status;
     const detail = (wrapped && (wrapped.message || wrapped.msg)) || (data ? '' : raw.slice(0, 200));
     // ★ 有些模型的输出上限比我们要的小（老模型 4096），给多了直接 400。
-    //   自动降到 4000 再试一次 —— 只降一次，别来回递归。
-    if (Number(code) === 400 && !o._tokenFallback && (o.maxTokens || 0) > 4000 &&
+    //   **对半降**再试，最多降 4 次（128000 → 64000 → … → 8000）——
+    //   一上来砸到 4000 的话，用户明明设了 64k 也白设了。
+    const asked = Number(o.maxTokens) || 0;
+    if (Number(code) === 400 && (o._tokenTry || 0) < 4 && asked > 4000 &&
         /max_?tokens|max_completion_tokens|too\s*large|exceed|超出/i.test(String(detail))) {
-      return chat(Object.assign({}, o, { maxTokens: 4000, _tokenFallback: true }));
+      return chat(Object.assign({}, o, {
+        maxTokens: Math.max(4000, Math.floor(asked / 2)),
+        _tokenTry: (o._tokenTry || 0) + 1,
+      }));
     }
     const reason = reasonOfStatus(code, detail);
     throw fail(reason, messageOfStatus(reason, code, detail, model));
@@ -947,7 +952,8 @@ async function polishChunk(o) {
   //   （completion_thinking_tokens 正好等于 max_tokens），正文一个字都没剩。
   //   所以：起步预算给宽，被截断就换精简提示词 + 加预算再来一次；
   //   如果这一块本来就长（> 24 行），干脆**折半**分别送 —— 行数少，它想得也少。
-  let budget = o.budget || Math.min(20000, 4000 + chunk.length * 80);
+  // 用户在设置里指定了"输出上限"就照他说的来（0 = 自动）
+  let budget = o.maxTokens || o.budget || Math.min(32000, 6000 + chunk.length * 100);
   let r = null;
   let ans = null;
   let text = '';
@@ -987,7 +993,7 @@ async function polishChunk(o) {
         return a.concat(b);
       }
       // ② 短块（或已经是精简版）：加预算 + 精简提示词再来一次
-      budget = Math.min(32000, budget * 2);
+      budget = Math.min(128000, budget * 2);
       continue;
     }
     break;
@@ -1048,6 +1054,8 @@ async function polishLyrics(o) {
       baseURL: opts.baseURL, key: opts.key, model: opts.model,
       title: guessSongName(opts.title) || opts.title, chunk: chunks[i],
       prompt: opts.prompt, webSearch: opts.webSearch,
+      // ★ 用户在设置里设的"输出上限"要一路传下去（漏了这一步，设了也白设）
+      maxTokens: opts.maxTokens || 0,
       timeoutMs: Math.min(TIMEOUT_MS, left),
       debugKey: cacheKeyFor(opts, 'polish'), chunkNo: i + 1,
     });
@@ -1078,7 +1086,7 @@ async function generateLyrics(o) {
   // ★ 输出预算给足：推理型模型会先花掉几千 token 想，4000 经常"想完就没额度了"（正文为空 +
   //   finish_reason=length）。给 8000 起步；真被截断了再翻倍重试一次。
   //   给太多会被老模型 400 拒（它上限 4096），chat() 里会自动降到 4000 再试。
-  let budget = 8000;
+  let budget = opts.maxTokens || 12000;
   let lastR = null;
   const promptOf = (n) => {
     const base = opts.webSearch ? WEB_SEARCH_PREFIX + prompt : prompt;
@@ -1106,7 +1114,7 @@ async function generateLyrics(o) {
 
     // 被截断 → 加预算再来一次（推理模型最常见的一种"失败"）
     if (r.finish === 'length' && attempt === 0) {
-      budget = Math.min(20000, budget * 2);
+      budget = Math.min(128000, budget * 2);
       continue;
     }
 
