@@ -479,6 +479,15 @@
     <div class="lyric-head-meta">
       <div class="lyric-head-title" id="lyricTitle">歌词</div>
       <div class="lyric-head-sub" id="lyricSub"></div>
+      <!-- v2.12.0：AI 歌词的来源小标 + 「看原文 / 看整理」切换。
+           ★ 兜底生成的时间轴是模型估的，必须在这里挂一句「时间轴为估算」——
+             不标的话用户会拿它当准的，越往后偏得越多。 -->
+      <div class="lyric-head-tags">
+        <!-- ★ v2.12.0：这是个**按钮**，点开能看到 AI 到底回了什么（回复 / 思考过程 / 发出去的提示词）。
+             用户判断"这歌词是不是编的"唯一的依据就在这儿。 -->
+        <button class="lyric-tag" id="lyricTag" type="button" title="看看 AI 到底回了什么"></button>
+        <button class="lyric-tag-btn" id="btnLyricRaw">看原文</button>
+      </div>
     </div>
     <button class="lyric-head-btn" id="btnLyricDesktop" title="在桌面上挂一个悬浮歌词窗">
       <svg class="ic"><use href="#i-lyric"/></svg><span>桌面歌词</span>
@@ -488,6 +497,61 @@
   <p class="lyric-warn" id="lyricWarn"></p>
   <div class="lyric-box" id="lyricBox"></div>
   <button class="lyric-close" id="btnLyricClose" title="收起歌词（Esc）">✕</button>
+</div>
+
+<!--
+  ============ 提示词编辑（v2.12.0）============
+  默认**收起**：绝大多数人不会改提示词，摊开一个巨大的 textarea 只会让人发懵。
+  整理和生成是两件事，所以分两个标签页编辑，混在一个框里没法改。
+-->
+<div class="ai-prompt-mask" id="aiPromptMask">
+  <div class="ai-prompt-panel">
+    <div class="ai-prompt-head">
+      <span class="ai-prompt-title">提示词</span>
+      <button class="modal-close" id="btnAiPromptClose" title="关闭">✕</button>
+    </div>
+    <div class="ai-prompt-tabs">
+      <button class="ptab active" data-ptab="polish">整理</button>
+      <button class="ptab" data-ptab="generate">生成</button>
+    </div>
+    <textarea class="ai-prompt-text" id="aiPromptText" spellcheck="false"></textarea>
+    <div class="ai-prompt-hint" id="aiPromptHint">可用占位符：{title} 歌名 · {n} 行数 · {lines} 字幕</div>
+    <div class="ai-prompt-warn" id="aiPromptWarn"></div>
+    <div class="ai-prompt-tip">
+      改了提示词之后，已经缓存的歌词不会重新生成 —— 想重来请点「清空缓存」。<br />
+      模型支持联网时，会在你的提示词前面自动加一句「请先联网搜索」。
+    </div>
+    <div class="btn-row">
+      <button class="ghost-btn" id="btnAiPromptReset">恢复默认</button>
+      <button class="primary-btn" id="btnAiPromptSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!--
+  ============ AI 原始回复（v2.12.0）============
+  点歌词页顶上那颗「AI 生成 · 时间轴为估算」打开。
+  三页：模型回复 / 思考过程 / 发出去的提示词 —— 判断"这歌词是不是编的"只能靠这个。
+-->
+<div class="ai-reply-mask" id="aiReplyMask">
+  <div class="ai-reply-panel">
+    <div class="ai-reply-head">
+      <span class="ai-reply-title">AI 原始回复</span>
+      <button class="modal-close" id="btnAiReplyClose" title="关闭">✕</button>
+    </div>
+    <div class="ai-reply-meta" id="aiReplyMeta"></div>
+    <div class="ai-reply-tabs">
+      <button class="rtab active" data-rtab="answer">回复</button>
+      <button class="rtab" data-rtab="think">思考过程</button>
+      <button class="rtab" data-rtab="prompt">发出去的提示词</button>
+    </div>
+    <pre class="ai-reply-body" id="aiReplyBody"></pre>
+    <div class="ai-reply-tip" id="aiReplyTip"></div>
+    <div class="btn-row">
+      <button class="ghost-btn" id="btnAiReplyCopy">复制这一页</button>
+      <button class="ghost-btn" id="btnAiReplyRegen">歌词不对，重新获取</button>
+    </div>
+  </div>
 </div>
 
 <!-- 轻提示气泡 -->
@@ -741,6 +805,126 @@
             开启后每首歌都会自动去取字幕。<b>开着桌面歌词时它必须开着</b> ——
             不然换歌之后悬浮窗没词可显示。<br />
             取字幕需要先在「B 站」标签页填 Cookie，否则拿不到。
+          </div>
+        </div>
+
+        <!-- ========== AI 歌词（v2.12.0）==========
+             两个开关的语义（拍板 #10，总开关最高）：
+               总开关关        = 只用 B 站字幕，一分钱不花（默认）
+               开 + AI优先关   = 字幕优先，取不到才让 AI 生成
+               开 + AI优先开   = 整理优先：字幕照取（要它的时间轴），文字交给 AI 校对
+             ★ 「AI 优先」也还是要先取字幕：**时间轴只能从真字幕里来**，
+               让 AI 从零写秒数一定偏，而"真秒数 + AI 改字"能让高亮继续精准。 -->
+        <!-- AI 总开关：最高优先级。关了就完全不用 AI（也不花一分钱）。
+             ★ 但**已经整理过的缓存**照样会用（见 loadLyrics）—— 那是之前花过钱的成果，
+               没必要因为关了开关就丢掉，而且歌词页左上角还能在原版/整理版之间切。 -->
+        <div class="field">
+          <label class="switch-row">
+            <span class="switch-label">AI 歌词</span>
+            <input type="checkbox" id="chkAiEnabled" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">
+            关着就完全不用 AI —— 一分钱不花，行为和以前一模一样。<br />
+            打开后下面有两条路可以单独选：<b>AI 整理</b>（可靠）和 <b>AI 生成</b>（大概率不对）。
+          </div>
+        </div>
+
+        <!-- AI 的配置区：总开关关着时整块藏起来（没人配置就不会看见一堆输入框） -->
+        <div class="field ai-box" id="aiBox" style="display:none">
+
+          <!-- 两条路各一个开关，并排（v2.12.0：原来的「AI 优先」改名成「AI 整理」，
+               旁边新增「AI 生成」—— 两者可信度差一个数量级，必须分开） -->
+          <div class="ai-modes">
+            <label class="switch-row ai-mode">
+              <span class="switch-label">AI 整理</span>
+              <input type="checkbox" id="chkAiPolish" />
+              <span class="switch"></span>
+            </label>
+            <label class="switch-row ai-mode">
+              <span class="switch-label">AI 生成</span>
+              <input type="checkbox" id="chkAiGenerate" />
+              <span class="switch"></span>
+            </label>
+          </div>
+          <div class="field-hint" style="margin-top:10px">
+            <b>AI 整理</b>：取到 B 站字幕时，只改错别字和断句，<b>时间轴用字幕原值</b> —— 高亮依然精准，可靠。<br />
+            <b>AI 生成</b>：没有字幕时整段编 —— <b>大概率对不上</b>（冷门歌 / 翻唱 / UP 自己改词的它会编），
+            打开时会再提醒一次。
+          </div>
+
+          <div class="ai-row">
+            <div class="ai-label">BaseURL</div>
+            <input class="ai-input" id="inpAiBase" spellcheck="false"
+              placeholder="https://api.openai.com/v1" />
+          </div>
+
+          <div class="ai-row">
+            <div class="ai-label">API Key</div>
+            <div class="ai-line">
+              <span class="ai-key-mask" id="aiKeyMask">还没填</span>
+              <button class="ghost-btn ai-mini" id="btnAiKeyEdit">填写 / 修改</button>
+            </div>
+          </div>
+          <div class="ai-row" id="aiKeyEditRow" style="display:none">
+            <div class="ai-label"></div>
+            <div class="ai-line">
+              <input class="ai-input" type="password" id="inpAiKey" spellcheck="false"
+                placeholder="粘贴 Key（保存后就只显示掩码）" />
+              <button class="ghost-btn ai-mini" id="btnAiKeySave">保存</button>
+            </div>
+          </div>
+          <!-- ★ 这一行会按本机情况改写：不支持加密时明确说"以明文保存"，不静默降级 -->
+          <div class="field-hint" id="aiKeyHint">
+            Key 加密存在本机（Windows 走 DPAPI，绑当前用户）：文件被拷走 / 发给别人都解不开。
+          </div>
+
+          <div class="ai-row ai-model-wrap">
+            <div class="ai-label">模型</div>
+            <div class="ai-line">
+              <input class="ai-input" id="inpAiModel" spellcheck="false"
+                placeholder="先拉列表，或者手填模型名" />
+              <button class="ghost-btn ai-mini" id="btnAiModels">拉取列表</button>
+            </div>
+            <!-- ★ 自己画的下拉，不用原生 <datalist>：那一版的弹层高度写死、
+                 行多的时候在 Windows 上滚不动（实测反馈），而模型列表动辄几百个。
+                 这里就是普通 div + overflow-y，和页面里其它列表同一个行为。 -->
+            <div class="ai-model-pop" id="aiModelPop"></div>
+          </div>
+
+          <div class="ai-row">
+            <div class="ai-label">联网</div>
+            <div class="ai-line">
+              <span class="ai-web-state" id="aiWebState">未检测</span>
+              <button class="ghost-btn ai-mini" id="btnAiWebTest">测试联网</button>
+            </div>
+          </div>
+          <div class="field-hint" id="aiWebHint">
+            「能不能联网」取决于模型和服务商，事先不知道，只能探一次。
+          </div>
+
+          <div class="btn-row">
+            <button class="ghost-btn" id="btnAiTest">测试连接</button>
+            <button class="ghost-btn" id="btnAiPrompts">查看 / 编辑提示词</button>
+          </div>
+          <div class="field-hint ai-msg" id="aiMsg"></div>
+
+          <label class="switch-row" style="margin-top:14px">
+            <span class="switch-label">AI 优先（有字幕时也交给 AI 整理）</span>
+            <input type="checkbox" id="chkAiPrefer" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint">
+            开着 = 字幕照取（要它的时间轴），但文字交给 AI 校对；关着 = 字幕优先，取不到才让 AI 生成。
+          </div>
+
+          <div class="ai-line ai-cache-line">
+            <span class="ai-cache-text" id="aiCacheLine">已缓存 0 首</span>
+            <button class="ghost-btn ai-mini" id="btnAiClearCache">清空缓存</button>
+          </div>
+          <div class="field-hint">
+            发出去的内容只有<b>歌名 + 字幕</b>（不传 UP 主、不传 Cookie、不传任何用户信息）。<br />
+            ★ 中转站的"某个模型"未必是真的那个模型，所以「测试联网」的结果只能当参考。
           </div>
         </div>
 

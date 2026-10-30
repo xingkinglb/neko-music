@@ -35,6 +35,10 @@ const gitignore = read('.gitignore');
    `local://get` / 白名单 / Range 这些词，不去注释就会把说明文字当成代码（假阳性）。 */
 const downloaderjs = stripLine(stripBlock(read('src/downloader.js')));
 const localproto  = stripLine(stripBlock(read('src/local-protocol.js')));
+/* v2.12.0：AI 歌词。ai-lyrics.js 的注释里会大量提到 safeStorage / 明文 / response_format
+   这些词，不去注释就会把说明文字当成代码（假阳性），所以用"去注释"版本。 */
+const ailyrics    = stripLine(stripBlock(read('src/ai-lyrics.js')));
+const preloadCode = stripLine(stripBlock(read('src/preload.js')));
 
 /* ---- v2.3.0：KEY_ACTIONS 那张表（快捷键的唯一准绳）----
    以前断言是直接找 `ctrl && (e.key === 'd' ...)` 这种字面量；
@@ -4316,5 +4320,527 @@ console.log('\n[63] v2.11.0 · 解析页工具条 + 合集整体加入：');
   else err('缺少 .verify/test-round26.js —— 解析页 / 整体加入 / 下载确认必须真的点一遍');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 63 大类检查）');
+/* ============================================================
+   [64] v2.12.0 · AI 歌词
+   ============================================================
+   这一类的断言全部按"代码形状"写（源码已经去过注释），所以每条都对应一句
+   "以后谁会把它改坏、改坏之后会怎样"。★ 标星的是这次最容易踩的。 */
+console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生成）：');
+{
+  const bodyOf = (src, sig) => {
+    const i = src.indexOf(sig);
+    if (i < 0) return '';
+    const j = src.indexOf('\n}\n', i);
+    return src.slice(i, j < 0 ? src.length : j);
+  };
+
+  /* ===== ① 模块与导出 ===== */
+  if (!fs.existsSync(path.join(ROOT, 'src', 'ai-lyrics.js'))) err('★ 没有 src/ai-lyrics.js');
+  else ok('★ 有 src/ai-lyrics.js（主进程模块）');
+  const exportsNeeded = ['configure', 'keyInfo', 'setKey', 'listModels', 'testConnection',
+    'testWebSearch', 'polishLyrics', 'generateLyrics', 'getPrompts', 'cacheStats', 'clearCache'];
+  {
+    const tail = ailyrics.slice(ailyrics.lastIndexOf('module.exports'));
+    const missing2 = exportsNeeded.filter((n) => !new RegExp('\\b' + n + '\\b').test(tail));
+    if (missing2.length) err('★ ai-lyrics.js 少导出：' + missing2.join(', '));
+    else ok(`★ ai-lyrics.js 导出齐全（${exportsNeeded.length} 个）`);
+  }
+
+  /* ===== ② Key：加密存、只给掩码 ===== */
+  if (!/\.encryptString\(/.test(ailyrics)) err('★ 没调 safeStorage.encryptString —— Key 是明文落盘');
+  else ok('★ Key 用 safeStorage.encryptString 加密后落盘');
+  if (!/\.decryptString\(/.test(ailyrics)) err('★ 没有 decryptString —— 存进去读不回来');
+  else ok('★ 读的时候走 decryptString');
+  if (!/isEncryptionAvailable\(\)/.test(ailyrics) || !/KEY_MAGIC_PLAIN/.test(ailyrics))
+    err('★ 没有"不支持加密 → 明文 + 标记"的降级分支（拍板 #8：要明确降级，不许静默）');
+  else ok('★ 有加密不可用时的降级分支（明文 + magic 标记）');
+  if (!/ai-key\.bin/.test(ailyrics)) err('★ Key 文件名不是 ai-key.bin');
+  else ok('Key 单独存 ai-key.bin（不进存档）');
+  if (!/maskKey/.test(ailyrics) || !/•'\.repeat\(12\)/.test(ailyrics))
+    err('★ 没有掩码函数（Key 会整串显示出来）');
+  else ok('★ Key 只显示 12 个圆点 + 后 4 位');
+  // 反向：给界面的对象里不许带明文
+  {
+    const fn = bodyOf(ailyrics, 'function keyInfo() {');
+    if (/key:\s*k\b|text:\s*k\b|plain:\s*k\b/.test(fn))
+      err('★ keyInfo() 把明文 Key 回给渲染层了（拍板 #11：界面永远不持有明文）');
+    else ok('★ keyInfo() 只回 { has, mask, encrypted }，没有明文字段');
+  }
+  if (/aiGetKey|ai:getKey/.test(preloadCode) || /aiGetKey|ai:getKey/.test(mainCode))
+    err('★ 有"取明文 Key"的通道 —— 拍板 #11 明确不要');
+  else ok('★ 反向断言：没有任何"取明文 Key"的 IPC');
+
+  /* ===== ③ 中转站兼容（六条里最要命的三条） ===== */
+  if (/response_format\s*:/.test(ailyrics))
+    err('★ 用了 response_format —— 中转站大多不支持，会直接 400');
+  else ok('★ 反向断言：没有用 response_format（靠提示词 + 容错解析）');
+  if (!/const wrapped = data && data\.error/.test(ailyrics))
+    err('★ 没检查 data.error —— 中转站把错误包在 200 里，会被当成成功');
+  else ok('★ 先看 data.error 再当成功（200 里包错误的坑）');
+  if (!/Array\.isArray\(c\)/.test(ailyrics) || !/ch\.text/.test(ailyrics))
+    err('★ content 不是字符串的两种情况没兼容（新版返回数组 / 老式 choice.text）');
+  else ok('★ content 三种形状都兼容（字符串 / 数组 / choice.text）');
+  if (!/TIMEOUT_MS = 60000/.test(ailyrics))
+    err('★ 单块超时不是 60 秒（中转站排队，20 秒会大面积误杀）');
+  else ok('★ 单块超时 60 秒、整首硬上限 5 分钟');
+  if (!/stripFence|replace\(\/\^\\s\*```/.test(ailyrics))
+    err('★ 没有剥 ``` 包裹 —— 模型一加 markdown 解析就废');
+  else ok('★ 容错解析会剥 ```json 包裹、抓第一个 [ 到最后一个 ]');
+  // ★ 真实模型的花式姿势（v2.12.0 实测反馈"解析失败"后补的）：外面包对象 / 元素是对象 / 不回 JSON
+  if (!/function coerceItem\(v\)/.test(ailyrics) || !/firstArr/.test(ailyrics))
+    err('★ 解析器没兼容"对象包裹 / 对象元素"—— 真实模型常回 {"lyrics":[...]} 或 {"text":"..."}，String() 会变成 [object Object]');
+  else ok('★ 解析器兼容对象包裹与对象元素（真实模型的花式姿势）');
+  if (!/withPreview/.test(bodyOf(ailyrics, 'async function polishChunk(o) {')) ||
+      !/withPreview/.test(bodyOf(ailyrics, 'async function generateLyrics(o) {')))
+    err('★ bad-format 的报错没带模型原文开头 —— 解析失败时查不出它到底回了什么形状');
+  else ok('★ bad-format 报错带模型原文开头（整理 / 生成两条路都有）');
+
+  /* ★★ v2.12.0 实测踩到的坑：推理型模型把"内心独白"写进正文，还带时间戳 */
+  if (/reasoning_content/.test(bodyOf(ailyrics, 'function pickContent(data) {')))
+    err('★ ★ pickContent 里出现了 reasoning_content —— 推理型模型的内心独白会被当成歌词整段渲染');
+  else ok('★ ★ 反向断言：pickContent 只取正文，绝不拿 reasoning_content 顶替');
+  if (!/function looksLikeThinking\(text\)/.test(ailyrics) ||
+      !/looksLikeThinking\(text\)/.test(bodyOf(ailyrics, 'async function polishChunk(o) {')) ||
+      !/looksLikeThinking\(text\)/.test(bodyOf(ailyrics, 'async function generateLyrics(o) {')))
+    err('★ 没有"思考过程当歌词"的拦截 —— 模型会把独白写进正文，而且带 [00:00.00] 前缀，解析器分辨不出来');
+  else ok('★ 思考过程当正文 → 判成 thinking（整理 / 生成两条路都拦）');
+  if (!/case 'thinking':/.test(appjs)) err('★ 界面没给 thinking 单独的文案');
+  else ok('★ 界面给 thinking 单独的、可操作的文案（再点一次 / 加哪句话）');
+
+  /* ★★ 推理型模型的**正解**：让答案进标签，思考写在标签外面就无所谓 */
+  {
+    const pol = (ailyrics.match(/const DEFAULT_PROMPT_POLISH = `([\s\S]*?)`;/) || [])[1] || '';
+    const gen = (ailyrics.match(/const DEFAULT_PROMPT_GENERATE = `([\s\S]*?)`;/) || [])[1] || '';
+    if (!/<json>[\s\S]*<\/json>/.test(pol) || !/标签外面写什么都不看/.test(pol))
+      err('★ ★ 整理提示词没要求把答案放进 <json> 标签 —— 推理型模型的思考会和答案混在一起，解析器分不出来');
+    else ok('★ ★ 整理提示词要求答案进 <json> 标签（思考写在外面无所谓）');
+    if (!/<lrc>[\s\S]*<\/lrc>/.test(gen) || !/标签外面写什么都不看/.test(gen))
+      err('★ ★ 生成提示词没要求把答案放进 <lrc> 标签 —— 推理型模型的思考也带时间戳，会一起被当成歌词');
+    else ok('★ ★ 生成提示词要求答案进 <lrc> 标签');
+  }
+  if (!/function extractTagged\(text, tag\)/.test(ailyrics))
+    err('★ 没有 extractTagged() —— 标签方案等于没做');
+  else ok('★ 有 extractTagged()');
+  {
+    const fn = bodyOf(ailyrics, 'function extractTagged(text, tag) {');
+    // 取最后一个块：循环里不断覆盖 last，而不是第一次命中就 return
+    if (!/while \(\(m = re\.exec\(s\)\) !== null\) last = m\[1\]/.test(fn))
+      err('★ extractTagged 取的不是**最后一个**标签块（提示词示例 / 思考里的预演会被当成答案）');
+    else ok('★ extractTagged 取最后一个标签块（示例和预演不会抢答）');
+  }
+  {
+    const fn = bodyOf(ailyrics, 'function pickAnswer(r, tag) {');
+    if (!/extractTagged\(r && r\.reasoning, tag\)/.test(fn))
+      err('★ pickAnswer 没从 reasoning_content 里捞答案（正文空时白跑一次，等于不支持推理模型）');
+    else ok('★ pickAnswer 会从 reasoning_content 里捞标签块（正文空也能救回来）');
+  }
+  if (!/function thinkingError\(r, tag\)/.test(ailyrics) ||
+      !/thinkingError\(r, 'json'\)/.test(bodyOf(ailyrics, 'async function polishChunk(o) {')) ||
+      !/thinkingError\(r, 'lrc'\)/.test(bodyOf(ailyrics, 'async function generateLyrics(o) {')))
+    err('★ 两条路没有统一的 thinking 报错（文案会不一致）');
+  else ok('★ 两条路都用 thinkingError（文案统一、可操作）');
+  if (!/finish === 'length'/.test(bodyOf(ailyrics, 'async function generateLyrics(o) {')))
+    err('★ 没处理"输出被 max_tokens 截断"—— 推理模型最常见的失败，报错却只会说"格式不对"');
+  else ok('★ 输出被截断时单独提示（推理模型把额度花在思考上）');
+
+  /* ★★ 实测第二轮反馈：正文空 + finish=length（想太久被截断）。三条对策都要在 */
+  {
+    const fn = bodyOf(ailyrics, 'async function generateLyrics(o) {');
+    if (!/let budget = 8000/.test(fn))
+      err('★ ★ 生成起步预算还是 4000 —— 推理模型"想完就没额度了"，正文必然是空的');
+    else ok('★ ★ 生成起步预算 8000（推理模型要先花几千 token 想）');
+    if (!/budget \* 2/.test(fn) || !/attempt < 2/.test(fn))
+      err('★ 截断后没有"加大预算重试一次"');
+    else ok('★ 截断后自动加大预算重试一次');
+  }
+  if (!/_tokenFallback/.test(ailyrics) || !/max_?tokens|max_completion_tokens/.test(ailyrics))
+    err('★ 没处理"预算给太大 → 老模型 400"（不自动降到 4000 的话，新预算反而会让它彻底不能用）');
+  else ok('★ 预算给太大被 400 时自动降到 4000 重试（老模型也能用）');
+  if (!/function salvageFromReasoning\(reasoning, duration\)/.test(ailyrics))
+    err('★ 没有"从思考过程里捞歌词"的兜底（有的模型把整首 LRC 写在思考里，正文空）');
+  else ok('★ 有"从思考过程里捞歌词"的兜底');
+  {
+    const fn = bodyOf(ailyrics, 'function salvageFromReasoning(reasoning, duration) {');
+    if (!/line\.slice\(lastAt\)/.test(fn))
+      err('★ 捞词没只取"最后一个时间戳之后"的文字 —— 思考里的英文前缀会被当成歌词');
+    else ok('★ 捞词只取最后一个时间戳之后的文字（英文前缀不会混进歌词）');
+    if (!/kept\.length < 3/.test(fn)) err('★ 捞词没有最少行数门槛（两行也能当歌词）');
+    else ok('★ 捞词有门槛（≥3 行、且不能是提示词示例的复读）');
+  }
+  if (!/const truncated = !!\(r && r\.finish === 'length'\)/.test(ailyrics))
+    err('★ thinkingError 没区分"被截断"和"只回了思考"（用户看不出该改什么）');
+  else ok('★ thinkingError 区分"被截断"与"只回了思考"');
+
+  /* ★ 歌名提取：写了必须接上（计划书 §3.0），而且本地文件名里的序号 / 编码后缀要剥掉 */
+  if (ailyrics.indexOf('\\d{1,3}\\s*[.、') < 0)
+    err('★ guessSongName 没去掉开头的序号（本地歌常是 "14. xxx"、"01 - xxx"）');
+  else ok('★ guessSongName 去掉开头序号（14. / 01 -）');
+  if (ailyrics.indexOf('AAC|FLAC|MP3') < 0)
+    err('★ guessSongName 没去编码后缀（_AAC / _FLAC / _320K —— 本地歌文件名常有）');
+  else ok('★ guessSongName 去掉编码后缀（_AAC / _FLAC / _320K）');
+  if (!/title: guessSongName\(o\.title\)/.test(ailyrics) || !/title: guessSongName\(opts\.title\)/.test(ailyrics))
+    err('★ ★ guessSongName 写了却没接进提示词 —— 整串标题丢给模型，它会把 UP 主当歌手去搜');
+  else ok('★ ★ 两条路的提示词都用提取后的歌名（不只是写了个函数）');
+
+  /* ===== ④ 整理：80 行分块 + 行数校验 ===== */
+  if (!/const CHUNK = 80/.test(ailyrics)) err('★ 分块不是 80 行');
+  else ok('★ 80 行一块');
+  {
+    const fn = bodyOf(ailyrics, 'async function polishLyrics(o) {');
+    if (!/i \+= CHUNK/.test(fn)) err('★ polishLyrics 没按 CHUNK 切块');
+    else ok('★ polishLyrics 按 CHUNK 切块');
+    if (!/const arr = await polishChunk\(/.test(fn) || !/for \(const t of arr\) out\.push\(t\)/.test(fn))
+      err('★ 块结果没有按顺序拼回');
+    else ok('★ 各块结果按顺序拼回');
+    // ★ 任何一块失败 → 整首失败：循环里不许 try/catch 吞掉单块错误
+    if (/try\s*\{[\s\S]{0,200}?polishChunk\([\s\S]{0,200}?catch/.test(fn))
+      err('★ ★ 单块失败被 catch 掉了 —— 会出现"半块成功半块失败"，时间轴全错位');
+    else ok('★ ★ 单块失败不吞：整首退回原字幕');
+  }
+  if (!/arr\.length !== chunk\.length/.test(ailyrics))
+    err('★ 没有行数校验 —— AI 合并了句子，时间轴就对不上了');
+  else ok('★ 逐块校验行数（不一致就丢弃）');
+  if (!/reason === 'mismatch'|fail\('mismatch'/.test(ailyrics)) err('★ 行数不一致没有单独的 reason（界面分不出"改动太大"和"格式错误"）');
+  else ok("★ 行数不一致抛 reason 'mismatch'");
+  // 空串必须保留：这个函数里**一个 filter 都不该有**（filter 一次 = 行数对不上）
+  if (/\.filter\(/.test(bodyOf(ailyrics, 'async function polishLyrics(o) {')))
+    err('★ ★ 整理结果被 filter 过了 —— "合并到上一行"留的空串会丢，行数就对不上');
+  else ok('★ ★ 空串 "" 原样保留（合并句靠它占位）');
+  if (!/return lines\.map\(\(l, i\) => \(\{ t: l\.t, text: out\[i\] \}\)\)/.test(ailyrics))
+    err('★ 整理结果没有用回原来的时间轴');
+  else ok('★ 时间轴用原字幕的 t（高亮精准）');
+
+  /* ===== ⑤ 生成：LRC 解析 / 元数据 / 纯音乐 ===== */
+  if (!/\(ti\|ar\|al\|by\|offset/.test(ailyrics))
+    err('★ 没丢弃 [ti:] [ar:] [al:] 元数据行 —— 它们会被当成歌词渲染出来');
+  else ok('★ [ti:] [ar:] [al:] 元数据行丢弃');
+  if (!/kept\.sort\(\(x, y\) => x\.t - y\.t\)/.test(ailyrics))
+    err('★ 没给时间戳排序 —— 模型偶尔会把两句写反，高亮会来回跳');
+  else ok('★ 时间戳排序（单调递增）');
+  if (!/r\.t <= lim \+ 1/.test(ailyrics)) err('★ 没裁掉越界时间戳');
+  else ok('★ 超出时长的行被裁掉');
+  if (!/isInstrumentalMark\(rows\[0\]\.text\)/.test(ailyrics))
+    err('★ 没识别「（纯音乐）」—— 会显示一行"（纯音乐）"而不是走空状态');
+  else ok('★ 「[00:00.00]（纯音乐）」识别成 instrumental');
+
+  /* ===== ⑥ 提示词 ===== */
+  if (!/const DEFAULT_PROMPT_POLISH = `/.test(ailyrics) || !/const DEFAULT_PROMPT_GENERATE = `/.test(ailyrics))
+    err('★ 默认提示词不在主进程（界面自己存一份迟早对不上）');
+  else ok('★ 两条默认提示词都在主进程');
+  {
+    const pol = (ailyrics.match(/const DEFAULT_PROMPT_POLISH = `([\s\S]*?)`;/) || [])[1] || '';
+    if (!/示例/.test(pol) || !/\["嗯嗯"/.test(pol)) err('★ 整理提示词没有 few-shot 示例（模型会过度润色）');
+    else ok('★ 整理提示词带 few-shot 示例');
+    if (!/不要输出 markdown/.test(pol)) err('★ 提示词没禁 markdown 代码块');
+    else ok('★ 提示词禁 markdown 代码块');
+    if (!/不要翻译/.test(pol)) err('★ 提示词没禁翻译（有的模型会把英文歌词翻成中文）');
+    else ok('★ 提示词禁翻译');
+    if (!/不要润色/.test(pol)) err('★ 提示词没禁"润色/创作"（那就不是原歌词了）');
+    else ok('★ 提示词禁润色 / 创作');
+    if (!/\{lines\}/.test(pol) || !/\{n\}/.test(pol)) err('★ 整理提示词缺 {lines} / {n} 占位符');
+    else ok('★ 整理提示词有 {n} / {lines} 占位符');
+    // 反向：不许把 UP 主写进提示词（拍板 #9）
+    if (/UP\s*主：|up主：|author\}|UP 主名：/.test(pol)) err('★ ★ 提示词里写了 UP 主 —— 会误导模型去搜别人的歌（拍板 #9）');
+    else ok('★ ★ 反向断言：提示词里没有 UP 主');
+    const gen = (ailyrics.match(/const DEFAULT_PROMPT_GENERATE = `([\s\S]*?)`;/) || [])[1] || '';
+    if (!/宁可少写也不要编造/.test(gen)) err('★ ★ 生成提示词没有"允许说不知道"的出口 —— 逼它硬写只会编');
+    else ok('★ ★ 生成提示词给了"宁可少写也不要编造"的出口');
+    if (!/\{duration\}/.test(gen)) err('★ 生成提示词缺 {duration}');
+    else ok('★ 生成提示词有 {duration}');
+    if (!/前奏一般占开头/.test(gen)) err('★ 没给时间戳分配原则（50 句会全挤在开头 30 秒）');
+    else ok('★ 给了时间戳分配原则（前奏 5~10%、一句 3~6 秒）');
+  }
+  if (!/text: p \|\| DEFAULT_PROMPT_POLISH/.test(ailyrics))
+    err('★ 自定义提示词没有"空串=用默认"的回退');
+  else ok('★ 空串 = 用默认（代码升级默认提示词时用户也能拿到）');
+  if (!/function validatePrompt\(kind, text\)/.test(ailyrics) || !/\{duration\}'/.test(ailyrics))
+    err('★ 没有提示词占位符校验');
+  else ok('★ 校验占位符（整理要 {lines}、生成要 {duration}）');
+  // 界面侧：缺占位符不许保存 + 恢复默认是清字段
+  if (!/function checkAiPrompt\(kind, text\)/.test(appjs)) err('★ 界面没做占位符校验，用户能存一个没 {lines} 的提示词');
+  else ok('★ 界面也拦一道（缺占位符不许保存）');
+  if (!/const val = \(text === dft\) \? '' : text;/.test(appjs))
+    err('★ 「恢复默认」存了一份默认副本 —— 以后代码升级默认提示词就跟着不动了');
+  else ok('★ 「恢复默认」= 把字段清空，不是存副本');
+
+  /* ===== ⑦ 缓存 ===== */
+  if (!/const CACHE_MAX = 800/.test(ailyrics)) err('★ 缓存上限不是 800');
+  else ok('★ 缓存上限 800 条');
+  if (!/keys\.sort\(\(a, b\) => \(Number\(c\[a\] && c\[a\]\.at\) \|\| 0\) - \(Number\(c\[b\] && c\[b\]\.at\) \|\| 0\)\)/.test(ailyrics))
+    err('★ 超上限时没按 at 淘汰最旧的');
+  else ok('★ 超上限按 at 淘汰最旧的');
+  if (!/mode\) \{|cacheKeyOf\(bvid, cid, mode\)/.test(ailyrics) || !/\|' \+ mode/.test(ailyrics))
+    err('★ 缓存 key 没带 mode（整理和生成会互相覆盖）');
+  else ok('★ 缓存 key 带 mode（整理 / 生成分开存）');
+  if (!/kk\.indexOf\(k \+ '\|'\) === 0/.test(ailyrics))
+    err('★ 清缓存不支持"按这首歌"清（整理 + 生成要各清一次）');
+  else ok('★ 清缓存支持给 `BV#cid` 一次清掉这首的两份');
+
+  /* ===== ⑧ 七种失败 reason ===== */
+  {
+    const need = ['no-config', 'bad-key', 'quota', 'no-model', 'timeout', 'refused', 'bad-format'];
+    const miss = need.filter((r) => ailyrics.indexOf("'" + r + "'") < 0);
+    if (miss.length) err('★ 少了失败 reason：' + miss.join(', '));
+    else ok('★ 七种失败 reason 齐全（界面据此显示不同文案）');
+    const missUi = need.filter((r) => appjs.indexOf("case '" + r + "'") < 0);
+    if (missUi.length) err('★ 界面的 aiFailText 没覆盖：' + missUi.join(', '));
+    else ok('★ 界面 aiFailText 七种都有人话');
+  }
+  if (!/401/.test(ailyrics) || !/402 \|\| c === 429/.test(ailyrics))
+    err('★ 状态码到 reason 的映射不全（401/403 → bad-key、402/429 → quota）');
+  else ok('★ 状态码映射（401/403 / 402/429 / 404）');
+
+  /* ===== ⑨ 联网探测四态 ===== */
+  if (!/hasSearchEvidence\(r\.data\)/.test(ailyrics)) err('★ 没有"citations/annotations 算硬证据"的判据');
+  else ok('★ 硬证据优先（citations / annotations）');
+  if (!/urls\.length >= 2/.test(ailyrics)) err('★ 没按"≥2 个网址"判 maybe');
+  else ok('★ ≥2 个网址判 maybe（不敢算"支持"）');
+  if (/今天几号|今天日期/.test(ailyrics)) err('★ 用了"问今天几号"来探测 —— 模型能从训练数据蒙对，会误判');
+  else ok('★ 反向断言：没用"问今天几号"这种能蒙对的题');
+  if (!/resetAiWebState/.test(appjs) || !/aiCfg\(\)\.webSearch = 'unknown'/.test(appjs))
+    err('★ 换模型时没把联网结论重置成 unknown（旧结论就作废不了）');
+  else ok('★ 换模型 / 换 BaseURL → 联网结论重置成 unknown');
+
+  /* ===== ⑩ 接进 loadLyrics：两条路 + 小标 + 切歌丢弃 ===== */
+  {
+    const fn = bodyOf(appjs, 'async function loadLyrics(byUser, fresh) {');
+    if (!fn) err('★ loadLyrics 签名没带 fresh（「重新获取」没法清缓存）');
+    else ok('★ loadLyrics(byUser, fresh) 有 fresh 参数');
+    const subAt = fn.indexOf("api('subtitle'");
+    const polishAt = fn.indexOf("aiRequest('polish'");
+    if (subAt < 0 || polishAt < 0 || subAt > polishAt)
+      err('★ ★ 「AI 优先」时没有先取字幕 —— 时间轴只能从真字幕里来');
+    else ok('★ ★ 先取字幕再交给 AI 整理（时间轴用真的）');
+    // v2.12.0：总开关 + 两个子开关（整理 / 生成），各管一条路
+    if (!/const aiOn = !!ai\.enabled/.test(fn)) err('★ loadLyrics 没读总开关');
+    else ok('★ loadLyrics 读总开关（aiOn）');
+    if (!/if \(aiOn && ai\.aiPolish\) \{/.test(fn))
+      err('★ 有字幕时没同时看「总开关 + AI 整理」');
+    else ok('★ 有字幕时看「总开关 + AI 整理」');
+    if (!/if \(aiOn && ai\.aiGenerate\) \{/.test(fn))
+      err('★ 没字幕时没同时看「总开关 + AI 生成」');
+    else ok('★ 没字幕时看「总开关 + AI 生成」');
+    if (!/if \(lyricState\.trackKey !== key\) return;/.test(fn))
+      err('★ ★ 结果回来时没检查"还是不是这首歌" —— 上一首的歌词会闪到当前这首上');
+    else ok('★ ★ 结果回来先比对 trackKey，切歌就丢弃');
+    if (!/aiClearCache/.test(fn)) err('★ 「重新获取」没清缓存（点了等于没点）');
+    else ok('★ 「重新获取」先清这一首的缓存');
+  }
+  if (!/const aiInFlight = new Map\(\)/.test(appjs))
+    err('★ 没有 in-flight 去重（快速切走又切回会并发两个请求，白花钱）');
+  else ok('★ in-flight 去重（同一首歌不重复发）');
+  if (!/loadLyrics\(true, true\)/.test(appjs))
+    err('★ 空状态那颗「重新获取」没传 fresh');
+  else ok('★ 「重新获取」按钮传 fresh=true');
+  if (!/AI 生成 · 时间轴为估算/.test(appjs))
+    err('★ ★ 兜底模式没有「AI 生成 · 时间轴为估算」小标（用户会拿估算的时间轴当准的）');
+  else ok('★ ★ 兜底模式挂「AI 生成 · 时间轴为估算」');
+  if (!/lyricState\.mode === 'gen'/.test(appjs) || !/tag\.classList\.toggle\('est'/.test(appjs))
+    err('★ 小标没有"估算"那一档样式');
+  else ok('★ 估算小标单独一档（比整理版显眼）');
+  if (!/lyricState\.showRaw = false;/.test(appjs))
+    err('★ 整理完成后没把 showRaw 置回 false（默认该显示整理版，拍板 #14）');
+  else ok('★ 整理版默认显示，原文靠切换（拍板 #14）');
+  if (!/function toggleLyricRaw\(\)/.test(appjs) || !/lyricState\.rawLines\.length > 0/.test(appjs))
+    err('★ 没有「看原文 / 看整理」切换');
+  else ok('★ 有「看原文 / 看整理」切换');
+  if (!/failNote/.test(appjs) || !/le-ai/.test(appjs))
+    err('★ 失败原因没写进空状态（拍板 #4：把原因显示出来）');
+  else ok('★ 失败原因写进歌词空状态（不弹窗、不阻断）');
+
+  /* ===== ⑪ IPC / preload / 进度推送 ===== */
+  {
+    const need = ['aiKeyInfo', 'aiSetKey', 'aiModels', 'aiTest', 'aiTestWebSearch',
+      'aiGetPrompts', 'aiPolish', 'aiGenerate', 'aiCacheStats', 'aiClearCache'];
+    const miss = need.filter((n) => !new RegExp('\\b' + n + ':').test(preloadCode));
+    if (miss.length) err('preload 少暴露：' + miss.join(', '));
+    else ok(`preload 暴露了 ${need.length} 个 AI 方法`);
+  }
+  if (!/onAiProgress: \(cb\) => ipcRenderer\.on\('ai:progress'/.test(preloadCode))
+    err('★ 没有 onAiProgress 订阅（分块进度推不到界面）');
+  else ok('★ onAiProgress 订阅 ai:progress');
+  if (!/webContents\.send\('ai:progress'/.test(mainCode))
+    err('★ 主进程没有主动推 ai:progress（invoke 中途推不出去）');
+  else ok('★ 主进程分块循环里推 ai:progress');
+  if (!/opts\.onProgress = \(done, total\) => pushAiProgress/.test(mainCode))
+    err('★ polish 没接上进度回调');
+  else ok('★ polish 接上了进度回调');
+  if (/handle\('ai:[a-zA-Z]+',[^)]*key/.test(mainCode) && /aiOpts/.test(mainCode) === false)
+    err('★ IPC 直接收了界面传来的 Key');
+  else ok('★ 反向断言：Key 由主进程自己取（aiOpts），不收界面传来的');
+  if (!/aiLyrics\.configure\(\{/.test(mainCode)) err('★ main.js 没给 ai-lyrics 注入目录/存档读取');
+  else ok('★ main.js 注入了存储目录 + 读存档回调');
+
+  /* ===== ⑫ 设置项与存档 ===== */
+  if (!/function sanitizeAiLyrics\(raw\)/.test(appjs)) err('★ 没有 sanitizeAiLyrics（老存档会读到 undefined）');
+  else ok('★ 有 sanitizeAiLyrics 补洞');
+  if (!/aiLyrics: sanitizeAiLyrics\(old\.aiLyrics\)/.test(appjs))
+    err('★ migrateSettings 没补 aiLyrics —— 每次启动都会丢设置');
+  else ok('★ migrateSettings 补了 aiLyrics');
+  if (!/aiLyrics: Object\.assign\(\{\}, DEFAULT_DOWNLOAD\)|aiLyrics: \{/.test(appjs))
+    err('★ DEFAULT_SETTINGS 里没有 aiLyrics');
+  else ok('★ DEFAULT_SETTINGS 里有 aiLyrics（默认全关）');
+  {
+    const fn = bodyOf(appjs, 'function sanitizeAiLyrics(raw) {');
+    if (!/const polish = \(typeof o\.aiPolish === 'boolean'\)/.test(fn) ||
+        !/const generate = \(typeof o\.aiGenerate === 'boolean'\)/.test(fn))
+      err('★ 两个子开关没做"只认显式布尔"（老存档 / 手改坏的存档会被当成开，白花钱）');
+    else ok('★ 两个子开关只认显式布尔（默认不花钱）');
+    // 老存档只有 enabled / prefer 两个字段 → 必须换算，不能丢设置
+    if (!/const legacyOn = o\.enabled === true/.test(fn) || !/legacyOn && legacyPrefer/.test(fn))
+      err('★ 没做老存档 enabled/prefer → aiPolish/aiGenerate 的换算（升级后设置全丢）');
+    else ok('★ 老存档的两个开关能换算成新开关（升级不丢设置）');
+    if (!/AI_WEB_STATES\.includes\(o\.webSearch\)/.test(fn)) err('★ webSearch 没夹到四态');
+    else ok('★ webSearch 只认四态，其余回落 unknown');
+  }
+  if (!/id="chkAiPolish"/.test(html) || !/id="chkAiGenerate"/.test(html) || !/id="aiBox"/.test(html))
+    err('★ 设置页没有「AI 整理 / AI 生成」两个开关（或配置区）');
+  else ok('★ 设置页有两个独立开关（整理 / 生成）+ 配置区');
+  // ★ 生成那条不可靠：开之前必须弹窗提醒（用户明确要求），取消要把开关弹回去
+  {
+    const fn = bodyOf(appjs, 'function bindAiSettings() {');
+    if (!/askConfirm\('打开「AI 生成」？'/.test(fn))
+      err('★ 打开「AI 生成」没有弹窗提醒 —— 用户不知道它会编');
+    else ok('★ 打开「AI 生成」会弹窗提醒"大概率对不上"');
+    if (!/e\.target\.checked = false;/.test(fn))
+      err('★ 弹窗取消后没把开关弹回去（界面显示开着、实际没开）');
+    else ok('★ 取消后开关弹回原位');
+    if (!/askConfirm/.test(fn) || /showPrompt\(/.test(fn))
+      err('★ 用了 showPrompt（它会把等待者清空，await 永不返回）');
+    else ok('★ 弹窗走 askConfirm，没用 showPrompt');
+  }
+  if (!/id="btnAiTest"/.test(html) || !/id="btnAiWebTest"/.test(html))
+    err('★ 少了「测试连接」或「测试联网」按钮');
+  else ok('★ 两个测试按钮都在');
+  if (!/id="aiPromptMask"/.test(html)) err('★ 没有提示词编辑面板');
+  else ok('★ 有提示词编辑面板（整理 / 生成分开）');
+  if (!/\.ai-box\s*\{/.test(css) || !/\.lyric-tag\.est\s*\{/.test(css))
+    err('★ 样式没写全（配置区 / 估算小标）');
+  else ok('★ 样式齐全（配置区 + 估算小标 + 提示词浮层）');
+  // ★ 反向：提示词浮层常驻 DOM（只靠 opacity 藏），再加 backdrop-filter 就是每帧多算一次。
+  //   实测这一条会把离屏实测里别的 transition 拖到 300ms 都走不完（round23 的 .ops 透明度偶发失败）。
+  {
+    const maskRule = (css.match(/\.ai-prompt-mask\s*\{[\s\S]*?\n\}/) || [''])[0];
+    const panelRule = (css.match(/\.ai-prompt-panel\s*\{[\s\S]*?\n\}/) || [''])[0];
+    const rMask = (css.match(/\.ai-reply-mask\s*\{[\s\S]*?\n\}/) || [''])[0];
+    const rPanel = (css.match(/\.ai-reply-panel\s*\{[\s\S]*?\n\}/) || [''])[0];
+    if (/backdrop-filter/.test(maskRule) || /backdrop-filter/.test(panelRule) ||
+        /backdrop-filter/.test(rMask) || /backdrop-filter/.test(rPanel))
+      err('★ ★ AI 的两个浮层用了 backdrop-filter —— 它们常驻 DOM，会把每帧成本抬高（实测拖慢别的 transition）');
+    else ok('★ ★ 反向断言：两个 AI 浮层都没有 backdrop-filter（常驻浮层不叠实时模糊）');
+  }
+
+  /* ===== ⑫a2 整理那条路也要有预算阶梯（v2.12.0 实测反馈）===== */
+  {
+    const fn = bodyOf(ailyrics, 'async function polishChunk(o) {');
+    if (!/for \(let attempt = 0; attempt < 2; attempt\+\+\)/.test(fn))
+      err('★ ★ 整理没有"被截断就重试一次"—— 实测 54 行字幕把 token 全花在思考上，整首直接失败');
+    else ok('★ ★ 整理被截断会重试一次');
+    if (!/budget = Math\.min\(20000, budget \* 2\)/.test(fn))
+      err('★ 整理重试时没加大预算');
+    else ok('★ 整理重试时预算翻倍（上限 20000）');
+    if (!/直接输出最终答案，不要输出任何思考过程/.test(fn))
+      err('★ 整理重试时没加"别想了，直接给答案"');
+    else ok('★ 整理重试时加了"别想了，直接给答案"');
+    if (!/4000 \+ chunk\.length \* 80/.test(fn))
+      err('★ 整理的起步预算还是按 60/行算的 —— 推理模型不够用');
+    else ok('★ 整理起步预算按 80/行（推理模型要先想）');
+  }
+
+  /* ===== ⑫b 看 AI 到底回了什么（v2.12.0 追加）===== */
+  // 小标要是**按钮**：用户点它才能看到"这歌词是不是编的"的依据
+  if (!/<button class="lyric-tag" id="lyricTag"/.test(html))
+    err('★ 歌词页顶上那颗小标不是按钮 —— 点不开"AI 原始回复"');
+  else ok('★ 小标是按钮（点开看 AI 原始回复）');
+  if (!/id="aiReplyMask"/.test(html) || !/data-rtab="answer"/.test(html) ||
+      !/data-rtab="think"/.test(html) || !/data-rtab="prompt"/.test(html))
+    err('★ 没有「回复 / 思考过程 / 提示词」三页');
+  else ok('★ 浮层有三页：回复 / 思考过程 / 发出去的提示词');
+  if (!/function rememberDebug\(key, info\)/.test(ailyrics) || !/function getDebug\(key\)/.test(ailyrics))
+    err('★ 主进程没有留调试快照（界面点开只能看到空白）');
+  else ok('★ 主进程留调试快照（rememberDebug / getDebug）');
+  if (!/debugMap\.size > 30/.test(ailyrics))
+    err('★ 调试快照没有条数上限 —— 长会话会把整首歌词一直攒在内存里');
+  else ok('★ 调试快照只留最近 30 条（不落盘、有上限）');
+  {
+    const p1 = bodyOf(ailyrics, 'async function polishCached(o) {');
+    const g1 = bodyOf(ailyrics, 'async function generateCached(o) {');
+    if (!/err\.debug = getDebug\(ck\)/.test(p1) || !/err\.debug = getDebug\(ck\)/.test(g1))
+      err('★ ★ 失败时没把快照挂到错误上 —— 偏偏失败时最需要看模型原话');
+    else ok('★ ★ 失败也带快照（整理 / 生成两条路都有）');
+    if (!/debug: getDebug\(ck\)/.test(p1) || !/debug: getDebug\(ck\)/.test(g1))
+      err('★ 成功时结果里没带 debug');
+    else ok('★ 成功时结果里带 debug');
+  }
+  if (!/debug: err\.debug \|\| undefined/.test(mainCode))
+    err('★ ★ handle() 没把 debug 透传出去 —— 错误对象过 IPC 时会被序列化成 {ok,error,reason}，debug 就丢了');
+  else ok('★ ★ handle() 把 debug 一起透传（否则失败时界面拿不到）');
+  if (!/if \(res\.debug\) e\.debug = res\.debug;/.test(appjs))
+    err('★ api() 没把 debug 带到 Error 上');
+  else ok('★ api() 把 debug 带到 Error 上');
+  if (!/id="btnLyricAiDetail"|btnLyricAiDetail/.test(appjs) || !/openAiReplyPanel/.test(appjs))
+    err('★ 失败的空状态里没有"看 AI 原始回复"的入口');
+  else ok('★ 失败时空状态里也有入口（这时最需要看）');
+  if (!/function aiReplyText\(tab\)/.test(appjs) || !/reasoning \|\|/.test(appjs))
+    err('★ 思考过程那一页没有兜底文案（普通模型没有思考过程时会显示空白）');
+  else ok('★ 没有思考过程时给的是说明，不是空白');
+
+  /* ===== ⑫c 总开关关掉后，整理过的缓存照样用（v2.12.0 追加）===== */
+  {
+    const fn = bodyOf(appjs, 'async function loadLyrics(byUser, fresh) {');
+    if (!/api\('aiCachePeek', aiCacheKey\(track, 'polish'\)\)/.test(fn))
+      err('★ ★ 总开关关着时没去读整理缓存 —— 之前花过钱的成果白扔了');
+    else ok('★ ★ 总开关关着时只读缓存（aiCachePeek），不调 API');
+    if (!/lyricState\.polishFromCache = true;/.test(fn))
+      err('★ 用缓存版时没做标记（标签上看不出这是缓存）');
+    else ok('★ 缓存版会标记出来（小标写「AI 整理版 · 缓存」）');
+    // 缓存版也要能切原文：polishedLines + rawLines 都得在
+    if (!/lyricState\.polishedLines = hit\.lines;/.test(fn))
+      err('★ 缓存版没存进 polishedLines —— 「看原文 / 看整理」就切不动了');
+    else ok('★ 缓存版存进 polishedLines（看原文 / 看整理照样能切）');
+  }
+  if (!/handle\('ai:cachePeek'/.test(mainCode) || !/aiCachePeek: \(key\) => ipcRenderer\.invoke\('ai:cachePeek'/.test(preloadCode))
+    err('★ 没有 ai:cachePeek 通道（渲染层读不到缓存）');
+  else ok('★ ai:cachePeek 通道通了（preload → main）');
+  if (!/enabled: \(typeof o\.enabled === 'boolean'\) \? o\.enabled : \(polish \|\| generate\)/.test(appjs))
+    err('★ sanitizeAiLyrics 没算总开关（只存两个子开关的话，老存档/新存档会打架）');
+  else ok('★ 总开关在 sanitize 里补算（缺省 = 两个子开关有一个开）');
+
+  /* ===== ⑬ 离线实测必须在 ===== */
+  if (fs.existsSync(path.join(ROOT, '.verify', 'test-round27.js')))
+    ok('有 .verify/test-round27.js（假 AI 服务的全流程实测）');
+  else err('缺少 .verify/test-round27.js —— AI 那两条路必须用假服务真跑一遍');
+  if (!/test-round27/.test(read('.verify/run-regression.sh')))
+    err('★ run-regression.sh 没加 test-round27');
+  else ok('★ run-regression.sh 已加 test-round27');
+
+  /* ===== ⑭ 本地歌曲 + 模型下拉（v2.12.0 追加的两个反馈）===== */
+  // 本地歌没有 bvid/cid：缓存 key 必须换 'l:' + 路径，否则全撞成一个键
+  if (!/function aiCacheBase\(track\)/.test(appjs) ||
+      !/if \(track\.localPath\) return 'l:' \+ track\.localPath;/.test(appjs))
+    err('★ 缓存 key 没有 localPath 分支 —— 本地歌的歌词会全撞到同一个键上');
+  else ok("★ 本地歌的缓存 key 用 'l:' + 路径（不和 B 站歌撞）");
+  {
+    const fn = bodyOf(appjs, 'async function loadLyrics(byUser, fresh) {');
+    if (!/const isLocal = !!track\.localPath/.test(fn))
+      err('★ loadLyrics 没认本地歌（会白跑 ensureCid → videoInfo 必败 → 提示"信息没取到"）');
+    else ok('★ loadLyrics 认出本地歌（跳过 ensureCid 和字幕）');
+    if (!/本地歌曲没有 B 站字幕可取/.test(fn))
+      err('★ 本地歌没开 AI 时没说明原因（用户会以为功能坏了）');
+    else ok('★ 本地歌没开 AI → 空状态里写明"去设置开 AI 歌词"');
+    // 「重新获取」的清缓存也必须认本地歌
+    if (!/aiClearCache', aiCacheBase\(track\)/.test(fn))
+      err('★ 「重新获取」的清缓存没走 aiCacheBase（本地歌清不到）');
+    else ok('★ 「重新获取」清缓存走 aiCacheBase（本地歌也能清）');
+  }
+  // 模型下拉：原生 <datalist> 行多时在 Windows 上滚不动（实测反馈），必须自己画
+  if (/list="aiModelList"/.test(html))
+    err('★ 还在用原生 <datalist> 选模型 —— 行多的时候滚不动');
+  else ok('★ 反向断言：模型选择没用原生 datalist');
+  if (!/id="aiModelPop"/.test(html) || !/\.ai-model-pop\s*\{[^}]*overflow-y:\s*auto/.test(css))
+    err('★ 模型下拉没有可滚动的自绘列表');
+  else ok('★ 模型下拉是自绘的滚动列表（最多 ~7 行，其余滚）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 64 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

@@ -53,6 +53,20 @@ const DATA_FILE = path.join(app.getPath('userData'), 'neko-data.json');
 // 用户自己填的 B 站登录 Cookie（可选，填了搜索会更稳）
 const COOKIE_FILE = path.join(app.getPath('userData'), 'cookie.txt');
 
+// ---- AI 歌词（v2.12.0）----
+//  Key 存 ai-key.bin（safeStorage 加密），缓存存 ai-lyrics-cache.json —— 都**不进存档**：
+//  Key 是密文不该跟着歌单到处跑，缓存是"随时可以删掉重来"的中间产物。
+//  ★ 这里传的是"读存档"的回调而不是一份 settings 快照：提示词是界面改的、主进程只读，
+//    每次真正调 AI 时才读一次，所以改完提示词立刻生效，不用重启。
+const aiLyrics = require('./ai-lyrics');
+aiLyrics.configure({
+  dir: app.getPath('userData'),
+  getSettings: () => {
+    const d = readDataFile();
+    return (d && d.settings) || {};
+  },
+});
+
 // ---- 自定义背景 ----
 // 用户选的图片/视频会被"复制"到这个专属目录里，而不是直接引用原文件。
 // 这样你把原文件删了、移动了，背景也不会变成裂图。
@@ -768,6 +782,25 @@ function sendCmd(cmd) {
 }
 
 /**
+ * AI 歌词：把界面传来的参数补上"Key"。
+ * ★ Key **只能**来自主进程自己的存储 —— 渲染层传什么都不算数，
+ *   这样界面永远不需要持有明文，也不可能被注入一段别人的 Key。
+ */
+function aiOpts(o) {
+  return Object.assign({}, (o && typeof o === 'object') ? o : {}, { key: aiLyrics.getKey() });
+}
+
+/** AI 歌词的进度推送（整理一首 500 行的歌要分 7 块、两三分钟，不能让用户干等） */
+function pushAiProgress(opts, mode, done, total) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    mainWindow.webContents.send('ai:progress', {
+      key: aiLyrics.cacheKeyFor(opts || {}, mode), done, total,
+    });
+  } catch (_) { /* 窗口正在关，忽略 */ }
+}
+
+/**
  * 来自"外部"的命令：第二个实例带的参数、任务栏右键里的「任务」。
  * 有些能主进程自己办（显示窗口 / 切 mini），有些得界面来办（播放控制 / 打开设置）。
  */
@@ -959,7 +992,14 @@ function handle(channel, fn) {
       console.error(`[${channel}] 出错：`, err);
       // reason 是给界面看的"失败原因分类"（比如字幕的 no-cookie / none / limit），
       // 没有就省略。界面据此显示不同的提示文案。
-      return { ok: false, error: err.message || String(err), reason: err.reason };
+      // debug 是 AI 歌词专用的"调试快照"（发出去的提示词 + 模型原话 + 思考过程）——
+      // 失败时界面那颗「查看 AI 原始回复」全靠它，所以必须跟着错误一起送出去。
+      return {
+        ok: false,
+        error: err.message || String(err),
+        reason: err.reason,
+        debug: err.debug || undefined,
+      };
     }
   });
 }
@@ -1029,6 +1069,43 @@ function registerHandlers() {
     bili.setUserCookie(text);   // 立刻生效，不用重启软件
     return true;
   });
+
+  // ---------- AI 歌词（v2.12.0） ----------
+  //  ★ 这一组**都不接受渲染层传来的 Key**：主进程自己从 ai-key.bin 读。
+  //    界面只知道"配没配"和一个掩码，明文永远不出主进程（拍板 #11）。
+  handle('ai:keyInfo', () => aiLyrics.keyInfo());
+  handle('ai:setKey', (text) => aiLyrics.setKey(text));
+  handle('ai:clearKey', () => aiLyrics.clearKey());
+  handle('ai:models', (o) => aiLyrics.listModels(aiOpts(o)));
+  handle('ai:test', (o) => aiLyrics.testConnection(aiOpts(o)));
+  handle('ai:testWebSearch', (o) => aiLyrics.testWebSearch(aiOpts(o)));
+  //  提示词：主进程只**读**（默认值在这儿，自定义的在存档里）。
+  //  为什么没有 ai:setPrompts：存档是整份 JSON 全量写的，两个进程各写一次会互相覆盖，
+  //  所以"写提示词"归界面（它本来就是存档的 owner），主进程只负责给默认值和校验。
+  handle('ai:getPrompts', () => aiLyrics.getPrompts());
+  handle('ai:polish', (o) => {
+    const opts = aiOpts(o);
+    // 进度只能靠主进程主动推：invoke 是一次性的，中途推不出去（见 §5.1c）
+    // ★ key 用 cacheKeyFor（界面传来的 base 优先）—— 本地歌没有 bvid/cid，
+    //   拿它们拼会得到 #|gen，进度就画不到对应那首歌上
+    opts.onProgress = (done, total) => pushAiProgress(o, 'polish', done, total);
+    return aiLyrics.polishCached(opts);
+  });
+  handle('ai:generate', (o) => {
+    const opts = aiOpts(o);
+    opts.onProgress = (done, total) => pushAiProgress(o, 'gen', done, total);
+    return aiLyrics.generateCached(opts);
+  });
+  // 只读缓存、**不调 API**（v2.12.0）：总开关关着时，已经整理过的成果照样能用 ——
+  // 那是之前花过钱的，没必要因为关了开关就丢掉。返回 null = 这首没缓存。
+  handle('ai:cachePeek', (key) => {
+    const hit = aiLyrics.cacheGet(String(key || ''));
+    return hit ? { lines: hit.lines, at: hit.at, mode: hit.mode } : null;
+  });
+
+  handle('ai:cacheStats', () => aiLyrics.cacheStats());
+  //  传 key 只清这一首（「重新获取」用）；不传清空全部
+  handle('ai:clearCache', (key) => aiLyrics.clearCache(key));
 
   handle('store:load', () => {
     const saved = readDataFile();

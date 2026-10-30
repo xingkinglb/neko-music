@@ -160,6 +160,32 @@ contextBridge.exposeInMainWorld('neko', {
   localPickFolder: () => ipcRenderer.invoke('local:pickFolder'),
   localStat: (paths) => ipcRenderer.invoke('local:stat', paths),
 
+  // ---------- AI 歌词（v2.12.0）----------
+  // ★ 这一组**都不传 Key 进去**：Key 只在主进程里读，界面拿到的是
+  //   { has, mask, encrypted } 三样东西 —— 掩码就是 `sk-••••••••••••a1b2`，
+  //   没有任何"看明文"的接口（拍板 #11）。
+  aiKeyInfo: () => ipcRenderer.invoke('ai:keyInfo'),
+  aiSetKey: (text) => ipcRenderer.invoke('ai:setKey', text),
+  aiClearKey: () => ipcRenderer.invoke('ai:clearKey'),
+  // 拉模型列表（拉不到返回空数组，界面允许手填模型名）
+  aiModels: (opts) => ipcRenderer.invoke('ai:models', opts),
+  // 发一个 1 token 的极短请求，验证 BaseURL + Key + 模型都对
+  aiTest: (opts) => ipcRenderer.invoke('ai:test', opts),
+  // 探测能不能联网，返回 'yes' / 'no' / 'maybe' / 'unknown'
+  aiTestWebSearch: (opts) => ipcRenderer.invoke('ai:testWebSearch', opts),
+  // 默认提示词在主进程（DEFAULT_PROMPT_*），自定义的在存档里，这里只读
+  aiGetPrompts: () => ipcRenderer.invoke('ai:getPrompts'),
+  // 整理（有字幕）/ 生成（没字幕）。参数里带 bvid/cid —— 缓存 key 由它拼
+  aiPolish: (opts) => ipcRenderer.invoke('ai:polish', opts),
+  aiGenerate: (opts) => ipcRenderer.invoke('ai:generate', opts),
+  // 只读缓存（不调 API）：总开关关着时也用得上 —— 整理过的成果不该丢
+  aiCachePeek: (key) => ipcRenderer.invoke('ai:cachePeek', key),
+  aiCacheStats: () => ipcRenderer.invoke('ai:cacheStats'),
+  // 传 key 只清这一首（「重新获取」必须先清，否则点了等于没点）
+  aiClearCache: (key) => ipcRenderer.invoke('ai:clearCache', key),
+  // 整理进度：{ key, done, total }，key 是 `BVxxx#cid|polish`
+  onAiProgress: (cb) => ipcRenderer.on('ai:progress', (_e, p) => cb(p || {})),
+
   // ---------- 本地存档 ----------
   // 读取整个数据库（歌单、收藏、历史）
   loadData: () => ipcRenderer.invoke('store:load'),

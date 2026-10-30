@@ -637,6 +637,58 @@ const CASES = [
     to:   '  pl.tracks = pl.tracks.concat(fresh);',
     expect: '新加的没排在最前面',
   },
+
+  /* ===== v2.12.0 · AI 歌词（7 条）=====
+     ★ expect 必须写 err() 的文案 —— 写 ok() 的永远不响（出错时那条 ok 根本不输出）。 */
+  {
+    name: 'Key 改成明文落盘',
+    file: 'src/ai-lyrics.js',
+    from: 'const buf = ss.encryptString(raw);',
+    to:   'const buf = Buffer.from(raw, \'utf8\');',
+    expect: '没调 safeStorage.encryptString',
+  },
+  {
+    name: '去掉整理的行数校验（AI 合并句子后时间轴会错位）',
+    file: 'src/ai-lyrics.js',
+    from: 'if (arr.length !== chunk.length) {',
+    to:   'if (false) {',
+    expect: '没有行数校验',
+  },
+  {
+    name: '整理结果把空串 filter 掉（合并句占位没了）',
+    file: 'src/ai-lyrics.js',
+    from: 'return lines.map((l, i) => ({ t: l.t, text: out[i] }));',
+    to:   'return lines.map((l, i) => ({ t: l.t, text: out[i] })).filter((x) => x.text);',
+    expect: '整理结果被 filter 过了',
+  },
+  {
+    name: '兜底小标去掉「时间轴为估算」',
+    file: 'src/ui/app.js',
+    from: "'AI 生成 · 时间轴为估算'",
+    to:   "'AI 生成'",
+    expect: '兜底模式没有「AI 生成 · 时间轴为估算」小标',
+  },
+  {
+    name: '切歌后回来的结果不判 trackKey（会闪到新歌上）',
+    file: 'src/ui/app.js',
+    from: 'if (lyricState.trackKey !== key) return;',
+    to:   'if (false) return;',
+    expect: '结果回来时没检查',
+  },
+  {
+    name: '换模型时不重置联网结论',
+    file: 'src/ui/app.js',
+    from: "aiCfg().webSearch = 'unknown';",
+    to:   "aiCfg().webSearch = aiCfg().webSearch;",
+    expect: '换模型时没把联网结论重置',
+  },
+  {
+    name: '提示词里塞进 UP 主（会误导模型搜错歌）',
+    file: 'src/ai-lyrics.js',
+    from: '视频标题：{title}\n（这只是一个 B 站视频标题，可能带 UP 主名、书名号、装饰符号',
+    to:   '视频标题：{title}\nUP 主：{owner}\n（这只是一个 B 站视频标题，可能带 UP 主名、书名号、装饰符号',
+    expect: '提示词里写了 UP 主',
+  },
 ];
 
 let pass = 0, fail = 0;

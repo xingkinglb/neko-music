@@ -77,6 +77,8 @@ async function api(name, ...args) {
     // ★ reason 必须一起带出来：主进程用它区分"没填Cookie / 没字幕 / 被限流"，
     //   界面要据此显示不同的提示文案。漏掉的话所有失败都会退化成同一句。
     if (res.reason) e.reason = res.reason;
+    // AI 歌词的调试快照（提示词 / 模型原话 / 思考过程）—— 失败时也能点开看
+    if (res.debug) e.debug = res.debug;
     throw e;
   }
   return res.data;
@@ -106,6 +108,11 @@ let DB = {
     // v2.9.0（见 DEFAULT_SETTINGS 里的说明）
     listOps: 'hover',
     opsOpacity: 55,
+    // v2.12.0：AI 歌词（默认全关，见 DEFAULT_SETTINGS.aiLyrics）
+    aiLyrics: {
+      enabled: false, aiPolish: false, aiGenerate: false, baseURL: '', model: '',
+      webSearch: 'unknown', promptPolish: '', promptGenerate: '',
+    },
   },
 };
 
@@ -575,6 +582,23 @@ const DEFAULT_SETTINGS = {
   opsOpacity: 55,     // 常显时的不透明度（20-100），只对 'always' 生效
   // v2.8.0：下载。默认值抽在 DOWNLOAD_DEFAULTS 里（理由见那里的注释）。
   download: Object.assign({}, DOWNLOAD_DEFAULTS),
+  // v2.12.0：AI 歌词。★ 默认**全关** —— 老存档读进来行为一模一样，一分钱不花。
+  //   webSearch 是「测试联网」的结论（yes / no / maybe / unknown），换模型时自动作废。
+  //   promptPolish / promptGenerate 空串 = 用主进程的默认提示词（这样代码升级默认提示词也能生效）。
+  aiLyrics: {
+    // v2.12.0：**总开关** + 两条路各一个子开关。
+    //   enabled   关了就完全不用 AI（但已整理过的缓存照样用，见 loadLyrics）
+    //   aiPolish  有字幕时逐句校对（原来的「AI 优先」，改名）—— 可靠，时间轴是真的
+    //   aiGenerate 没字幕时整段编 —— 大概率对不上，所以打开时会弹窗拦一下
+    enabled: false,
+    aiPolish: false,
+    aiGenerate: false,
+    baseURL: '',
+    model: '',
+    webSearch: 'unknown',
+    promptPolish: '',
+    promptGenerate: '',
+  },
 };
 
 // 关窗行为的三种取值。★ 必须和主进程 src/app-menus.js 的 CLOSE_ACTIONS 一致
@@ -640,6 +664,38 @@ function sanitizeDownload(raw) {
   };
 }
 
+/**
+ * 补齐 / 夹住 `settings.aiLyrics`（v2.12.0）。
+ *
+ * ★ 三条都跟"安全"有关，不是好看：
+ *   ① 两个开关只认**显式 true** —— 老存档没有这一项时必须是关（默认不花钱）
+ *   ② webSearch 只认四态，其余（手改坏了的存档）回落到 unknown：
+ *      一个假的 'yes' 会让兜底提示词加上"先联网搜索"，白浪费一次还搜不到
+ *   ③ 提示词只留字符串；全空白归一成空串 = 用默认（"恢复默认"就是把它清空）
+ */
+const AI_WEB_STATES = ['yes', 'no', 'maybe', 'unknown'];
+
+function sanitizeAiLyrics(raw) {
+  const o = (raw && typeof raw === 'object') ? raw : {};
+  // ★ 老存档只有 enabled / prefer 两个开关，换算成新的两个：
+  //   老的 enabled=true 时"没字幕就会生成"，prefer=true 时"有字幕也会整理"。
+  const legacyOn = o.enabled === true;
+  const legacyPrefer = o.prefer === true;
+  const polish = (typeof o.aiPolish === 'boolean') ? o.aiPolish : (legacyOn && legacyPrefer);
+  const generate = (typeof o.aiGenerate === 'boolean') ? o.aiGenerate : legacyOn;
+  return {
+    // 总开关：老存档里就是 enabled；只有两个子开关（没有 enabled）时按"有一个开就算开"
+    enabled: (typeof o.enabled === 'boolean') ? o.enabled : (polish || generate),
+    aiPolish: polish,
+    aiGenerate: generate,
+    baseURL: (typeof o.baseURL === 'string') ? o.baseURL.trim() : '',
+    model: (typeof o.model === 'string') ? o.model.trim() : '',
+    webSearch: AI_WEB_STATES.includes(o.webSearch) ? o.webSearch : 'unknown',
+    promptPolish: (typeof o.promptPolish === 'string' && o.promptPolish.trim()) ? o.promptPolish : '',
+    promptGenerate: (typeof o.promptGenerate === 'string' && o.promptGenerate.trim()) ? o.promptGenerate : '',
+  };
+}
+
 /** 补齐 DB.settings 里缺的字段（老版本存档没有这一项） */
 function migrateSettings() {
   const old = (DB.settings && typeof DB.settings === 'object') ? DB.settings : {};
@@ -675,6 +731,8 @@ function migrateSettings() {
     // 亮度：只认 20-100 的数字，其余（手改坏了的存档）回落到默认 55
     opsOpacity: (typeof old.opsOpacity === 'number' && old.opsOpacity >= 20 && old.opsOpacity <= 100)
       ? Math.round(old.opsOpacity) : DEFAULT_SETTINGS.opsOpacity,
+    // v2.12.0：AI 歌词。老存档没有这一项 → 全默认（关着，不花钱）。
+    aiLyrics: sanitizeAiLyrics(old.aiLyrics),
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -6251,6 +6309,9 @@ function syncSettingsUI() {
   if (cAuto) cAuto.checked = dls.autoAddToLocal !== false;
   const cSkip = $('chkDlSkip');
   if (cSkip) cSkip.checked = dls.skipExisting !== false;
+
+  // v2.12.0：AI 歌词那一块（含 Key 掩码 / 联网状态 / 缓存条数，都是异步拉的）
+  syncAiUI();
 }
 
 /**
@@ -6291,6 +6352,9 @@ function bindSettings() {
 
   /* ---- 快捷键页（v2.3.0） ---- */
   bindKeyList();
+
+  /* ---- AI 歌词页（v2.12.0） ---- */
+  bindAiSettings();
 
   /* ---- 主题色块 ---- */
   $('themeGrid').addEventListener('click', (e) => {
@@ -6510,6 +6574,384 @@ function bindSettings() {
 }
 
 /* ============================================================
+   第 4.8b 部分：AI 歌词（v2.12.0）
+   ============================================================
+   三块东西：
+     · 配置区 —— BaseURL / Key（只显示掩码）/ 模型 / 联网状态 / 缓存
+     · 两个测试 —— 「测试连接」验 BaseURL+Key+模型，「测试联网」探四态
+     · 提示词面板 —— 整理和生成分开编辑，缺关键占位符不许保存
+
+   ★ Key 的明文**从不经过这一层**：主进程只回 { has, mask, encrypted }。
+     所以界面上没有任何"显示明文"的入口（拍板 #11），连想写都写不出来。
+   ============================================================ */
+
+/** 存档里的 AI 设置（永远给一个对象，省得每处都判空） */
+function aiCfg() {
+  if (!DB.settings.aiLyrics) DB.settings.aiLyrics = sanitizeAiLyrics(null);
+  return DB.settings.aiLyrics;
+}
+
+/** 缓存 key 的"前半段"（不带 mode）：清缓存时就用它 —— 一次清掉这首的两份 */
+function aiCacheBase(track) {
+  if (!track) return '';
+  // ★ 本地歌没有 bvid/cid，用路径当身份证（和 selKey 的 'l:' 前缀同一个习惯），
+  //   否则本地歌全撞成 `#|polish` 一个键 —— A 歌的歌词会出现在 B 歌上。
+  if (track.localPath) return 'l:' + track.localPath;
+  return String(track.bvid || '') + '#' + (track.cid == null ? '' : track.cid);
+}
+
+/** 缓存 key：`BVxxx#cid|polish`（和主进程 ai-lyrics.js 的 cacheKeyOf 同一套写法） */
+function aiCacheKey(track, mode) {
+  return aiCacheBase(track) + '|' + mode;
+}
+
+/** 配置区下面那行反馈（成功绿 / 失败红，不用弹窗） */
+function setAiMsg(text, kind) {
+  const el = $('aiMsg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('ok', kind === 'ok');
+  el.classList.toggle('err', kind === 'err');
+}
+
+/** 打开设置面板时把 AI 那一块回填（三个异步的东西：Key 掩码 / 联网状态 / 缓存条数） */
+function syncAiUI() {
+  const a = aiCfg();
+  const on = !!a.enabled;
+  $('chkAiEnabled').checked = on;
+  // 总开关关着 → 整块配置（含两个子开关）藏起来
+  $('aiBox').style.display = on ? '' : 'none';
+  $('chkAiPolish').checked = !!a.aiPolish;
+  $('chkAiGenerate').checked = !!a.aiGenerate;
+  $('inpAiBase').value = a.baseURL || '';
+  $('inpAiModel').value = a.model || '';
+  // 每次打开面板都把"修改 Key"那一行收起来，输入框清空 —— 不把上一次的残值留在屏幕上
+  $('aiKeyEditRow').style.display = 'none';
+  $('inpAiKey').value = '';
+  setAiMsg('');
+  syncAiKeyUI();
+  syncAiWebUI();
+  refreshAiCacheLine();
+}
+
+/** Key 那一行：只显示掩码 + 本机是否支持加密（降级必须明说，拍板 #8） */
+async function syncAiKeyUI() {
+  let info = { has: false, mask: '', encrypted: true };
+  try { info = await api('aiKeyInfo'); } catch (_) { /* 主进程没起来就先当没配 */ }
+  const maskEl = $('aiKeyMask');
+  maskEl.textContent = info.has ? info.mask : '还没填';
+  maskEl.classList.toggle('empty', !info.has);
+  $('aiKeyHint').innerHTML = info.encrypted
+    ? 'Key 加密存在本机（Windows 走 DPAPI，绑当前用户）：文件被拷走 / 发给别人都解不开。<br />' +
+      '但防不住"你自己账户下运行的程序"—— 这是本地加密的物理上限，别指望它万无一失。'
+    : '<b class="ai-warn-text">本机不支持加密，Key 将以明文保存。</b>';
+}
+
+/** 联网那一行：四态各自的说法 + 换模型时的引导（拍板 #12：只提示 + 推荐，不拦着） */
+function syncAiWebUI() {
+  const a = aiCfg();
+  const state = AI_WEB_STATES.includes(a.webSearch) ? a.webSearch : 'unknown';
+  const el = $('aiWebState');
+  const hint = $('aiWebHint');
+  const label = { yes: '能联网 ✓', no: '不能联网', maybe: '可能能联网', unknown: '未检测' };
+  el.textContent = label[state];
+  el.className = 'ai-web-state ' + state;
+  hint.innerHTML =
+    state === 'yes'
+      ? '这个模型能联网，兜底模式会先搜再写。'
+      : state === 'no'
+        ? '这个模型不能联网，歌词只能凭它记住的内容写，<b>冷门歌可能会编</b>。' +
+          '想更准可以换搜索型模型：Perplexity <b>sonar / sonar-pro</b>、OpenAI <b>gpt-4o-search-preview</b>。' +
+          '也可以就这么用 —— 不拦你。'
+        : state === 'maybe'
+          ? '看起来能答，但没法确认是真联网还是编的。先试试，不满意再换。'
+          : '「能不能联网」取决于模型和服务商，事先不知道，只能探一次。';
+}
+
+/** 「已缓存 37 首 · 约 180 KB」 */
+async function refreshAiCacheLine() {
+  const el = $('aiCacheLine');
+  if (!el) return;
+  try {
+    const s = await api('aiCacheStats');
+    const kb = Math.max(0, Math.round((s.bytes || 0) / 1024));
+    el.textContent = `已缓存 ${s.count || 0} 首 · 约 ${kb} KB（上限 ${s.max || 800}）`;
+  } catch (_) {
+    el.textContent = '已缓存 0 首';
+  }
+}
+
+/**
+ * 点「测试连接 / 拉取列表 / 测试联网」之前，先把刚填的 Key 存下去。
+ * ★ 这是唯一一条 Key 从界面进主进程的路：**单向、只写、不回显**。
+ */
+async function saveAiKeyIfNeeded() {
+  const inp = $('inpAiKey');
+  const v = (inp && inp.value ? inp.value : '').trim();
+  if (!v) return;
+  await api('aiSetKey', v);
+  inp.value = '';
+  $('aiKeyEditRow').style.display = 'none';
+  await syncAiKeyUI();
+}
+
+/** 换模型 / 换 BaseURL → 旧的联网结论作废（换了模型，那个结论就不成立了） */
+function resetAiWebState() {
+  if (aiCfg().webSearch === 'unknown') return;
+  aiCfg().webSearch = 'unknown';
+  syncAiWebUI();
+  persistLater();
+}
+
+function bindAiSettings() {
+  /* ---- 总开关：最高优先级 ---- */
+  $('chkAiEnabled').addEventListener('change', (e) => {
+    aiCfg().enabled = !!e.target.checked;
+    syncAiUI();
+    persist();
+  });
+
+  /* ---- 两个子开关各管一条路 ---- */
+  // 整理：可靠（只改错字、时间轴是真的），直接开
+  $('chkAiPolish').addEventListener('change', (e) => {
+    aiCfg().aiPolish = !!e.target.checked;
+    syncAiUI();
+    persist();
+  });
+  // 生成：**不可靠**，开之前先弹一次窗把话说清楚（用户明确要求）
+  $('chkAiGenerate').addEventListener('change', async (e) => {
+    const want = !!e.target.checked;
+    if (want) {
+      const go = await askConfirm('打开「AI 生成」？',
+        '没字幕时，AI 只能凭训练数据"回忆"这首歌 —— 冷门歌、翻唱、UP 自己改词的，'
+        + '它大概率会编一段很像歌词的东西；时间轴也是它估的，越往后越偏。\n\n'
+        + '能取到 B 站字幕的歌，建议开上面那个「AI 整理」，那条路是准的。\n\n'
+        + '还是要打开吗？', '还是打开');
+      if (!go) {
+        e.target.checked = false;   // 取消 → 开关弹回去，设置不变
+        return;
+      }
+    }
+    aiCfg().aiGenerate = want;
+    syncAiUI();
+    persist();
+  });
+
+  /* ---- BaseURL / 模型：手输就存（用 change，别在每次敲键时写盘）---- */
+  $('inpAiBase').addEventListener('change', (e) => {
+    aiCfg().baseURL = String(e.target.value || '').trim();
+    resetAiWebState();
+    persist();
+  });
+  $('inpAiModel').addEventListener('change', (e) => {
+    aiCfg().model = String(e.target.value || '').trim();
+    resetAiWebState();
+    persist();
+  });
+
+  /* ---- Key：填写 / 修改 / 保存 ---- */
+  $('btnAiKeyEdit').addEventListener('click', () => {
+    const row = $('aiKeyEditRow');
+    row.style.display = '';
+    $('inpAiKey').focus();
+  });
+  $('btnAiKeySave').addEventListener('click', async () => {
+    const v = ($('inpAiKey').value || '').trim();
+    if (!v) { setAiMsg('先把 Key 粘进来', 'err'); return; }
+    try {
+      await saveAiKeyIfNeeded();
+      setAiMsg('Key 已保存（界面上只留掩码，看不到明文）', 'ok');
+    } catch (err) {
+      setAiMsg(err.message || 'Key 保存失败', 'err');
+    }
+  });
+
+  /* ---- 模型下拉（自己画的滚动列表）----
+     ★ 拉取后存进 aiModelPool，输入框获得焦点 / 输入时按子串过滤后展开。
+       点列表外任何地方收起（用捕获阶段监听，免得被别的 pointerdown 逻辑抢走）。 */
+  let aiModelPool = [];
+  const renderAiModelPop = (filter) => {
+    const pop = $('aiModelPop');
+    const q = String(filter == null ? '' : filter).trim().toLowerCase();
+    const list = aiModelPool.filter((m) => !q || m.toLowerCase().indexOf(q) >= 0);
+    pop.innerHTML = list.length
+      ? list.slice(0, 500).map((m) => `<div class="ai-model-item" data-model="${esc(m)}">${esc(m)}</div>`).join('')
+      : '<div class="ai-model-item none">' +
+        (aiModelPool.length ? '没有匹配的模型' : '还没拉到列表 —— 点「拉取列表」') +
+        '</div>';
+    pop.classList.add('show');
+  };
+  $('inpAiModel').addEventListener('focus', () => {
+    if (aiModelPool.length) renderAiModelPop($('inpAiModel').value);
+  });
+  $('inpAiModel').addEventListener('input', (e) => {
+    if (aiModelPool.length) renderAiModelPop(e.target.value);
+  });
+  $('aiModelPop').addEventListener('click', (e) => {
+    const it = e.target.closest('.ai-model-item');
+    if (!it || it.classList.contains('none')) return;
+    $('inpAiModel').value = it.dataset.model;
+    aiCfg().model = it.dataset.model;   // 点选的立刻生效（和手输 change 同一条路）
+    resetAiWebState();
+    persist();
+    $('aiModelPop').classList.remove('show');
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!e.target.closest) return;
+    if (!e.target.closest('#aiModelPop') && !e.target.closest('#inpAiModel')) {
+      $('aiModelPop').classList.remove('show');
+    }
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') $('aiModelPop').classList.remove('show');
+  });
+
+  /* ---- 拉取模型列表：拉不到不算错，手填就行（中转站常常 404）---- */
+  $('btnAiModels').addEventListener('click', async () => {
+    setAiMsg('正在拉取模型列表…');
+    try {
+      await saveAiKeyIfNeeded();
+      const list = await api('aiModels', { baseURL: aiCfg().baseURL, model: aiCfg().model });
+      aiModelPool = Array.isArray(list) ? list : [];
+      renderAiModelPop('');
+      if (!aiModelPool.length) {
+        setAiMsg('没拉到列表（这个站可能没开 /models）—— 直接在右边手填模型名就行', 'err');
+      } else {
+        setAiMsg(`拉到 ${aiModelPool.length} 个模型，点输入框就能选（输入可过滤）`, 'ok');
+      }
+    } catch (err) {
+      setAiMsg(err.message || '拉取失败', 'err');
+    }
+  });
+
+  /* ---- 测试连接 ---- */
+  $('btnAiTest').addEventListener('click', async () => {
+    setAiMsg('正在测试连接…');
+    try {
+      await saveAiKeyIfNeeded();
+      const r = await api('aiTest', { baseURL: aiCfg().baseURL, model: aiCfg().model });
+      setAiMsg(`连上了 ✓（${r.model}，${r.ms} ms，它回了「${r.reply || '空'}」）`, 'ok');
+    } catch (err) {
+      setAiMsg(aiFailText(err.reason, err.message), 'err');
+    }
+  });
+
+  /* ---- 测试联网：四态，结果存进设置 ---- */
+  $('btnAiWebTest').addEventListener('click', async () => {
+    setAiMsg('正在探测能不能联网…（最多 30 秒）');
+    try {
+      await saveAiKeyIfNeeded();
+      const r = await api('aiTestWebSearch', { baseURL: aiCfg().baseURL, model: aiCfg().model });
+      aiCfg().webSearch = r.level;
+      syncAiWebUI();
+      persist();
+      setAiMsg('探测完成：' + (r.evidence || ''), 'ok');
+    } catch (err) {
+      setAiMsg(aiFailText(err.reason, err.message), 'err');
+    }
+  });
+
+  /* ---- 清空缓存 ---- */
+  $('btnAiClearCache').addEventListener('click', async () => {
+    const okGo = await askConfirm('清空 AI 歌词缓存？', '清掉之后，下次播歌会重新调一次 AI（会花钱）。', '清空');
+    if (!okGo) return;
+    try { await api('aiClearCache'); } catch (_) {}
+    await refreshAiCacheLine();
+    setAiMsg('缓存已清空', 'ok');
+  });
+
+  /* ---- 提示词面板 ---- */
+  $('btnAiPrompts').addEventListener('click', openAiPromptPanel);
+}
+
+/* ---------------- 提示词面板 ---------------- */
+// tab：'polish' | 'generate'；两条分开存（混在一个框里没法改）
+const aiPromptState = { tab: 'polish', polish: '', generate: '', defPolish: '', defGenerate: '' };
+
+async function openAiPromptPanel() {
+  let p = null;
+  try { p = await api('aiGetPrompts'); }
+  catch (err) { setAiMsg(err.message || '读提示词失败', 'err'); return; }
+  aiPromptState.polish = p.polish.text;
+  aiPromptState.generate = p.generate.text;
+  aiPromptState.defPolish = p.polish.defaultText;
+  aiPromptState.defGenerate = p.generate.defaultText;
+  aiPromptState.tab = 'polish';
+  $('aiPromptMask').classList.add('show');
+  renderAiPromptTab();
+}
+
+function closeAiPromptPanel() {
+  $('aiPromptMask').classList.remove('show');
+}
+
+/** 切标签前先把当前 textarea 的内容收回状态里，否则切一圈改动就没了 */
+function stashAiPrompt() {
+  const ta = $('aiPromptText');
+  if (!ta) return;
+  if (aiPromptState.tab === 'polish') aiPromptState.polish = ta.value;
+  else aiPromptState.generate = ta.value;
+}
+
+function renderAiPromptTab() {
+  const t = aiPromptState.tab;
+  $('aiPromptText').value = t === 'polish' ? aiPromptState.polish : aiPromptState.generate;
+  document.querySelectorAll('#aiPromptMask .ptab').forEach((b) => {
+    b.classList.toggle('active', b.dataset.ptab === t);
+  });
+  $('aiPromptHint').textContent = t === 'polish'
+    ? '可用占位符：{title} 歌名 · {n} 本块行数 · {lines} 字幕（必须是 JSON 数组）'
+    : '可用占位符：{title} 歌名 · {duration} 时长（秒）';
+  $('aiPromptWarn').textContent = '';
+}
+
+/** 和主进程 validatePrompt 同一条规则：缺了关键占位符就不许保存（否则白花钱） */
+function checkAiPrompt(kind, text) {
+  const need = kind === 'polish' ? '{lines}' : '{duration}';
+  if (!String(text || '').includes(need)) return `缺少 ${need} —— 少了它 AI 根本不知道要处理什么，保存了也是白花钱`;
+  return '';
+}
+
+async function saveAiPrompt() {
+  stashAiPrompt();
+  const t = aiPromptState.tab;
+  const text = t === 'polish' ? aiPromptState.polish : aiPromptState.generate;
+  const warn = checkAiPrompt(t, text);
+  if (warn) { $('aiPromptWarn').textContent = warn; return; }
+
+  const dft = t === 'polish' ? aiPromptState.defPolish : aiPromptState.defGenerate;
+  // ★ 和默认一模一样 = 清空字段（不是存一份副本）：
+  //   这样以后代码升级默认提示词，用户也能跟着拿到新的
+  const val = (text === dft) ? '' : text;
+  if (t === 'polish') aiCfg().promptPolish = val;
+  else aiCfg().promptGenerate = val;
+  persist();
+  closeAiPromptPanel();
+  toast(t === 'polish' ? '整理提示词已保存' : '生成提示词已保存');
+}
+
+function bindAiPromptPanel() {
+  $('btnAiPromptClose').addEventListener('click', closeAiPromptPanel);
+  $('aiPromptMask').addEventListener('click', (e) => {
+    if (e.target.id === 'aiPromptMask') closeAiPromptPanel();
+  });
+  document.querySelectorAll('#aiPromptMask .ptab').forEach((b) => {
+    b.addEventListener('click', () => {
+      stashAiPrompt();
+      aiPromptState.tab = b.dataset.ptab === 'generate' ? 'generate' : 'polish';
+      renderAiPromptTab();
+    });
+  });
+  $('btnAiPromptReset').addEventListener('click', () => {
+    // 恢复默认 = 把框里的字换成默认文本；真正"清字段"发生在保存时（见 saveAiPrompt）
+    $('aiPromptText').value = aiPromptState.tab === 'polish'
+      ? aiPromptState.defPolish : aiPromptState.defGenerate;
+    $('aiPromptWarn').textContent = '';
+  });
+  $('btnAiPromptSave').addEventListener('click', saveAiPrompt);
+}
+
+/* ============================================================
    第 5 部分：事件绑定
    ============================================================ */
 
@@ -6666,6 +7108,22 @@ function bindEvents() {
 
   /* ---- 设置面板（外观 + Cookie） ---- */
   bindSettings();
+
+  /* ---- AI 歌词（v2.12.0）----
+     ★ 进度只能靠主进程**主动推**：invoke 是一次性的，中途推不出去。
+       整理一首 500 行的歌要分 7 块、两三分钟，不能让用户对着「正在整理…」干等。 */
+  window.neko.onAiProgress((p) => {
+    const cur = queue.tracks[queue.index];
+    if (!cur || !p || !p.key) return;
+    // 只认"当前这首歌"的进度 —— 切歌后旧请求还会继续推几条，不能画到新歌头上
+    if (p.key !== aiCacheKey(cur, p.key.endsWith('|gen') ? 'gen' : 'polish')) return;
+    if (p.total > 1) {
+      lyricState.aiProgress = `正在整理 ${p.done}/${p.total} 段…`;
+      updateLyricTag();
+    }
+  });
+  bindAiPromptPanel();
+  bindAiReplyPanel();
 
   /* ---- 合集 / 分P 展开面板 ---- */
   bindCollect();
@@ -7276,12 +7734,29 @@ const lyricState = {
   loading: false,
   failed: false,  // 这首歌取过字幕且失败了（没字幕 / 被限流）
   showing: false, // 大屏是否展开
+
+  /* ---- v2.12.0：AI 歌词（两条路的状态）---- */
+  mode: '',         // '' 原样 / 'raw' 有字幕但没用 AI / 'polish' 整理版 / 'gen' 兜底生成
+  rawLines: [],     // 原字幕（整理模式下用来"看原文"对照 —— AI 万一改坏了能一眼看出）
+  polishedLines: [],// 整理结果
+  showRaw: false,   // 现在显示的是原文还是整理版
+  aiProgress: '',   // "正在整理 3/7 段…"
+  failNote: '',     // AI 失败的完整原因（写进空状态，拍板 #4：把原因显示出来）
+  videoTitle: '',   // 这份字幕来自哪个视频（取错歌时用来警告，见 renderLyricLines）
+  // v2.12.0：AI 的调试快照（发出去的提示词 + 模型原话 + 思考过程）。
+  // 点歌词页顶上那颗小标就展开 —— 用户判断"这歌词是不是编的"只能靠它。
+  aiDebug: null,
+  polishFromCache: false,  // 现在显示的整理版是不是"从缓存读出来的"（标签上会标一下）
 };
 
-/** 正在播的这首歌的"身份证"（换歌后靠它判断歌词要不要清掉） */
+/** 正在播的这首歌的"身份证"（换歌后靠它判断歌词要不要清掉）
+ *  ★ 本地歌没有 bvid/cid，用 'l:' + 路径当身份证（和 selKey / 缓存 key 同一个习惯），
+ *    不然本地歌在这里全部算成 ''，歌词那条路根本进不去。 */
 function currentTrackKey() {
   const t = queue.tracks[queue.index];
-  if (!t || !t.bvid || !t.cid) return '';
+  if (!t) return '';
+  if (t.localPath) return 'l:' + t.localPath;
+  if (!t.bvid || !t.cid) return '';
   return t.bvid + ':' + t.cid;
 }
 
@@ -7325,14 +7800,22 @@ function renderLyricEmpty(kind) {
   const title = (cur && cur.title) || '未知曲目';
   const artist = (cur && cur.author) || '';
 
-  const loading = kind === 'loading';
-  const msg = loading ? '正在取歌词…'
+  const loading = kind === 'loading' || kind === 'ai';
+  const msg = kind === 'ai' ? '正在让 AI 写歌词…'
+    : kind === 'loading' ? '正在取歌词…'
     : kind === 'failed' ? '这次没取到歌词'
     : kind === 'idle'   ? '还没取歌词'
     : '这首是纯音乐，没有歌词';
-  const hint = loading ? '稍等一下，取到就自动显示。'
+  const hint = kind === 'ai'
+      // 兜底生成要联网，慢是常态（中转站排队），把"在等什么"说出来
+      ? (lyricState.aiProgress || 'AI 要联网回忆这首歌，慢的时候要等一两分钟；生成过之后有缓存就快了。')
+    : kind === 'loading' ? '稍等一下，取到就自动显示。'
     : kind === 'failed'
-      ? '可能是没填 B 站 Cookie、被限流，或者这首本来就没有字幕。可以点下面的「重新获取」再试一次。'
+      // ★ 有 AI 失败原因时不要再提"没填 Cookie" —— 真正的原因就在下面那一行，
+      //   两句话对不上会让用户去改一个根本不相干的地方。
+      ? (lyricState.failNote
+        ? 'AI 这条路没走通 —— 按下面那条原因处理完，再点「重新获取」。'
+        : '可能是没填 B 站 Cookie、被限流，或者这首本来就没有字幕。可以点下面的「重新获取」再试一次。')
       : kind === 'idle'
         ? '点下面的按钮取一次歌词（取词要先在设置里填 B 站 Cookie）。'
         : '安静地听吧 —— 也可以点「打开视频」去 B 站看看 UP 主有没有配词。';
@@ -7346,14 +7829,24 @@ function renderLyricEmpty(kind) {
       (artist ? `<div class="le-artist">${esc(artist)}</div>` : '') +
       `<div class="le-msg">${esc(msg)}</div>` +
       (hint ? `<div class="le-hint">${esc(hint)}</div>` : '') +
+      // ★ 拍板 #4：AI 失败的原因直接写在空状态里（不弹窗、不阻断播放）。
+      //   用户看到"429 额度用完"和看到"没取到歌词"是两回事 —— 后者他会一直重试。
+      (kind === 'failed' && lyricState.failNote
+        ? `<div class="le-ai">${esc(lyricState.failNote)}</div>` : '') +
+      // 失败时最该看到的就是"AI 到底回了什么"——所以这里也给一个入口
+      (kind === 'failed' && lyricState.aiDebug
+        ? '<button class="le-detail" id="btnLyricAiDetail">看看 AI 到底回了什么</button>' : '') +
       (loading ? '' : `<button class="le-retry" id="btnLyricRetry">${btnLabel}</button>`) +
     '</div>';
+
+  const detail = $('btnLyricAiDetail');
+  if (detail) detail.addEventListener('click', openAiReplyPanel);
 
   const retry = $('btnLyricRetry');
   if (retry) {
     retry.addEventListener('click', () => {
       lyricState.failed = false;   // 解除"自动模式不再重试"的锁，让这次能真的再问一次
-      loadLyrics(true);            // byUser=true：失败会给提示，成功了会弹「歌词已加载」
+      loadLyrics(true, true);      // byUser=true（失败给提示）+ fresh=true（先清这一首的缓存）
     });
   }
 
@@ -7365,19 +7858,65 @@ function renderLyricEmpty(kind) {
  * @param {boolean} byUser true = 用户主动点的（展开大屏 + 失败给提示）
  *                     false = 自动模式触发的（安静点，失败不打扰）
  */
-async function loadLyrics(byUser) {
+/**
+ * AI 失败原因 → 人话（拍板 #4 的七类 + 整理专用的 mismatch）。
+ * ★ 主进程抛的 Error 上带 reason，界面 api() 已经把它带出来了（不用改 preload）。
+ *   文案故意写得"能照着修"：401 去换 Key、429 等一会儿、404 去拉列表、没配去设置。
+ */
+function aiFailText(reason, fallback) {
+  switch (reason) {
+    case 'no-config': return 'AI 歌词没配置 —— 去设置里填 BaseURL 和 Key';
+    case 'bad-key':   return 'AI 拒绝了这把 Key（401）：Key 无效或没权限';
+    case 'quota':     return 'AI 返回 429：额度用完了或被限流，等会儿再试';
+    case 'no-model':  return '找不到模型「' + (aiCfg().model || '') + '」—— 去设置里重新拉一次列表';
+    case 'timeout':   return '连不上 AI 服务（超时 60 秒）—— 检查 BaseURL 或网络';
+    case 'refused':   return 'AI 拒绝生成这首的歌词（可能是版权原因）';
+    // thinking：推理型模型没把答案写进 <lrc>/<json> 标签。主进程给的 message 里已经有
+    // "再点一次 / 加哪句话"的建议，还可能带原文开头 —— 直接用它，别拿固定文案盖掉。
+    case 'thinking':  return fallback || 'AI 只回了思考过程、没把答案写进标签 —— 再点一次「重新获取」通常就好';
+    case 'mismatch':  return 'AI 改动太大，已保留原字幕';
+    case 'bad-format':return 'AI 返回的内容解析不出来（不是歌词格式）';
+    default:          return fallback || 'AI 歌词失败了（原因不明）';
+  }
+}
+
+/* 同一首歌别发两次：快速切走又切回会并发两个请求（白花一次钱）。
+   键是 `BVxxx#cid|mode`，和主进程的缓存 key 同一套写法。 */
+const aiInFlight = new Map();
+
+function aiRequest(kind, track, payload) {
+  const key = aiCacheKey(track, kind);
+  if (aiInFlight.has(key)) return aiInFlight.get(key);
+  const p = api(kind === 'polish' ? 'aiPolish' : 'aiGenerate', payload)
+    .finally(() => aiInFlight.delete(key));
+  aiInFlight.set(key, p);
+  return p;
+}
+
+/**
+ * 取歌词并渲染。
+ * @param {boolean} byUser true = 用户主动点的（展开大屏 + 失败给提示）
+ *                     false = 自动模式触发的（安静点，失败不打扰）
+ * @param {boolean} [fresh] true = 「重新获取」：**先清掉这一首的 AI 缓存**再要。
+ *   ★ 不清的话，用户嫌这次生成得不好、再点一次，读的还是同一份缓存 —— 点了等于没点。
+ */
+async function loadLyrics(byUser, fresh) {
   const track = queue.tracks[queue.index];
   if (!track) {
     if (byUser) showLyricTip('先放首歌再取歌词');
     return;
   }
 
-  // cid 可能还没补上（搜索来的歌），先补齐，否则接口拿不到字幕
-  try {
-    await ensureCid(track);
-  } catch (err) {
-    if (byUser) showLyricTip('这首歌的信息没取到');
-    return;
+  // cid 可能还没补上（搜索来的歌），先补齐，否则接口拿不到字幕。
+  // ★ 本地歌没有 bvid/cid，ensureCid 会白跑一次 videoInfo 然后失败 —— 直接跳过。
+  const isLocal = !!track.localPath;
+  if (!isLocal) {
+    try {
+      await ensureCid(track);
+    } catch (err) {
+      if (byUser) showLyricTip('这首歌的信息没取到');
+      return;
+    }
   }
 
   const key = currentTrackKey();
@@ -7391,22 +7930,185 @@ async function loadLyrics(byUser) {
   // 自动模式下已经确认过取不到，不再重复去烦 B 站
   if (!byUser && lyricState.failed && lyricState.trackKey === key) return;
 
+  const ai = aiCfg();
+  // 总开关是最高优先级：关了就当 AI 全关（但已整理过的缓存照样用，见下面）
+  const aiOn = !!ai.enabled;
+
+  // 「重新获取」：先把这首的两份缓存（整理 / 生成）都清掉
+  // 「重新获取」总是先清这一首的缓存（不管 AI 开没开：缓存里可能躺着上次的结果）
+  if (fresh) {
+    try { await api('aiClearCache', aiCacheBase(track)); } catch (_) {}
+  }
+
   lyricState.loading = true;
   lyricState.failed = false;
+  lyricState.mode = '';
+  lyricState.aiProgress = '';
+  lyricState.failNote = '';
+  lyricState.rawLines = [];
+  lyricState.polishedLines = [];
+  lyricState.showRaw = false;
+  lyricState.videoTitle = '';
+  lyricState.aiDebug = null;   // 上一首的调试快照不能留给这一首
+  lyricState.polishFromCache = false;
   updateLyricBtn();
+  updateLyricTag();
 
   try {
-    // ★ 必须走 api()，不能直接调 window.neko 上的 subtitle。
-    //   主进程统一返回 {ok, data} 外壳，直接调的话 res.lines 永远是 undefined，
-    //   于是不管成功失败都会走进"成功"分支，显示"（没有歌词）"却提示"歌词已加载"。
-    const res = await api('subtitle', track.bvid, track.cid);
+    // ① 本地歌：没有 B 站字幕可取，AI 没开就说清楚为什么没词（别甩一句"获取失败"）
+    if (isLocal && !(aiOn && ai.aiGenerate)) {
+      lyricState.lines = [];
+      lyricState.trackKey = key;
+      lyricState.failed = true;
+      lyricState.failNote = '本地歌曲没有 B 站字幕可取 —— 想要歌词，去设置里开「AI 生成」。';
+      renderLyricEmpty('failed');
+      if (byUser) showLyricTip(lyricState.failNote);
+      pushLyricToDesktop();
+      return;
+    }
 
-    lyricState.lines = Array.isArray(res.lines) ? res.lines : [];
+    // ② 取 B 站字幕（本地歌没有字幕这一说，直接跳过）。
+    //   ★ 就算开了「AI 优先」也必须先取：**时间轴只能从真字幕里来**，
+    //     让 AI 从零写秒数一定偏，而"真秒数 + AI 改字"能让高亮继续精准。
+    let sub = null;
+    let subErr = null;
+    if (!isLocal) {
+      try {
+        // ★ 必须走 api()，不能直接调 window.neko 上的 subtitle。
+        //   主进程统一返回 {ok, data} 外壳，直接调的话 res.lines 永远是 undefined，
+        //   于是不管成功失败都会走进"成功"分支，显示"（没有歌词）"却提示"歌词已加载"。
+        sub = await api('subtitle', track.bvid, track.cid);
+      } catch (err) {
+        subErr = err;
+      }
+    }
+    const rawLines = (sub && Array.isArray(sub.lines)) ? sub.lines : [];
+
+    // ③ 有字幕 —— 原样显示；开了「AI 优先」再让 AI 逐句校对
+    if (rawLines.length) {
+      lyricState.rawLines = rawLines;
+      lyricState.lines = rawLines;
+      lyricState.mode = 'raw';
+      lyricState.trackKey = key;
+      lyricState.index = -1;
+      lyricState.videoTitle = sub.videoTitle || '';
+      renderLyricLines(sub.videoTitle);
+      pushLyricToDesktop();
+      if (byUser) toast('歌词已加载' + (sub.lang ? '（' + sub.lang + '）' : ''));
+
+      if (aiOn && ai.aiPolish) {
+        // 先把原字幕摆出来，AI 回来了再替换 —— 别让用户对着空白等两三分钟
+        lyricState.aiProgress = 'AI 正在整理…';
+        updateLyricTag();
+        try {
+          const out = await aiRequest('polish', track, {
+            base: aiCacheBase(track),   // 本地歌不会走到这条分支，但统一传 base 防以后改坏
+            baseURL: ai.baseURL, model: ai.model,
+            title: track.title || '', lines: rawLines,
+          });
+          // ★ 切歌了就直接丢弃：分 7 块要两三分钟，回来时早就不是这首歌了，
+          //   不判这一下，上一首的歌词会闪到当前这首上
+          if (lyricState.trackKey !== key) return;
+          lyricState.polishedLines = out.lines;
+          lyricState.lines = out.lines;
+          lyricState.mode = 'polish';
+          lyricState.polishFromCache = !!out.fromCache;
+          lyricState.aiDebug = out.debug || null;
+          lyricState.showRaw = false;
+          lyricState.index = -1;
+          renderLyricLines(sub.videoTitle);
+          pushLyricToDesktop();
+          if (byUser) toast(out.fromCache ? '整理版已加载（缓存）' : 'AI 整理完成');
+        } catch (err) {
+          if (lyricState.trackKey !== key) return;
+          // ★ 失败一律退回原字幕：不弹窗、不阻断播放（拍板 #4）
+          lyricState.lines = rawLines;
+          lyricState.mode = 'raw';
+          lyricState.aiDebug = err.debug || null;   // 点小标就能看它回了什么
+          renderLyricLines(sub.videoTitle);
+          pushLyricToDesktop();
+          if (byUser) {
+            showLyricTip(err.reason === 'mismatch' ? 'AI 改动太大，已保留原字幕'
+              : 'AI 整理失败，已保留原字幕');
+          }
+        }
+      } else {
+        // ★ 总开关关着（或没开「AI 整理」）时，**已经整理过的缓存照样用**：
+        //   那是之前花过钱的成果，没必要因为关了开关就丢掉。
+        //   这里只读缓存、绝不调 API —— 所以一分钱不花。
+        try {
+          const hit = await api('aiCachePeek', aiCacheKey(track, 'polish'));
+          if (lyricState.trackKey !== key) return;
+          if (hit && Array.isArray(hit.lines) && hit.lines.length) {
+            lyricState.polishedLines = hit.lines;
+            lyricState.lines = hit.lines;
+            lyricState.mode = 'polish';
+            lyricState.polishFromCache = true;
+            lyricState.showRaw = false;   // 默认还是显示整理版（拍板 #14）
+            lyricState.index = -1;
+            renderLyricLines(sub.videoTitle);
+            pushLyricToDesktop();
+            if (byUser) toast('用上了之前整理好的版本');
+          }
+        } catch (_) { /* 没缓存 / 读失败 → 保持原字幕，不打扰 */ }
+      }
+      return;
+    }
+
+    // ③ 没字幕（含"取到了但确实没词"）—— 总开关开着就走 AI 兜底生成
+    if (aiOn && ai.aiGenerate) {
+      lyricState.trackKey = key;
+      lyricState.aiProgress = 'AI 正在生成…';
+      renderLyricEmpty('ai');
+      updateLyricTag();
+      try {
+        // 时长给模型分时间轴用：拿不到就传 0，主进程会用一个中位数兜着。
+        // 本地歌的 duration 在开播时从 metadata 回填过，这里正好用得上。
+        const duration = Math.round((track.duration || (audio && audio.duration) || 0) || 0);
+        // 本地歌也走这条路：base 是 'l:' + 路径 —— 不传的话主进程会拼出
+        // #|gen，所有本地歌共享同一份缓存（A 歌的词出现在 B 歌上）
+        const out = await aiRequest('gen', track, {
+          base: aiCacheBase(track),
+          baseURL: ai.baseURL, model: ai.model,
+          title: track.title || '', duration,
+        });
+        if (lyricState.trackKey !== key) return;
+        if (out.instrumental) {
+          // 模型判它是纯音乐 → 走"没歌词"空状态，而不是显示一行「（纯音乐）」
+          lyricState.lines = [];
+          lyricState.mode = 'gen';
+          renderLyricEmpty('instrumental');
+        } else {
+          lyricState.lines = out.lines;
+          lyricState.mode = 'gen';
+          lyricState.index = -1;
+          lyricState.aiDebug = out.debug || null;
+          renderLyricLines();
+          if (byUser) toast('AI 歌词已生成（时间轴为估算）');
+        }
+        pushLyricToDesktop();
+        return;
+      } catch (err) {
+        if (lyricState.trackKey !== key) return;
+        // 失败：原因写进空状态，退回"没歌词"（不弹窗、不阻断播放）
+        lyricState.lines = [];
+        lyricState.failed = true;
+        lyricState.failNote = aiFailText(err.reason, err.message);
+        lyricState.aiDebug = err.debug || null;
+        renderLyricEmpty('failed');
+        if (byUser) showLyricTip(lyricState.failNote);
+        pushLyricToDesktop();
+        return;
+      }
+    }
+
+    // ④ 没开 AI：保持老行为（字幕接口失败 → 报错；成功但没词 → 纯音乐）
+    if (subErr) throw subErr;
+    lyricState.lines = [];
     lyricState.trackKey = key;
     lyricState.index = -1;
-    renderLyricLines(res.videoTitle);
+    renderLyricLines();
     pushLyricToDesktop();
-    if (byUser) toast('歌词已加载' + (res.lang ? '（' + res.lang + '）' : ''));
   } catch (err) {
     // 失败：记住原因，换歌时会自动清掉
     lyricState.lines = [];
@@ -7420,7 +8122,9 @@ async function loadLyrics(byUser) {
     if (byUser) showLyricTip(lyricFailText(err.reason, err.message));
   } finally {
     lyricState.loading = false;
+    lyricState.aiProgress = '';
     updateLyricBtn();
+    updateLyricTag();
     pushLyricToDesktop();   // 不管成功失败，都让悬浮窗知道最新状态
   }
 }
@@ -7474,6 +8178,153 @@ function updateLyricHead() {
   const t = $('lyricTitle'); if (t) t.textContent = cur ? (cur.title || '歌词') : '歌词';
   const sub = $('lyricSub'); if (sub) sub.textContent = cur ? (cur.author || '') : '';
   updateLyricHeadBtn();
+  updateLyricTag();
+}
+
+/**
+ * 歌词来源小标 + 「看原文 / 看整理」切换（v2.12.0）。
+ *
+ * ★ 兜底生成那条路**必须**挂「AI 生成 · 时间轴为估算」：
+ *   文字是模型回忆的（冷门歌会编），秒数是它估的（越往后偏得越多）。
+ *   不标的话用户会拿它当准的 —— 这是这个功能最大的风险（计划书 §6 第 1、2 条）。
+ * ★ 整理模式则相反：时间轴是真的，只标「AI 整理版」。
+ */
+function updateLyricTag() {
+  const tag = $('lyricTag');
+  const btn = $('btnLyricRaw');
+  if (!tag || !btn) return;
+
+  let text = '';
+  if (lyricState.aiProgress) text = lyricState.aiProgress;
+  else if (lyricState.mode === 'gen') text = 'AI 生成 · 时间轴为估算';
+  else if (lyricState.mode === 'polish') {
+    text = lyricState.showRaw ? '原字幕'
+      : (lyricState.polishFromCache ? 'AI 整理版 · 缓存' : 'AI 整理版');
+  }
+  // 整理失败退回原字幕：也留一颗能点的小标 —— 用户想不通"为什么没整理"时能点开看原因
+  else if (lyricState.mode === 'raw' && lyricState.aiDebug) text = 'AI 整理失败 · 点看原因';
+
+  tag.textContent = text;
+  tag.classList.toggle('show', !!text);
+  // 「估算」那一条要显眼一点（它是在提醒"别太当真"），整理版就低调
+  tag.classList.toggle('est', lyricState.mode === 'gen' && !lyricState.aiProgress);
+  // 正在跑的时候别给"能点"的错觉（点了也只会看到上一次的快照）
+  tag.classList.toggle('busy', !!lyricState.aiProgress);
+  tag.title = lyricState.aiProgress
+    ? '正在调用 AI…'
+    : (text ? '点开看看 AI 到底回了什么（回复 / 思考过程 / 提示词）' : '');
+
+  // 原文 / 整理 切换：只有整理模式、且确实拿到过原字幕才有得切
+  const canSwitch = lyricState.mode === 'polish' && lyricState.rawLines.length > 0;
+  btn.classList.toggle('show', canSwitch);
+  btn.textContent = lyricState.showRaw ? '看整理' : '看原文';
+}
+
+/* ---------------- AI 原始回复浮层（v2.12.0） ---------------- */
+const aiReplyState = { tab: 'answer' };
+
+/** 点小标 / 空状态里那颗按钮 → 打开。没有快照就提示一句（比如结果来自缓存） */
+function openAiReplyPanel() {
+  const mask = $('aiReplyMask');
+  if (!mask) return;
+  if (!lyricState.aiDebug) {
+    showLyricTip('这次没有留下 AI 的原始回复（结果来自缓存，或软件刚重启过）');
+    return;
+  }
+  aiReplyState.tab = 'answer';
+  renderAiReplyPanel();
+  mask.classList.add('show');
+}
+
+function closeAiReplyPanel() {
+  const mask = $('aiReplyMask');
+  if (mask) mask.classList.remove('show');
+}
+
+/** 当前页要显示的文字（复制按钮也用它） */
+function aiReplyText(tab) {
+  const d = lyricState.aiDebug || {};
+  if (tab === 'think') {
+    return d.reasoning || '（这个模型没有返回思考过程 —— 普通对话模型通常就是没有的）';
+  }
+  if (tab === 'prompt') return d.prompt || '（没有记录到提示词）';
+  const body = String(d.content || '').trim();
+  if (body) return body;
+  return '（正文是空的）\n\n下面是完整返回体，可以看看它到底给了什么：\n\n' + (d.raw || '（没有记录）');
+}
+
+function renderAiReplyPanel() {
+  const d = lyricState.aiDebug || {};
+  const modeName = d.mode === 'polish' ? 'AI 整理（逐句校对）' : 'AI 生成（整段）';
+  const bits = [modeName];
+  if (d.model) bits.push('模型 ' + d.model);
+  if (d.chunk) bits.push('第 ' + d.chunk + ' 段');
+  if (d.attempt) bits.push('第 ' + d.attempt + ' 次尝试');
+  if (d.finish) bits.push('finish=' + d.finish);
+  bits.push('回复 ' + String(d.content || '').length + ' 字 · 思考 ' + String(d.reasoning || '').length + ' 字');
+  $('aiReplyMeta').textContent = bits.join(' · ');
+
+  $('aiReplyBody').textContent = aiReplyText(aiReplyState.tab);
+  $('aiReplyBody').scrollTop = 0;
+  document.querySelectorAll('#aiReplyMask .rtab').forEach((b) => {
+    b.classList.toggle('active', b.dataset.rtab === aiReplyState.tab);
+  });
+  $('aiReplyTip').textContent = lyricState.mode === 'gen'
+    ? '★ 兜底生成的文字和秒数都是模型"回忆"出来的：冷门歌、翻唱、B 站原创它没有记忆，就会编一段很像歌词的东西。对不上就点下面「重新获取」，或者换个模型。'
+    : '★ 整理模式只改错字和断句，时间轴用的是 B 站字幕原值 —— 这里看到的是模型返回的原始内容。';
+}
+
+/** 复制当前页（Electron 里 navigator.clipboard 在 file:// 下不一定可用，留一条兜底） */
+async function copyAiReply() {
+  const text = aiReplyText(aiReplyState.tab);
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('已复制');
+    return;
+  } catch (_) { /* 走下面的兜底 */ }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); toast('已复制'); }
+  catch (_) { toast('复制失败，手动选一下吧'); }
+  document.body.removeChild(ta);
+}
+
+function bindAiReplyPanel() {
+  const mask = $('aiReplyMask');
+  if (!mask) return;
+  $('btnAiReplyClose').addEventListener('click', closeAiReplyPanel);
+  mask.addEventListener('click', (e) => { if (e.target.id === 'aiReplyMask') closeAiReplyPanel(); });
+  document.querySelectorAll('#aiReplyMask .rtab').forEach((b) => {
+    b.addEventListener('click', () => {
+      aiReplyState.tab = b.dataset.rtab || 'answer';
+      renderAiReplyPanel();
+    });
+  });
+  $('btnAiReplyCopy').addEventListener('click', copyAiReply);
+  $('btnAiReplyRegen').addEventListener('click', () => {
+    closeAiReplyPanel();
+    lyricState.failed = false;
+    loadLyrics(true, true);   // fresh=true：先清这首的缓存，否则读回来还是同一份
+  });
+  // 小标本身就是按钮（见 updateLyricTag）
+  const tag = $('lyricTag');
+  if (tag) tag.addEventListener('click', openAiReplyPanel);
+}
+
+/**
+ * 在「看原文 / 看整理」之间切换。
+ * ★ 为什么要给这个开关：AI 万一改坏了，用户能一眼对照，不用跑去关设置。
+ *   默认显示**整理版**（拍板 #14）—— 开了 AI 优先就是想看它改的效果。
+ */
+function toggleLyricRaw() {
+  if (lyricState.mode !== 'polish' || !lyricState.rawLines.length) return;
+  lyricState.showRaw = !lyricState.showRaw;
+  lyricState.lines = lyricState.showRaw ? lyricState.rawLines : lyricState.polishedLines;
+  lyricState.index = -1;
+  renderLyricLines(lyricState.videoTitle);
 }
 
 function updateLyricHeadBtn() {
@@ -7628,6 +8479,10 @@ function bindLyrics() {
 
   const close = $('btnLyricClose');
   if (close) close.addEventListener('click', () => toggleLyrics(false));
+
+  // v2.12.0：「看原文 / 看整理」—— 只在整理模式下出现（见 updateLyricTag）
+  const rawBtn = $('btnLyricRaw');
+  if (rawBtn) rawBtn.addEventListener('click', toggleLyricRaw);
 
   // 播放条最左边那张封面 = 整页歌词的开关（悬停会浮出"歌词"/"收起"提示）
   const cover = $('npCover');
