@@ -584,6 +584,15 @@ body.glass-prebake.has-imgbg .player {
   background: rgb(var(--accent-rgb) / 0.16); color: var(--accent);
   border: 1px solid rgb(var(--accent-rgb) / 0.35);
 }
+
+/* ---------- v2.11.0：解析页头部 ----------
+   工具条在上（操作区靠上更好点，和列表页头部一个位置），标题在下（内容跟着列表走）。
+   ★ 标题可能很长 —— 一支视频的标题 30 个字很常见，挤在一行会把按钮压扁、自己也被截断。
+   ★ 故意不复用 .block-head.has-search：那条规则里有 `> div:first-child { flex: 0 0 auto }`，
+     套到解析页会把搜索框锁成固定宽度，展开后撑不满中间。 */
+.parsed-bar { display: flex; align-items: center; gap: 12px; margin: 14px 0 0; }
+.parsed-bar .block-actions { margin-left: auto; flex: 0 0 auto; }
+.parsed-title { margin-top: 16px; line-height: 1.45; word-break: break-word; }
 .ghost-btn {
   background: var(--panel); border: 1px solid var(--line);
   color: var(--text-2); font-size: 12.5px; padding: 7px 14px; border-radius: 9px;

@@ -142,7 +142,13 @@ let selPick = null;        // { view, selected: Map<key, track> }；null = 不�
  *  （理论上不会撞，但带上前缀就永远不用去想"会不会撞"这件事）。 */
 function selKey(t) {
   if (!t) return '';
-  if (t.bvid) return 'b:' + t.bvid;
+  // ★ v2.11.0 修：bvid 后面必须带 cid。
+  //   分P 视频的每一段**共用同一个 bvid**（靠 cid 区分），只按 bvid 算的话，
+  //   一支 12 段分P的视频在批量选择里会全撞成同一个键 —— 勾了 12 行，选择集里只有 1 个。
+  //   以前没暴露，是因为有批量选择的只有「我喜欢 / 歌单 / 本地」，
+  //   那几页里的曲目基本是一行一个 bvid；v2.11.0 解析页也开了批量选择，分P 一进来就露馅了。
+  //   入口行（合集 / 分P 的代表行）cid 是 null，会算成 'b:BVxxx#'，和任何一集都不撞。
+  if (t.bvid) return 'b:' + t.bvid + '#' + (t.cid == null ? '' : t.cid);
   if (t.localPath) return 'l:' + t.localPath;
   return '';
 }
@@ -1597,6 +1603,20 @@ function collectionBadgeLabel(track) {
   return (on != null && on < n) ? `${kind} ${on}/${n}` : `${kind} ${n}`;
 }
 
+/** 这个列表"实际能听到多少首"（v2.11.0）。
+ *  合集行按它里面的集数算，其余一行算一首 —— 歌单里放 1 行「合集 18」，
+ *  标题下面就该写「共 18 首」，而不是「共 1 首」（点播放确实是播 18 首）。
+ *  ★ 没展开过的合集（不知道几集）按 1 算：宁可少算，也不要凭空猜一个数字出来。 */
+function expandedCount(tracks) {
+  let n = 0;
+  for (const t of (tracks || [])) {
+    if (!t) continue;
+    const { n: c } = collectionSize(t);
+    n += c > 1 ? c : 1;
+  }
+  return n;
+}
+
 /* ------------------------------------------------------------
    合集里"单集启用 / 禁用"
    ------------------------------------------------------------
@@ -2953,30 +2973,41 @@ async function doParseLink(text) {
 }
 
 function renderParsed() {
+  currentView = 'parsed';
+  syncListSearchView();
   const { info, pages, seasonTracks, tracks } = parsedView;
   const hasSeason = seasonTracks.length > 0;
   const isMultiP = pages.length > 1;
+  const picking = !!selPick;   // v2.11.0：正在批量选择
+  const multi = hasSeason || isMultiP;
 
   // 从列表点进来 → 回原来那一页；直接粘链接解析的 → 回「发现」首页
   const backLabel = parsedOrigin
     ? `← 返回${parsedOrigin.label ? '：' + parsedOrigin.label : ''}`
     : '← 返回发现';
 
+  /* ★ v2.11.0：头部结构变了 —— 工具条在上、标题在下，各占一行。
+     以前是 `.block-head` 两栏（左边一坨标题、右边一排按钮），标题一长（图里那个 30 个字）
+     就把按钮压扁、自己也被截断。现在：
+       · 工具条（搜索 + 整个合集加入 + 批量选择）紧贴顶部，位置和列表页头部一致，好点；
+       · 标题独占一行、允许换行，跟着列表往下走 —— 再长也挤不到按钮。
+     ★ 故意**不用** `.block-head.has-search`：那条规则里有 `> div:first-child { flex: 0 0 auto }`，
+       套在解析页会把搜索框锁成固定宽度，展开后撑不满中间。 */
   content().innerHTML = `
-    <div class="block-head">
-      <div>
-        <button class="ghost-btn" id="btnParsedBack">${esc(backLabel)}</button>
-        <div class="block-title" style="margin-top:12px">${esc(info.title)}</div>
-        <div class="block-sub">
-          UP 主：${esc(info.owner.name)}
-          ${hasSeason ? ` · 已识别到合集「${esc(info.season.title)}」，共 ${seasonTracks.length} 集` : ''}
-          ${!hasSeason && isMultiP ? ` · 共 ${pages.length} 个分 P` : ''}
+    <div class="parsed-top">
+      <button class="ghost-btn" id="btnParsedBack">${esc(backLabel)}</button>
+      <div class="parsed-bar">
+        ${listSearchHTML()}
+        <div class="block-actions">
+          <button class="ghost-btn" id="btnAddParsed" title="${multi ? '把整个合集作为一行加进歌单' : '把这首加进歌单'}">＋ <span>${multi ? '整个合集加入' : '加入歌单'}</span></button>
+          <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectParsed">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
         </div>
       </div>
-      <div class="block-actions">
-        <button class="ghost-btn" id="btnPlayParsed">${ic('i-play')}<span>播放全部 (${tracks.length})</span></button>
-        <button class="ghost-btn" id="btnDownloadParsed">${ic('i-download')}<span>批量下载 (${tracks.length})</span></button>
-        <button class="ghost-btn" id="btnAddParsed">＋ 全部加入歌单</button>
+      <div class="block-title parsed-title">${esc(info.title)}</div>
+      <div class="block-sub">
+        UP 主：${esc(info.owner.name)}
+        ${hasSeason ? ` · 已识别到合集「${esc(info.season.title)}」，共 ${seasonTracks.length} 集` : ''}
+        ${!hasSeason && isMultiP ? ` · 共 ${pages.length} 个分 P` : ''}
       </div>
     </div>
 
@@ -2989,7 +3020,8 @@ function renderParsed() {
         </div>
       </div>` : ''}
 
-    ${trackListHTML(tracks, {})}`;
+    ${picking ? selBarHTML() : ''}
+    <div id="listBody">${currentListHTML()}</div>`;
 }
 
 /* ============================================================
@@ -3032,8 +3064,15 @@ function listSearchQuery() {
 /** 打开合集面板时要不要把列表页的搜索词带过去。
  *  ★ 只有「我喜欢 / 歌单」两页有列表搜索，别的页面一律不带 ——
  *    否则从歌单切到「发现」再点开一个合集，会把歌单里的搜索词莫名其妙带进面板。 */
+/** 哪些页面有"列表内搜索"（v2.10.0 的两页 + v2.11.0 的解析页）。
+ *  ★ 收口成一个函数，是因为这个判断现在有三处要用（清空 / 带词 / 搜索过滤），
+ *    分散写三遍迟早有一处漏掉 —— 漏掉的表现是"从解析页切到发现页，搜索词还赖着"。 */
+function viewHasListSearch(view) {
+  return view === 'favorites' || view === 'parsed' || String(view || '').startsWith('playlist:');
+}
+
 function listSearchCarry() {
-  if (currentView !== 'favorites' && !currentView.startsWith('playlist:')) return '';
+  if (!viewHasListSearch(currentView)) return '';
   return listSearch || '';
 }
 
@@ -3059,21 +3098,29 @@ function listSearchFilter(tracks) {
   return tracks.filter((t) => t && (searchBlob(t).includes(q) || collectInnerHits(t, q) > 0));
 }
 
-/** 这个列表没过滤之前一共多少首 */
-function listSearchTotal() {
-  if (currentView === 'favorites') return DB.favorites.length;
+/** 这个列表**没过滤之前**的完整数组（副标题要拿它算"共多少首"） */
+function listAllTracks() {
+  if (currentView === 'favorites') return DB.favorites;
+  if (currentView === 'parsed' && parsedView) return parsedView.tracks;
   if (currentView.startsWith('playlist:')) {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
-    return pl ? pl.tracks.length : 0;
+    return pl ? pl.tracks : [];
   }
-  return 0;
+  return [];
 }
 
-/** 副标题那句「共 N 首」/「找到 K 首 / 共 N 首」 */
+/** 这个列表没过滤之前一共多少首（行数） */
+function listSearchTotal() {
+  return listAllTracks().length;
+}
+
+/** 副标题那句「共 N 首」/「找到 K 首 / 共 N 首」。
+ *  ★ v2.11.0：数字用 expandedCount() 算 —— 合集行按里面的集数算。
+ *    歌单里放 1 行「合集 18」，这里就该写 18，不是 1。 */
 function listSubText() {
-  const total = listSearchTotal();
+  const total = expandedCount(listAllTracks());
   if (!listSearchQuery()) return `共 ${total} 首`;
-  return `找到 ${currentTracks().length} 首 / 共 ${total} 首`;
+  return `找到 ${expandedCount(currentTracks())} 首 / 共 ${total} 首`;
 }
 
 /** 头部那块搜索区：收起时只有一个小图标，展开后占满中间。
@@ -3124,6 +3171,18 @@ function currentListHTML() {
       emptyIcon: 'i-note',
       emptyText: q ? '这个歌单里没有匹配的歌' : '这个歌单还是空的',
       emptyHint: q ? emptyHint : '去搜索页面，用「＋歌单」把歌加进来',
+    });
+  }
+  // v2.11.0：解析页也走同一套（列表本来就是摊平后的每一集）
+  if (currentView === 'parsed') {
+    return trackListHTML(list, {
+      pick: picking,
+      pickSet: picking ? selPick.selected : null,
+      pickIdOf: selKey,
+      innerHits,
+      emptyIcon: 'i-search',
+      emptyText: q ? '这一页没有匹配的集' : '这个视频没有可播放的曲目',
+      emptyHint: q ? emptyHint : '',
     });
   }
   return '';
@@ -3180,7 +3239,7 @@ function renderHistory() {
     <div class="block-head">
       <div>
         <div class="block-title">最近播放</div>
-        <div class="block-sub">共 ${DB.history.length} 首</div>
+        <div class="block-sub">共 ${expandedCount(DB.history)} 首</div>
       </div>
     </div>
     ${trackListHTML(DB.history, {
@@ -3886,11 +3945,9 @@ async function importPicked() {
   } else {
     pl = DB.playlists.find((p) => p.id === target.id);
     if (!pl) { toast('那个歌单已经不在了'); return; }
-    // ★ 判重走全局唯一的 sameTrack()（本地歌按 localPath、网络歌按 bvid），
-    //   和「加入歌单」弹窗用的是同一条规则 —— 两处各写一套判等，迟早对不上。
-    picked.forEach((t) => {
-      if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added += 1; }
-    });
+    // ★ 判重走全局唯一的 sameTrack()，加在最前面 —— 和「加入歌单」弹窗共用
+    //   addToPlaylistFront()，两处各写一套迟早对不上。
+    added = addToPlaylistFront(pl, picked);
   }
 
   await persist();
@@ -4215,8 +4272,26 @@ async function openDownloadPicker() {
  */
 async function enqueueDownloads(tracks, opts = {}) {
   const jump = opts.jump !== false;
-  const list = (Array.isArray(tracks) ? tracks : [tracks]).filter((t) => t && t.bvid);
+  let list = (Array.isArray(tracks) ? tracks : [tracks]).filter((t) => t && t.bvid);
   if (!list.length) { toast('这里没有可以下载的曲目'); return; }
+
+  /* ★ v2.11.0：选中的行里有「合集 N / 选集 N」时，**先问一句再摊平**。
+     以前这里直接往下走 —— 合集行没有 cid，下面那句 `ensureCid()` 会给它补一个，
+     补出来是**第一集**的 cid，于是"选中一个合集点下载"只会下第一集，而且一声不吭。
+     现在：问清楚 → 用 buildSequence 摊平（点播放走的就是它）→ 再排任务。
+     ★ 取消 = 这次整个不下了。半截下去（只下非合集的那些）比不下更莫名其妙。 */
+  const collRows = list.filter((t) => maybeCollection(t) && collectionSize(t).n > 1);
+  if (collRows.length) {
+    const total = collRows.reduce((s2, t) => s2 + collectionSize(t).n, 0);
+    const msg = collRows.length === 1
+      ? `「${collRows[0].title}」是个${collectionSize(collRows[0]).kind}，共 ${total} 集。全部下载吗？`
+      : `选中的里有 ${collRows.length} 个合集，共 ${total} 集。全部下载吗？`;
+    const ok = await askConfirm('全部下载？', msg, '全部下载');
+    if (ok !== true) return;
+    const seq = await buildSequence(list);
+    list = (seq.list || []).filter((t) => t && t.bvid);
+    if (!list.length) { toast('这些合集里没有可下载的曲目'); return; }
+  }
 
   // ① 还没选过下载目录 → 先弹窗选。Neo 定的行为：不预设目录，第一次下载时才问。
   if (!(DB.settings.download && DB.settings.download.dir)) {
@@ -4354,12 +4429,16 @@ function selActions() {
   if (currentView !== 'favorites') {
     acts.push({ id: 'btnSelFav', icon: 'i-heart', label: '喜欢' });
   }
-  acts.push({
-    id: 'btnSelRemove',
-    icon: 'i-trash',
-    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',
-    danger: true,
-  });
+  // ★ v2.11.0：解析页不是"用户的库"，没有"移出"这回事 ——
+  //   给它一个「移出歌单」按钮，点下去只会问"从哪个歌单移出"，纯属添乱。
+  if (currentView !== 'parsed') {
+    acts.push({
+      id: 'btnSelRemove',
+      icon: 'i-trash',
+      label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',
+      danger: true,
+    });
+  }
   return acts;
 }
 
@@ -5529,7 +5608,7 @@ function renderAll() {
   // ★ v2.10.0：搜索词只属于「我喜欢」「歌单」两页 —— 停在别的页面时清掉。
   //   不这样的话：在歌单里搜了「光」，切到「发现」再点开一个合集，
   //   面板的搜索框会莫名其妙带着「光」（用户压根没在这页搜过）。
-  if (currentView !== 'favorites' && !currentView.startsWith('playlist:')) {
+  if (!viewHasListSearch(currentView)) {
     listSearch = '';
     listSearchOpen = false;
     listSearchView = '';
@@ -5659,6 +5738,28 @@ function bindPrompt() {
    ============================================================ */
 
 /**
+ * 把一批曲目加到歌单**最前面**（v2.11.1）。
+ *
+ * ★ 为什么新加的排前面：和「我喜欢」一致 —— 那边是 `[track, ...DB.favorites]`，
+ *   加完一眼就能看到。歌单这边以前是 push 到末尾，加 18 集得滚到底才看得见。
+ *
+ * ★ 为什么不逐条 unshift：那样会把顺序**反过来**（第 1 集被最后一条挤到后面去）。
+ *   先筛出"还没有的"，再整体 concat 到前面 —— list 里的原顺序就保住了。
+ *
+ * ★ 判重走全局唯一的 sameTrack()（本地歌按 localPath、网络歌按 bvid + cid），
+ *   和别处加歌用的是同一条规则 —— 各写一套判等，迟早对不上。
+ *
+ * 返回实际加进去几首（重复的不算）。
+ */
+function addToPlaylistFront(pl, tracks) {
+  if (!pl || !Array.isArray(pl.tracks)) return 0;
+  const fresh = (tracks || []).filter((t) => t && !pl.tracks.some((x) => sameTrack(x, t)));
+  if (!fresh.length) return 0;
+  pl.tracks = fresh.concat(pl.tracks);
+  return fresh.length;
+}
+
+/**
  * 弹出一个歌单列表让用户选（也能就地新建），选好后把曲目加进去。
  * 这就是"点 ＋ 时弹出歌单列表供选择，并且可以在里面创建歌单"的实现。
  */
@@ -5668,10 +5769,7 @@ function pickPlaylistFor(tracks) {
   const count = list.length;
 
   const addInto = async (pl) => {
-    let added = 0;
-    list.forEach((t) => {
-      if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added += 1; }
-    });
+    const added = addToPlaylistFront(pl, list);   // ★ 加在最前面，和「我喜欢」一致
     await persist();
     renderAll();
     closePrompt(pl.id);
@@ -6776,12 +6874,17 @@ function bindEvents() {
     // v2.5.0：只播当前这一页（翻页后 upState.list 自动就是当前页）。
     // 播 800 首会把队列、随机、单曲循环全搞难用，而且每首都得先补 cid 才能播。
     if (id === 'btnPlayUp') { if (upState) startFromView(upState.list, 0); return; }
-    if (id === 'btnPlayParsed') { startFromView(parsedView.tracks, 0); return; }
-    if (id === 'btnAddParsed') { addManyToPlaylist(parsedView.tracks); return; }
+    // ★ v2.11.0：解析页的「播放全部 (18)」和「批量下载 (18)」都删了（Neo 拍板：工具条照搬「我喜欢」）。
+    //   想顺序播就点第一行；下载走批量选择。这里原来那两行一并删掉，留着就是死代码
+    //   （verify 第 63 类有反向断言盯着 btnPlayParsed / btnDownloadParsed 不许复活）。
+    // ★ v2.11.0：「整个合集加入」—— 加的是**一行**合集，不是摊开的每一集。
+    //   想加其中几集，用批量选择（那条路加的是勾中的独立曲目）。两个动作名字不同、结果不同，
+    //   所以按钮上明确写「整个合集加入」，别和批量选择里的「加入歌单」混。
+    if (id === 'btnAddParsed') { addWholeParsed(); return; }
     // ★ v2.10.0：「我喜欢」和「歌单」两页的「播放全部」**删掉了**（Neo 拍板：彻底不要）。
     //   想顺序播就点第几首，之后自动往下走。这里原来那两行 `startFromView(...)` 一并删掉，
     //   留着就是永远走不到的死代码（verify 第 62 类有反向断言盯着它俩不许复活）。
-    //   发现页 / UP 主页 / 解析页的「播放全部」没动 —— 那几页没有搜索框要腾位置。
+    //   发现页 / UP 主页的「播放全部」没动 —— 那几页没有搜索框要腾位置。
 
     // ---- v2.10.0：列表内搜索 ----
     if (id === 'btnListSearch') { openListSearch(); return; }
@@ -6790,7 +6893,7 @@ function bindEvents() {
     // ---- v2.9.0：列表的「批量选择」----
     // 我喜欢 / 歌单：点一下进选择模式（再点退出）；详情页那个「批量下载」是另一回事，
     // 它把整个视频的曲目一次排进下载队列（那一页本来就是一个视频的全部曲目，没什么可选）。
-    if (id === 'btnSelectFav' || id === 'btnSelectPl') { toggleSelPick(); return; }
+    if (id === 'btnSelectFav' || id === 'btnSelectPl' || id === 'btnSelectParsed') { toggleSelPick(); return; }
     if (id === 'btnSelPickAll') { selPickAll(); return; }
     if (id === 'btnSelPickNone') { selPickNone(); return; }
     // ★ v2.10.1：吸顶条里的「退出」。和顶部那颗开关走同一个函数（它本来就是"进/出"的开关），
@@ -6800,10 +6903,6 @@ function bindEvents() {
     if (id === 'btnSelAddPl') { selDoAddPl(); return; }
     if (id === 'btnSelFav') { selDoFav(); return; }
     if (id === 'btnSelRemove') { selDoRemove(); return; }
-    if (id === 'btnDownloadParsed') {
-      if (parsedView) enqueueDownloads(parsedView.tracks);
-      return;
-    }
     // 下载管理页的几个块级按钮
     if (id === 'btnDlOpenDir') {
       api('downloadOpenDir').catch((err) => toast(err.message || '打不开下载目录'));
@@ -7923,7 +8022,8 @@ function currentTracks() {
   if (currentView === 'downloads') return [];
   if (currentView === 'local') return localFilteredTracks();   // v2.8.0 批次 B / 修订：跟着左栏筛选走
   if (currentView === 'up' && upState) return upState.list;
-  if (currentView === 'parsed' && parsedView) return parsedView.tracks;
+  // ★ v2.11.0：解析页也有列表内搜索了 —— 搜索中返回筛选后的数组（看到什么就是什么）
+  if (currentView === 'parsed' && parsedView) return listSearchFilter(parsedView.tracks);
   if (currentView.startsWith('playlist:')) {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
     return pl ? listSearchFilter(pl.tracks) : [];
@@ -8003,6 +8103,67 @@ async function removeFromCurrent(track) {
 function addManyToPlaylist(tracks) {
   if (!tracks || !tracks.length) return;
   pickPlaylistFor(tracks);
+}
+
+/* ---------------- v2.11.0：把整个合集作为**一行**加进歌单 ----------------
+   ★ 为什么不是 `addManyToPlaylist(parsedView.tracks)`：那加的是**摊平后的 18 集**。
+     想要"歌单里就一行、点开才看到 18 集"（就是搜索页 / UP 主页加进来那种），
+     必须造一个"入口行"—— 一行代表整支视频。
+
+   ★ 入口行**不能带 cid**。带了就会被 isCollectPart() 认成"某合集里的一集"：
+     徽章不显示、点播放也不展开，等于退化成普通一首歌。
+     （rowIsPlaying 的注释里也写着"入口行没有 cid"，是同一个约定。）
+
+   ★ 顺带把曲目表写进 DB.collectParts，这样：
+     · 徽章立刻能显示「合集 18」（collectionSize 优先读 seasonCount，缓存是兜底）
+     · 点播放时 buildSequence 直接从缓存展开，不用联网
+     只在"真的点了加入"这一刻写 —— 用户只是解析看看，不该往存档里塞东西。 */
+
+/** 造一个"一行代表整支视频"的入口行。单集时返回的就是普通一首。 */
+function makeEntryTrack() {
+  const { info, pages, seasonTracks } = parsedView;
+  const isSeason = seasonTracks.length > 1;
+  const isMultiP = pages.length > 1;
+  const src = isSeason ? seasonTracks : pages;
+  const t = {
+    bvid: info.bvid,
+    cid: null,                 // ★ 关键：不带 cid 才是"入口行"
+    title: info.title,         // 用视频标题（Neo 定的），合集名放在 seasonTitle 里
+    author: info.owner.name,
+    cover: info.cover,
+    // 时长用**整段的总和**，不是 0 —— 入口行显示 0:00 看着像坏数据。
+    // （18 集 × 3 分半 ≈ 1 小时，fmtTime 会写成 1:03:00，比 0:00 有意义得多。）
+    duration: src.reduce((s2, e) => s2 + (e.duration || 0), 0),
+  };
+  // ★ 两个字段只能填一个：collectionSize() 先看 parts 再看 seasonCount，
+  //   两个都填会被判成「选集」，合集就显示错了。
+  if (isSeason) {
+    t.seasonCount = seasonTracks.length;
+    t.seasonTitle = info.season.title;
+  } else if (isMultiP) {
+    t.parts = pages.length;
+  }
+  return t;
+}
+
+function addWholeParsed() {
+  if (!parsedView) return;
+  const { info, pages, seasonTracks } = parsedView;
+  const isSeason = seasonTracks.length > 1;
+  const isMultiP = pages.length > 1;
+
+  // 单集：没有"整体"可言，就是普通一首
+  if (!isSeason && !isMultiP) { addManyToPlaylist(parsedView.tracks); return; }
+
+  const entry = makeEntryTrack();
+  // 曲目表缓存：剥掉封面 URL（长链接，几十集全存会把存档撑大），和 collectEntriesFor 一个口径
+  const src = isSeason ? seasonTracks : pages;
+  DB.collectParts[info.bvid] = src.map((e) => ({
+    bvid: e.bvid, cid: e.cid, page: e.page,
+    title: e.title, duration: e.duration, author: e.author,
+  }));
+  persistLater();
+  addManyToPlaylist([entry]);
 }
 
 /* ============================================================

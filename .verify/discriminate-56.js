@@ -417,8 +417,9 @@ const CASES = [
   {
     name: 'v2.9.0：加入现有歌单不判重（同一首歌被塞两遍）',
     file: 'src/ui/app.js',
-    from: '      if (!pl.tracks.some((x) => sameTrack(x, t))) { pl.tracks.push(t); added += 1; }',
-    to:   '      if (true) { pl.tracks.push(t); added += 1; }',
+    // ★ v2.11.1：判重挪进了 addToPlaylistFront()，所以样例改成"那个函数不判重"
+    from: "  const fresh = (tracks || []).filter((t) => t && !pl.tracks.some((x) => sameTrack(x, t)));",
+    to:   "  const fresh = (tracks || []).filter((t) => t);",
     expect: '没按 sameTrack 判重',
   },
   {
@@ -489,8 +490,10 @@ const CASES = [
   {
     name: '★ 批量选择：把「移出」挪到最前面（破坏性操作不该夹在中间）',
     file: 'src/ui/app.js',
-    from: "  acts.push({\n    id: 'btnSelRemove',\n    icon: 'i-trash',\n    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n    danger: true,\n  });",
-    to:   "  acts.unshift({\n    id: 'btnSelRemove',\n    icon: 'i-trash',\n    label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n    danger: true,\n  });",
+    // ★ v2.11.0：解析页不生成「移出」，所以这段被包进了 if 里，缩进整体多了 2 格 ——
+    //   样例的 from 也要跟着改，否则这条恒为"跳过"（判别力白丢一条）。
+    from: "    acts.push({\n      id: 'btnSelRemove',\n      icon: 'i-trash',\n      label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n      danger: true,\n    });",
+    to:   "    acts.unshift({\n      id: 'btnSelRemove',\n      icon: 'i-trash',\n      label: currentView === 'favorites' ? '取消喜欢' : '移出歌单',\n      danger: true,\n    });",
     expect: '不是最后 push 进去的按钮',
   },
 
@@ -575,6 +578,65 @@ const CASES = [
     to:   "if (id === 'btnSelPickExitX') { toggleSelPick(); return; }",
     expect: '吸顶条的「退出」没绑事件',
   },
+
+  /* ===== v2.11.0：解析页工具条 + 合集整体加入 ===== */
+  {
+    name: '★ v2.11.0：入口行带上了 cid（徽章消失、播放不展开）',
+    file: 'src/ui/app.js',
+    from: '    cid: null,                 // ★ 关键：不带 cid 才是"入口行"',
+    to:   '    cid: 1,',
+    expect: '入口行带了 cid',
+  },
+  {
+    name: '★ v2.11.0：seasonCount 和 parts 都填了（合集被判成选集）',
+    file: 'src/ui/app.js',
+    from: '  } else if (isMultiP) {\n    t.parts = pages.length;',
+    to:   '  }\n  if (isMultiP) {\n    t.parts = pages.length;',
+    expect: '不是互斥填的',
+  },
+  {
+    name: '★ v2.11.0：整体加入又变成"加摊平的每一集"',
+    file: 'src/ui/app.js',
+    from: '  addManyToPlaylist([entry]);',
+    to:   '  addManyToPlaylist(parsedView.tracks);',
+    expect: '没有只加"一行"',
+  },
+  {
+    name: '★ v2.11.0：确认后不摊平（合集行还是只下第一集）',
+    file: 'src/ui/app.js',
+    from: '    const seq = await buildSequence(list);',
+    to:   '    const seq = { list };',
+    expect: '确认后没摊平',
+  },
+  {
+    name: '★ v2.11.0：副标题又只数行数（1 行合集写成"共 1 首"）',
+    file: 'src/ui/app.js',
+    from: '  const total = expandedCount(listAllTracks());',
+    to:   '  const total = listAllTracks().length;',
+    expect: '还在数行数',
+  },
+  {
+    name: '★ v2.11.0：工具条排到标题后面（又挤回去了）',
+    file: 'src/ui/app.js',
+    from: '      <div class="parsed-bar">',
+    // 把 class 改名 → indexOf('class="parsed-bar"') 返回 -1 → "没排在标题前面"那条会响
+    to:   '      <div class="parsed-barX">',
+    expect: '工具条没排在标题前面',
+  },
+  {
+    name: '★ v2.11.0：selKey 丢了 cid（分P 全撞成一个键）',
+    file: 'src/ui/app.js',
+    from: "  if (t.bvid) return 'b:' + t.bvid + '#' + (t.cid == null ? '' : t.cid);",
+    to:   "  if (t.bvid) return 'b:' + t.bvid;",
+    expect: 'selKey 没带 cid',
+  },
+  {
+    name: '★ v2.11.0：加进歌单又排到末尾（新加的滚到最下面看不见）',
+    file: 'src/ui/app.js',
+    from: '  pl.tracks = fresh.concat(pl.tracks);',
+    to:   '  pl.tracks = pl.tracks.concat(fresh);',
+    expect: '新加的没排在最前面',
+  },
 ];
 
 let pass = 0, fail = 0;
@@ -589,7 +651,9 @@ for (const c of CASES) {
   fs.writeFileSync(p, orig.split(c.from).join(c.to), 'utf8');
   let out = '';
   try {
-    out = execFileSync(NODE, [VERIFY], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    // ★ 加超时：某条 mutation 万一让 verify 挂住（实测卡过一次，17 分钟没返回），
+    //   没有 timeout 就只能干等，而且被 kill 时 finally 来不及还原、源码会留在 mutation 状态。
+    out = execFileSync(NODE, [VERIFY], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000 });
   } catch (e) {
     out = String((e.stdout || '') + (e.stderr || ''));
   } finally {

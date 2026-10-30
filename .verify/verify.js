@@ -1061,10 +1061,11 @@ console.log('\n[30] 播放队列跟随"你点播放的那个界面"：');
   //   这里改成"点名要求这几个入口必须在"，比死守一个数字有意义 ——
   //   数量会因为加/删按钮一直变，而"哪几个入口必须统一"才是真正要守的东西。
   const starts = [...appjs.matchAll(/startFromView\(([^,]+),/g)].map((m) => m[1].trim());
-  const needStarts = ['searchResults', 'discoveryResults', 'upState.list', 'parsedView.tracks', 'tracks'];
+  // ★ v2.11.0：解析页的「播放全部」也删了，所以 parsedView.tracks 不再是播放入口
+  const needStarts = ['searchResults', 'discoveryResults', 'upState.list', 'tracks'];
   const missStarts = needStarts.filter((x) => !starts.includes(x));
   if (missStarts.length) err(`这些播放入口没走 startFromView()：${missStarts.join(' / ')}`);
-  else ok(`${starts.length} 处播放入口统一走 startFromView()（发现 / UP主页 / 解析页 / 点行播放都在）`);
+  else ok(`${starts.length} 处播放入口统一走 startFromView()（发现 / UP主页 / 点行播放都在；解析页的播放全部 v2.11.0 已删）`);
 
   if (/playTracks\([^)]*queue\.name/.test(appjs)) err('还有播放入口在传旧队列名 queue.name');
   else ok('没有任何播放入口再传旧队列名');
@@ -3800,7 +3801,12 @@ console.log('\n[60] v2.9.0 · mini 词开关 + 工具条常显 + 导入落地（
     const j = appjs.indexOf('\n  };', i);
     return appjs.slice(i, j < 0 ? i + 700 : j);
   })();
-  if (!/sameTrack\(x, t\)/.test(addIntoBody))
+  // ★ v2.11.1：判重逻辑挪进了 addToPlaylistFront()（两处入口共用），
+  //   所以这里改成"addInto 必须走那个函数，且那个函数里确实按 sameTrack 判重"。
+  // ★ 注意：第 60 类这个作用域里没有 bodyOf()（那是第 62/63 类块内定义的），
+  //   所以这里用正则直接切 addToPlaylistFront 那一段。
+  if (!/addToPlaylistFront\(pl, list\)/.test(addIntoBody) ||
+      !/function addToPlaylistFront\(pl, tracks\) \{[\s\S]{0,400}?sameTrack\(x, t\)/.test(appjs))
     err('★ 加入现有歌单时没按 sameTrack 判重 —— 同一首歌会被塞两遍');
   else ok('★ 加入现有歌单按 sameTrack 判重（和「加入歌单」同一条规则）');
   if (!/\.pl-sep\b/.test(css)) err('★ 没有 .pl-sep 样式（现有歌单与「新建」之间那道分隔）');
@@ -3840,10 +3846,11 @@ console.log('\n[61] v2.9.0 · 列表的「批量选择」：');
     err('★ 旧的 btnDownloadFav / btnDownloadPl 还有残留（两套入口会打架）');
   else ok('★ 旧的 btnDownloadFav / btnDownloadPl 已清干净');
 
-  // 反向：解析页那颗「批量下载 (N)」**必须留着** —— 那是动作不是模式（整页就是一个视频的曲目）
-  if (!/id="btnDownloadParsed"/.test(appjs))
-    err('★ 解析页的「批量下载 (N)」被误改了 —— 那一页是"直接下整批"，不是选择模式');
-  else ok('★ 解析页的「批量下载 (N)」保持原样（动作，不是模式）');
+  // ★ v2.11.0 改了口径：解析页的「播放全部 (N)」和「批量下载 (N)」**都删掉了** ——
+  //   Neo 拍板"工具条照搬「我喜欢」"，下载走批量选择。所以这里从"必须留着"改成"不许复活"。
+  if (/id="btnDownloadParsed"|id="btnPlayParsed"/.test(appjs))
+    err('★ 解析页的「播放全部 / 批量下载」又回来了 —— v2.11.0 已按"照搬我喜欢"删掉');
+  else ok('★ 反向断言：解析页的「播放全部 / 批量下载」没有复活');
 
   /* ===== ② 选择集改名：dlPick → selPick ===== */
   if (!/let selPick = null;/.test(appjs))
@@ -3928,7 +3935,9 @@ console.log('\n[61] v2.9.0 · 列表的「批量选择」：');
   }
 
   /* ===== ⑦ 歌单里混着本地歌也能勾上 ===== */
-  if (!/function selKey\(t\)/.test(appjs) || !/return 'b:' \+ t\.bvid;/.test(appjs) || !/return 'l:' \+ t\.localPath;/.test(appjs))
+  // ★ v2.11.0：B 站歌那支的键变成 'b:' + bvid + '#' + cid（分P 要靠 cid 区分），
+  //   所以这里只认前缀 'b:' + t.bvid，不再要求整行以分号结尾。
+  if (!/function selKey\(t\)/.test(appjs) || !/return 'b:' \+ t\.bvid/.test(appjs) || !/return 'l:' \+ t\.localPath;/.test(appjs))
     err('★ 没有 selKey()（B 站歌 b: + bvid / 本地歌 l: + localPath）—— 歌单里的本地歌勾不上');
   else ok('★ selKey() 给两种歌各自的身份键（b: / l:）');
   if (!/pickIdOf: selKey/.test(appjs))
@@ -4084,10 +4093,11 @@ console.log('\n[62] v2.10.0 · 吸顶 + 拖选 + 禁选文字 + 搜索 + 定位�
   if (!/\$\('collectSearch'\)\.value = listSearchCarry\(\);/.test(appjs))
     err('★ 打开合集面板时没把列表搜索词带过去 —— 用户还得在面板里再打一遍');
   else ok('★ 打开合集面板时自动带上列表搜索词');
-  if (!/function listSearchCarry\(\)/.test(appjs) ||
-      !/if \(currentView !== 'favorites' && !currentView\.startsWith\('playlist:'\)\) return '';/.test(appjs))
-    err('★ listSearchCarry 没限定"只在这两页带" —— 从歌单切到发现页再点合集会带上莫名其妙的搜索词');
-  else ok('★ 只有「我喜欢 / 歌单」两页才带搜索词');
+  // ★ v2.11.0：判定收口到 viewHasListSearch()（现在有三页要用），断言也跟着改
+  if (!/function viewHasListSearch\(view\)/.test(appjs) ||
+      !/if \(!viewHasListSearch\(currentView\)\) return '';/.test(appjs))
+    err('★ listSearchCarry 没走 viewHasListSearch —— 从歌单切到发现页再点合集会带上莫名其妙的搜索词');
+  else ok('★ 只有"有列表搜索的页面"才带搜索词（viewHasListSearch 收口）');
   if (/renderCollectList\(''\);/.test(appjs))
     err('★ 打开面板后还是用空串渲染 —— 搜索框填了字，列表却没过滤');
   else ok('★ 面板用搜索框里的词渲染（填了字就真的过滤）');
@@ -4099,9 +4109,9 @@ console.log('\n[62] v2.10.0 · 吸顶 + 拖选 + 禁选文字 + 搜索 + 定位�
     else ok('★ 面板搜索和列表页同一套规则（标题 + 作者）');
   }
   // 离开这两页要清空，否则会把搜索词带到别的页面
-  if (!/if \(currentView !== 'favorites' && !currentView\.startsWith\('playlist:'\)\) \{[\s\S]{0,120}?listSearch = '';/.test(appjs))
-    err('★ 离开这两页没清空搜索词 —— 切到发现页再点合集会把歌单的搜索词带进去');
-  else ok('★ 离开这两页自动清空搜索词');
+  if (!/if \(!viewHasListSearch\(currentView\)\) \{[\s\S]{0,120}?listSearch = '';/.test(appjs))
+    err('★ 离开这些页没清空搜索词 —— 切到发现页再点合集会把歌单的搜索词带进去');
+  else ok('★ 离开这些页自动清空搜索词');
 
   if (!/\.hit-chip/.test(css) || !/内含 \$\{inner\} 集/.test(appjs))
     err('★ 没有「内含 N 集」小标 —— 合集内部匹配时用户看不懂这一行为什么留下');
@@ -4150,5 +4160,161 @@ console.log('\n[62] v2.10.0 · 吸顶 + 拖选 + 禁选文字 + 搜索 + 定位�
   else err('缺少 .verify/test-round25.js —— 拖选/搜索/定位必须真的点一遍');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 62 大类检查）');
+/* ---- 63) v2.11.0：解析页工具条 + 合集整体加入 ---- */
+console.log('\n[63] v2.11.0 · 解析页工具条 + 合集整体加入：');
+{
+  const bodyOf = (sig) => {
+    const i = appjs.indexOf(sig);
+    if (i < 0) return '';
+    const j = appjs.indexOf('\n}\n', i);
+    return appjs.slice(i, j < 0 ? appjs.length : j);
+  };
+  const parsedFn = bodyOf('function renderParsed() {');
+
+  /* ===== ① 头部：工具条在上、标题在下 ===== */
+  if (!/class="parsed-top"/.test(appjs))
+    err('★ 解析页没用 .parsed-top —— 标题和工具条还挤在 .block-head 里');
+  else ok('★ 解析页头部用 .parsed-top（标题和工具条分开）');
+  if (/<div class="block-head">[\s\S]{0,400}?btnParsedBack/.test(appjs))
+    err('★ 解析页还在用 .block-head —— 标题一长就会把按钮压扁');
+  else ok('★ 解析页不再用 .block-head');
+  if (!/class="parsed-bar"/.test(appjs))
+    err('★ 没有 .parsed-bar（工具条那一行）');
+  else ok('★ 有 .parsed-bar（工具条独占一行）');
+  // 工具条必须在标题**之前**（Neo 定的：工具条在上、标题在下）
+  {
+    const barAt = parsedFn.indexOf('class="parsed-bar"');
+    const titleAt = parsedFn.indexOf('parsed-title');
+    if (barAt < 0 || titleAt < 0 || barAt > titleAt)
+      err('★ 工具条没排在标题前面 —— 应该是"工具条在上、标题在下"');
+    else ok('★ 工具条在标题上面（操作区靠上，标题跟着列表走）');
+  }
+  if (!/\.parsed-bar\s*\{[^}]*display:\s*flex/.test(css) || !/\.parsed-title\s*\{[^}]*word-break:\s*break-word/.test(css))
+    err('★ .parsed-bar / .parsed-title 的样式没写全（标题长的时候要能换行）');
+  else ok('★ .parsed-bar / .parsed-title 样式齐全（标题可换行）');
+
+  /* ===== ② 解析页接进"列表内搜索" ===== */
+  if (!/function viewHasListSearch\(view\)/.test(appjs) || !/view === 'parsed'/.test(bodyOf('function viewHasListSearch(view) {')))
+    err('★ viewHasListSearch() 没把 parsed 算进去 —— 解析页的搜索词会被别页清掉/带错');
+  else ok('★ viewHasListSearch() 覆盖了解析页');
+  if (!/if \(currentView === 'parsed' && parsedView\) return listSearchFilter\(parsedView\.tracks\);/.test(appjs))
+    err('★ currentTracks() 的解析页分支没走搜索过滤 —— 搜索时点行播放会播全部');
+  else ok('★ currentTracks() 的解析页分支走搜索过滤');
+  if (!/if \(currentView === 'parsed'\) \{[\s\S]{0,320}?trackListHTML\(list/.test(appjs))
+    err('★ currentListHTML() 没有解析页分支 —— 搜索时列表重画不出来');
+  else ok('★ currentListHTML() 有解析页分支（只重画列表，输入框不失焦）');
+  if (!/listSearchHTML\(\)/.test(parsedFn))
+    err('★ 解析页头部没放搜索框');
+  else ok('★ 解析页头部有搜索框');
+
+  /* ===== ③ 批量选择：解析页不给「移出」 ===== */
+  {
+    const fn = bodyOf('function selActions() {');
+    if (!/currentView !== 'parsed'/.test(fn))
+      err('★ 解析页也会生成「移出歌单」按钮 —— 解析页不是用户的库，点了只会问"从哪移出"');
+    else ok('★ 解析页不生成「移出」按钮');
+  }
+  if (!/id === 'btnSelectParsed'\) \{ toggleSelPick\(\); return; \}/.test(appjs))
+    err('★ 解析页的「批量选择」按钮没绑上');
+  else ok('★ 解析页的「批量选择」已绑定');
+  // ★★ 分P 视频的每一段共用同一个 bvid —— selKey 只按 bvid 算的话会全撞成一个键
+  if (!/return 'b:' \+ t\.bvid \+ '#' \+ \(t\.cid == null \? '' : t\.cid\);/.test(appjs))
+    err('★ ★ selKey 没带 cid —— 分P 视频在批量选择里会全撞成一个键（勾 12 行、选择集里只剩 1 个）');
+  else ok('★ ★ selKey 带上了 cid（分P 不会撞键）');
+
+  /* ===== ④ 整体加入：入口行 ===== */
+  if (!/function makeEntryTrack\(\)/.test(appjs))
+    err('★ 没有 makeEntryTrack() —— 整体加入无从谈起');
+  else ok('★ 有 makeEntryTrack()');
+  {
+    const fn = bodyOf('function makeEntryTrack() {');
+    if (!/cid:\s*null/.test(fn))
+      err('★ ★ 入口行带了 cid —— 会被 isCollectPart() 认成"某合集里的一集"，徽章消失、播放也不展开');
+    else ok('★ ★ 入口行 cid 是 null（不然徽章和展开都会失效）');
+    // seasonCount 和 parts 必须互斥（collectionSize 先看 parts）
+    if (!/if \(isSeason\)[\s\S]{0,160}?else if \(isMultiP\)/.test(fn))
+      err('★ seasonCount 和 parts 不是互斥填的 —— collectionSize() 先看 parts，两个都填会判成「选集」');
+    else ok('★ seasonCount / parts 互斥填写（合集不会被判成选集）');
+    if (!/title:\s*info\.title/.test(fn))
+      err('★ 入口行标题不是视频标题（Neo 定的用视频标题）');
+    else ok('★ 入口行用视频标题');
+  }
+  if (!/function addWholeParsed\(\)/.test(appjs))
+    err('★ 没有 addWholeParsed()');
+  else ok('★ 有 addWholeParsed()');
+  {
+    const fn = bodyOf('function addWholeParsed() {');
+    if (!/addManyToPlaylist\(\[entry\]\)/.test(fn))
+      err('★ 整体加入没有只加"一行"（还是把摊平的每一集都塞进去了？）');
+    else ok('★ 整体加入只塞一行 entry');
+    if (!/DB\.collectParts\[info\.bvid\] = src\.map/.test(fn))
+      err('★ 没把曲目表写进 collectParts —— 点播放时还得联网展开');
+    else ok('★ 曲目表写进了 collectParts（播放不用再联网）');
+    if (/cover:\s*e\.cover/.test(fn))
+      err('★ 缓存里带了 cover —— 长链接，几十集全存会把存档撑大');
+    else ok('★ 缓存剥掉了封面（和 collectEntriesFor 一个口径）');
+  }
+  if (!/multi \? '整个合集加入' : '加入歌单'/.test(appjs))
+    err('★ 按钮文案不是「整个合集加入 / 加入歌单」—— 会和批量选择里的「加入歌单」混');
+  else ok('★ 按钮文案「整个合集加入」/「加入歌单」（和批量里那个区分开）');
+  if (!/id === 'btnAddParsed'\) \{ addWholeParsed\(\); return; \}/.test(appjs))
+    err('★ 「整个合集加入」没绑到 addWholeParsed');
+  else ok('★ 「整个合集加入」已绑定');
+
+  /* ===== ④b 加进歌单要排在**最前面**（v2.11.1） ===== */
+  if (!/function addToPlaylistFront\(pl, tracks\)/.test(appjs))
+    err('★ 没有 addToPlaylistFront() —— 加进歌单的曲目又会排到末尾');
+  else ok('★ 有 addToPlaylistFront()');
+  {
+    const fn = bodyOf('function addToPlaylistFront(pl, tracks) {');
+    if (!/pl\.tracks = fresh\.concat\(pl\.tracks\);/.test(fn))
+      err('★ 新加的没排在最前面（应该 fresh.concat(pl.tracks)）—— 和「我喜欢」不一致');
+    else ok('★ 新加的排在最前面（fresh.concat(pl.tracks)）');
+    if (/unshift/.test(fn))
+      err('★ 用 unshift 逐条插会**把顺序反过来**（批量加 18 集时第 1 集被挤到最后）');
+    else ok('★ 没用 unshift（批量加时内部顺序不变）');
+  }
+  // 两个入口都必须走它：加入歌单弹窗 / 导入收藏夹并进已有歌单
+  if (!/addToPlaylistFront\(pl, list\)/.test(appjs) || !/addToPlaylistFront\(pl, picked\)/.test(appjs))
+    err('★ 还有入口没走 addToPlaylistFront —— 那条路加进去的还是会排在末尾');
+  else ok('★ 「加入歌单」弹窗和「导入收藏夹」两处都走它');
+  // 反向：不许再出现裸的 pl.tracks.push(
+  if (/pl\.tracks\.push\(/.test(appjs))
+    err('★ 还有地方在 pl.tracks.push( —— 那条路加进去会排到末尾');
+  else ok('★ 反向断言：没有裸的 pl.tracks.push( 了');
+
+  /* ===== ⑤ 共 N 首算进集数 ===== */
+  if (!/function expandedCount\(tracks\)/.test(appjs))
+    err('★ 没有 expandedCount()');
+  else ok('★ 有 expandedCount()');
+  if (!/const total = expandedCount\(listAllTracks\(\)\);/.test(appjs))
+    err('★ listSubText() 还在数行数 —— 歌单里 1 行「合集 18」会写成「共 1 首」');
+  else ok('★ 副标题用 expandedCount() 算（1 行合集 → 共 18 首）');
+  if (!/共 \$\{expandedCount\(DB\.history\)\} 首/.test(appjs))
+    err('★ 「最近播放」的副标题还在数行数');
+  else ok('★ 「最近播放」也按展开后的数量算');
+
+  /* ===== ⑥ 下载前确认 + 摊平 ===== */
+  {
+    const fn = bodyOf('async function enqueueDownloads(tracks, opts = {}) {');
+    if (!/maybeCollection\(t\) && collectionSize\(t\)\.n > 1/.test(fn))
+      err('★ 下载前没挑出合集行 —— 选中「合集 18」会只下第一集，而且一声不吭');
+    else ok('★ 下载前挑出了合集行');
+    if (!/await askConfirm\('全部下载？'/.test(fn))
+      err('★ 下载前没问一句');
+    else ok('★ 下载前问一句（askConfirm）');
+    if (!/const seq = await buildSequence\(list\);/.test(fn))
+      err('★ 确认后没摊平 —— 合集行还是只会下第一集');
+    else ok('★ 确认后用 buildSequence 摊平（和点播放同一套逻辑）');
+    if (/showPrompt\(/.test(fn))
+      err('★ 下载确认用了 showPrompt —— 它会把等待者清空，await 永不返回（v2.9.0 踩过）');
+    else ok('★ 下载确认没用 showPrompt');
+  }
+
+  /* ===== ⑦ 离线实测必须在 ===== */
+  if (fs.existsSync(path.join(ROOT, '.verify', 'test-round26.js'))) ok('有 .verify/test-round26.js（本轮四项的离线实测）');
+  else err('缺少 .verify/test-round26.js —— 解析页 / 整体加入 / 下载确认必须真的点一遍');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 63 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }

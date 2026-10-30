@@ -459,8 +459,11 @@ app.whenReady().then(async () => {
     else bad(`[D2] ★ 搜索结果不对：${JSON.stringify(r)}`);
     if (r.focus === 'listSearchInput') ok('[D2] ★ 输入之后焦点仍在搜索框里（没有每敲一个字就失焦）');
     else bad(`[D2] ★ 输入后失焦了：activeElement=${r.focus}`);
-    if (/找到 2 首 \/ 共 12 首/.test(r.sub)) ok(`[D2] 副标题写着「${r.sub}」`);
-    else bad(`[D2] 副标题不对：「${r.sub}」`);
+    // ★ v2.11.0 改了口径：副标题按"展开后的数量"算 —— 那个合集行（缓存里 3 集）
+    //   算 3 首，所以 12 行 = 14 首、搜到的 2 行（1 首 + 1 个合集）= 4 首。
+    //   （以前是数行数，写 2 / 12。）
+    if (/找到 4 首 \/ 共 14 首/.test(r.sub)) ok(`[D2] 副标题写着「${r.sub}」（合集按集数算）`);
+    else bad(`[D2] 副标题不对：「${r.sub}」，期望「找到 4 首 / 共 14 首」`);
   }
 
   {
