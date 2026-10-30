@@ -962,6 +962,25 @@ async function groupB() {
   is(rawAgain === '我以经等了你很久了',
     'B18d ★ 缓存版照样能在原版 / 整理版之间切', rawAgain);
 
+  /* B19 ★ 取词时 mini 的「词」按钮不能被撑爆
+     （历史坑：全局 .loading 占位块带 padding:60px，和按钮的 .loading 撞名，
+      32×30 的按钮被撑成 120×120，整条 mini 折行 —— 用户看到的"界面糊了"就是它） */
+  const miniBox = await ev(`(() => {
+    document.body.classList.add('mini');
+    lyricState.loading = true;
+    updateLyricBtn();
+    const b = document.getElementById('miniLyric');
+    const r = b.getBoundingClientRect();
+    const out = { w: Math.round(r.width), h: Math.round(r.height), cls: b.className };
+    lyricState.loading = false;
+    updateLyricBtn();
+    document.body.classList.remove('mini');
+    return out;
+  })()`);
+  is(miniBox.w <= 40 && miniBox.h <= 40,
+    'B19 ★ 取词时 mini 的「词」按钮还是 32×30（没被全局 .loading 的 padding 撑爆）',
+    JSON.stringify(miniBox));
+
   /* Z 页面报错 */
   is(pageErrors.length === 0, 'Z 全程没有页面报错', pageErrors.join(' | '));
 

@@ -75,6 +75,15 @@ app.whenReady().then(async () => {
   let img = await win.webContents.capturePage();
   fs.writeFileSync(path.join(__dirname, 'shot-mini-collapsed.png'), img.toPNG());
 
+  // v2.12.3：取词中的 mini 条（「词」按钮处于 loading 态）。
+  // 这一态曾经把整条挤断行 —— 全局 .loading 的 padding:60px 把 32×30 的按钮撑成 120×120。
+  await win.webContents.executeJavaScript(`(() => { lyricState.loading = true; updateLyricBtn(); return true; })()`);
+  await sleep(500);
+  img = await win.webContents.capturePage();
+  fs.writeFileSync(path.join(__dirname, 'shot-mini-loading.png'), img.toPNG());
+  await win.webContents.executeJavaScript(`(() => { lyricState.loading = false; updateLyricBtn(); return true; })()`);
+  await sleep(200);
+
   // 展开态
   await win.webContents.executeJavaScript(`(() => { document.getElementById('btnQueue').click(); return true; })()`);
   await sleep(700);

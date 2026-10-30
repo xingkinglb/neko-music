@@ -1917,7 +1917,7 @@ async function expandCollection(track, fallback) {
   //   再让他手打一遍纯属添乱。
   //   只在「我喜欢 / 歌单」两页带（搜索词只属于这两页）；别的页面 listSearch 一定是空的。
   $('collectSearch').value = listSearchCarry();
-  $('collectList').innerHTML = `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
+  $('collectList').innerHTML = `<div class="loading-block"><div class="spinner"></div>正在读取…</div>`;
   $('collectMask').classList.add('show');
 
   let entries;
@@ -2844,7 +2844,7 @@ function renderUp() {
     </div>`;
 
   if (upState.loading && !loaded) {
-    content().innerHTML = head + `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
+    content().innerHTML = head + `<div class="loading-block"><div class="spinner"></div>正在读取…</div>`;
     return;
   }
   if (upState.error && !loaded) {
@@ -2855,7 +2855,7 @@ function renderUp() {
   content().innerHTML = head + trackListHTML(upState.list, {
     emptyIcon: 'i-note',
     emptyText: '这个 UP 主没有公开的视频',
-  }) + (upState.loading ? `<div class="loading"><div class="spinner"></div>正在读取…</div>` : '')
+  }) + (upState.loading ? `<div class="loading-block"><div class="spinner"></div>正在读取…</div>` : '')
     + (totalPages > 1 ? paginationHTML(page, totalPages) : '');
 }
 
@@ -2899,7 +2899,7 @@ async function doSearch(keyword, page = 1) {
   searchKeyword = keyword;
   searchPage = page;
   syncNavHighlight();   // 搜索结果是"临时页"，进来就把侧栏高亮清掉（不然会停在上一项）
-  content().innerHTML = `<div class="loading"><div class="spinner"></div>正在 B 站搜索…</div>`;
+  content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在 B 站搜索…</div>`;
   try {
     const res = await api('search', keyword, page);
     searchResults = res.list.map((v) => ({
@@ -2921,7 +2921,7 @@ async function doSearch(keyword, page = 1) {
 function renderDiscovery() {
   currentView = 'discovery';
   if (discoveryLoading) {
-    content().innerHTML = `<div class="loading"><div class="spinner"></div>正在为你发现音乐…</div>`;
+    content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在为你发现音乐…</div>`;
     return;
   }
   if (discoveryError) {
@@ -3004,7 +3004,7 @@ let parsedView = null;   // 保存当前解析出来的视频/合集信息
 let parsedOrigin = null;   // { view, label, scroll }
 
 async function doParseLink(text) {
-  content().innerHTML = `<div class="loading"><div class="spinner"></div>正在解析…</div>`;
+  content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在解析…</div>`;
   try {
     const parsed = await api('parse', text);
     if (!parsed) {
@@ -3349,7 +3349,7 @@ async function doImportFav(text) {
     return;
   }
   const mid = m[1];
-  content().innerHTML = `<div class="loading"><div class="spinner"></div>正在读取收藏夹…</div>`;
+  content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在读取收藏夹…</div>`;
   try {
     const folders = await api('favFolders', mid);
     if (!folders.length) {
@@ -3381,7 +3381,7 @@ async function doImportFav(text) {
 }
 
 async function loadFavItems(mediaId) {
-  content().innerHTML = `<div class="loading"><div class="spinner"></div>正在读取内容…</div>`;
+  content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在读取内容…</div>`;
   try {
     const res = await api('favMedias', mediaId, 1);
     const tracks = res.list.map((m) => ({
@@ -3574,7 +3574,7 @@ function renderImportMine() {
   if (!impState.me) {
     content().innerHTML = impSimpleHead('从 B 站导入') + (impState.error
       ? `<div class="err">${esc(impState.error)}</div>`
-      : `<div class="loading"><div class="spinner"></div>正在认出你是谁…</div>`);
+      : `<div class="loading-block"><div class="spinner"></div>正在认出你是谁…</div>`);
     return;
   }
   // ③ 认出来了 → 按 step 画
@@ -3653,7 +3653,7 @@ function renderImpFolders() {
   const n = impState.folders.length;
   const head = impSimpleHead(`我的收藏夹${n ? ' · ' + n + ' 个' : ''}`);
   if (impState.loading && !n) {
-    content().innerHTML = head + impBarHTML() + `<div class="loading"><div class="spinner"></div>正在读取你的收藏夹…</div>`;
+    content().innerHTML = head + impBarHTML() + `<div class="loading-block"><div class="spinner"></div>正在读取你的收藏夹…</div>`;
     return;
   }
   if (impState.error && !n) {
@@ -3769,7 +3769,7 @@ function renderImpList() {
     </div>`;
 
   if (impState.loading && !loaded) {
-    content().innerHTML = head + impBarHTML() + `<div class="loading"><div class="spinner"></div>正在读取…</div>`;
+    content().innerHTML = head + impBarHTML() + `<div class="loading-block"><div class="spinner"></div>正在读取…</div>`;
     return;
   }
   if (impState.error && !loaded) {

@@ -4833,6 +4833,21 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
     err('★ 请求里没把用户设的上限带上（设了等于没设）');
   else ok('★ 两条请求都带上用户设的上限');
 
+  /* ===== ⑫d1 「词」按钮的 loading 态不许被整块占位样式污染（v2.12.3 实测反馈）===== */
+  // 全局占位块必须叫 .loading-block：叫 .loading 的话，它那个 60px 内边距
+  // 会把 32×30 的「词」按钮撑成 120×120，整条 mini 折行（用户看到的"界面糊了"）
+  if (/^\.loading\s*\{/m.test(css))
+    err('★ ★ 还有全局 `.loading { padding: 60px }` —— 它会撑爆所有带 loading 态的按钮');
+  else ok('★ ★ 反向断言：整块占位样式已改名 .loading-block，不再和按钮的 loading 撞');
+  if (!/\.loading-block\s*\{/.test(css)) err('★ 占位块改名了但样式没跟着改（加载中会没有内边距）');
+  else ok('★ 占位块样式是 .loading-block');
+  {
+    const rule = (css.match(/body\.mini \.mini-actions \.win-btn#miniLyric\.loading \{[\s\S]*?\n\}/) || [''])[0];
+    if (!/padding:\s*0/.test(rule))
+      err('★ ★ mini 的「词」按钮 loading 态没钉死 padding —— 撞上别的规则就会被撑大');
+    else ok('★ ★ mini 的「词」按钮 loading 态 padding 归零（双保险）');
+  }
+
   /* ===== ⑫d mini 模式下整页歌词必须藏掉（v2.12.1 实测反馈）===== */
   if (!/body\.mini \.lyric-overlay \{ display: none/.test(css))
     err('★ ★ mini 下没把整页歌词藏掉 —— 取歌词时空状态会整个糊在 420×132 的小窗上');
