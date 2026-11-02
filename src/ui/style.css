@@ -2755,3 +2755,7 @@ button.lyric-tag.busy { cursor: default; pointer-events: none; }
 .drag-handle:active { cursor: grabbing; }
 .playlist-row.dragging { opacity: 0.35; }
 .playlist-row.drag-over { outline: 1px dashed rgb(var(--accent-rgb) / 0.7); outline-offset: -1px; border-radius: 8px; }
+
+/* 队列抽屉标题旁的定位按钮（v2.12.5）：播放条同款 ico-btn，
+   和右侧的 ✕ 之间留一点距离，对齐到标题行的视觉中线上。 */
+.collect-head .ico-btn { margin-right: 2px; margin-top: 2px; }
