@@ -51,3 +51,9 @@ jobs:
 
       - name: 图标体检（38 项）
         run: node .verify/check-icons.js
+
+      # 扫全仓 .js，不许有"matchAll 结果直接链式调用"的写法 ——
+      # 那种写法只有 Node 22 认（Iterator Helpers），而 Electron 33 内置的是 Node 20，
+      # 写在 src/ 里就是"用户一开软件就崩"。这条放最后：它能解释上面某一步为什么会崩。
+      - name: Node 版本兼容（Iterator Helpers）
+        run: node .verify/check-node-compat.js

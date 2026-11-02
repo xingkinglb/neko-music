@@ -58,8 +58,8 @@ const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
 
 /* ---- 2) app.js 里所有 $('x') / getElementById('x') / window.neko.loadData 等 ---- */
 const refIds = new Set([
-  ...appjs.matchAll(/\$\(\s*'([^']+)'\s*\)/g).map((m) => m[1]),
-  ...appjs.matchAll(/getElementById\(\s*'([^']+)'\s*\)/g).map((m) => m[1]),
+  ...[...appjs.matchAll(/\$\(\s*'([^']+)'\s*\)/g)].map((m) => m[1]),
+  ...[...appjs.matchAll(/getElementById\(\s*'([^']+)'\s*\)/g)].map((m) => m[1]),
 ]);
 /* app.js 自己用 innerHTML 生成的元素（比如小弹窗里的输入框、按钮）也算"存在"——
    它们不在静态 HTML 里，是运行时拼出来的，但同样是可以 $() 到手的。
@@ -114,8 +114,8 @@ if (!themeBad) ok(`5 套主题（${[...all].join('/')}）三处一致`);
 /* ---- 5) IPC 链路：app.js 调用的 neko 方法 → preload 暴露 → main.js 注册 ---- */
 console.log('\n[4] IPC 链路是否闭环：');
 const nekoCalls = new Set([
-  ...appjs.matchAll(/api\(\s*'([\w]+)'/g).map((m) => m[1]),
-  ...appjs.matchAll(/window\.neko\.([\w]+)\(/g).map((m) => m[1]),
+  ...[...appjs.matchAll(/api\(\s*'([\w]+)'/g)].map((m) => m[1]),
+  ...[...appjs.matchAll(/window\.neko\.([\w]+)\(/g)].map((m) => m[1]),
 ]);
 /* 从 preload 抽出三类桥：invoke（请求-响应）/ send（单向通知主进程）/ on（订阅主进程推送） */
 const preloadInvoke = {};
@@ -165,12 +165,12 @@ if (!gateBad) ok('两道安全闸（文件名白名单 + 路径越界检查）�
 console.log('\n[6] 图标引用是否都能找到定义：');
 const symbols = new Set([...html.matchAll(/<symbol\s+id="([^"]+)"/g)].map((m) => m[1]));
 const usedIcons = new Set([
-  ...html.matchAll(/<use\s+href="#([^"]+)"/g).map((m) => m[1]),
-  ...appjs.matchAll(/ic\(\s*'([^']+)'/g).map((m) => m[1]),
+  ...[...html.matchAll(/<use\s+href="#([^"]+)"/g)].map((m) => m[1]),
+  ...[...appjs.matchAll(/ic\(\s*'([^']+)'/g)].map((m) => m[1]),
   // 三元里写的图标名（如 ic(v === 0 ? 'i-vol-x' : ...)）也要捞出来
-  ...appjs.matchAll(/'(i-[\w-]+)'/g).map((m) => m[1]),
+  ...[...appjs.matchAll(/'(i-[\w-]+)'/g)].map((m) => m[1]),
   // 运行时通过 setAttribute('href', '#i-xxx') 切换的图标也要算上
-  ...appjs.matchAll(/#(i-[\w-]+)/g).map((m) => m[1]),
+  ...[...appjs.matchAll(/#(i-[\w-]+)/g)].map((m) => m[1]),
 ]);
 const iconMissing = [...usedIcons].filter((n) => !symbols.has(n));
 if (iconMissing.length) iconMissing.forEach((n) => err(`用了图标 #${n}，但图标库里没有 <symbol id="${n}">`));
