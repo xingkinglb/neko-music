@@ -158,8 +158,34 @@ app.whenReady().then(async () => {
   const broken = storeMigrate.migrate({ settings: 'not-an-object' }, { bgDir: null });
   if (!broken.settings || broken.settings.theme !== 'pink' || broken.settings.close.action !== 'ask') bad('坏存档没有被兜住');
   else ok('坏存档（settings 不是对象）也能兜住，不会崩');
-  const empty = storeMigrate.migrate(null, { bgDir: null });
-  if (empty.settings.close.action !== 'ask') bad('空存档没有拿到 close 的默认值');
+
+  /* ============================================================
+     [0.5] v2.13.0：残骸字段剥离（migrate 里**唯二的删除**）
+     某个远古版本的存档文件本身就是个 {ok, data} 信封（渲染层没解包就 persist 了），
+     "只补不删"铁律把它们原样留到今天 —— data 是 156KB 的旧存档完整副本。
+     这里验证：残骸剥掉、正式字段毫发无损（铁律的精神没有被破坏）。
+     ============================================================ */
+  say('\n[0.5] 残骸字段剥离（ok / data）：');
+  {
+    const legacy = {
+      ok: true,                                    // 远古信封的标记
+      data: { playlists: [{ id: 'old' }] },        // 信封里的旧存档快照（纯冗余副本）
+      playlists: [{ id: 'now', name: '现在的歌单', tracks: [] }],
+      favorites: [{ bvid: 'BV1', cid: 1 }],
+      settings: { theme: 'cyan' },
+    };
+    const out = storeMigrate.migrate(JSON.parse(JSON.stringify(legacy)), { bgDir: null });
+    if ('ok' in out) bad('ok 残骸还在存档里');
+    else ok('ok 残骸被剥离');
+    if ('data' in out) bad('★ data 残骸还在 —— 156KB 的旧存档副本继续跟着每次全量写盘');
+    else ok('data 残骸（旧存档完整副本）被剥离');
+    if (!out.playlists.length || out.playlists[0].id !== 'now') bad('★ 剥离时把正式字段误删了（铁律被破坏）');
+    else if (!out.favorites.length) bad('★ favorites 被误删');
+    else if (out.settings.theme !== 'cyan') bad('★ settings 被剥离波及');
+    else ok('正式字段（playlists / favorites / settings）毫发无损');
+  }
+
+  const empty = storeMigrate.migrate(null, { bgDir: null });  if (empty.settings.close.action !== 'ask') bad('空存档没有拿到 close 的默认值');
   else ok('空存档拿到 close 默认值 ask');
 
   /* ============================================================

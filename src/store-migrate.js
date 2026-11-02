@@ -62,6 +62,17 @@ function migrate(data, opts) {
   const bgDir = (opts && opts.bgDir) || null;
   const d = (data && typeof data === 'object') ? data : {};
 
+  /* ★★ v2.13.0：剥离两个历史残骸字段 —— 这是整个 migrate **唯二的删除**。
+     某个远古版本的存档文件本身就是个 {ok, data} 信封（渲染层没解包就 persist 了），
+     而 migrate 的"只补不删"铁律把它们原样留到了今天：
+       · `data` 是 156KB 的**旧存档完整副本** —— 正式字段（playlists / favorites / …）
+         全在顶层，它是纯冗余，还跟着每次全量写盘；
+       · `ok` 只是布尔标记。
+     这里删除不违反铁律的精神：铁律防的是"界面新加的字段被误删"，
+     这两项是事故残骸，不是任何界面在用的字段（test-round11 有断言守着）。 */
+  if ('ok' in d) delete d.ok;
+  if ('data' in d) delete d.data;
+
   d.playlists = Array.isArray(d.playlists) ? d.playlists : [];
   d.favorites = Array.isArray(d.favorites) ? d.favorites : [];
   d.history   = Array.isArray(d.history)   ? d.history   : [];

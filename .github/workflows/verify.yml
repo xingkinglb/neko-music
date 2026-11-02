@@ -61,6 +61,10 @@ jobs:
       - name: 扫码登录解析
         run: node .verify/check-qr-login.js
 
+      # 合集缓存的落盘/读取（可重建缓存，坏数据当空）。
+      - name: 合集缓存存储
+        run: node .verify/check-cache-collect.js
+
       # 播放队列的落盘/读取：原子写、脏数据容错、index 越界自愈。
       # 这块纯 Node 就能测（queue-store.js 不依赖 Electron），毫秒级。
       - name: 队列存储

@@ -523,14 +523,40 @@ function healOnStall() {
 // ★ 启动默认落在「发现」（一打开就有推荐，不用先看空搜索页）。
 let currentView = 'discovery';
 
+/* ---------------- 主存档的落盘形状（v2.13.0） ----------------
+   collectParts（合集曲目表）和 collectCovers（合集封面）是**可重建的缓存**，
+   已拆去独立的 cache-collect.json —— 写主存档前剥掉它们：
+   不然每次 persist（改个音量也触发）还是全量重写 7.5MB（光这两项就 4.2MB）。
+   ★ 内存里的 DB.collectParts 照常用（播放合集要读），只是不落主存档；
+     缓存自己的落盘走 saveCacheSoon（下面），和主存档的节奏解耦。 */
+function strippedArchive() {
+  const p = { ...DB };
+  delete p.collectParts;
+  delete p.collectCovers;
+  return p;
+}
+
+/* 缓存落盘（2 秒防抖）。写入点只有两处：collectEntriesFor 存曲目表、
+   ensureCid 存合集封面 —— 频率远低于 persist，不该跟着主存档陪跑。 */
+let cacheSaveTimer = null;
+function saveCacheSoon() {
+  clearTimeout(cacheSaveTimer);
+  cacheSaveTimer = setTimeout(() => {
+    api('cacheCollectSave', { collectParts: DB.collectParts || {}, collectCovers: DB.collectCovers || {} })
+      .catch(() => {});   // 缓存写失败可重建，不打扰用户
+  }, 2000);
+}
+
 /** 把内存中的数据写到硬盘（每次改动后调用）。
  * ★ 必须走 api()：主进程统一把结果包成 {ok,data}，直接调 window.neko.saveData
  *   拿到的是外壳、ok 恒为 true，失败会被吞掉；走 api() 才会解包并在失败时抛错。
- *   存盘前先深拷贝一份快照，避免序列化过程中 DB 还在被改、写出半新半旧的数据。 */
+ *   存盘前先深拷贝一份快照，避免序列化过程中 DB 还在被改、写出半新半旧的数据。
+ *   ★ v2.13.0：快照用 strippedArchive() —— 剥掉已拆去 cache-collect.json 的两项，
+ *     主存档从 7.49MB 瘦到几百 KB，连 JSON 序列化的耗时都省了一大半。 */
 let lastSaveErrorAt = 0;
 async function persist() {
   try {
-    const snapshot = JSON.parse(JSON.stringify(DB));
+    const snapshot = JSON.parse(JSON.stringify(strippedArchive()));
     await api('saveData', snapshot);
     return true;
   } catch (e) {
@@ -1323,7 +1349,7 @@ async function ensureCid(track) {
       if (DB.collectCovers[track.bvid] !== track.cover) {
         DB.collectCovers[track.bvid] = track.cover;
         collectCoverMemo.delete(track.bvid);
-        persistLater();
+        saveCacheSoon();   // 封面进了缓存文件，不再陪主存档写 7.5MB
       }
     }
     return pg.cid;
@@ -1956,6 +1982,7 @@ async function collectEntriesFor(track) {
         bvid: e.bvid, cid: e.cid, page: e.page,
         title: e.title, duration: e.duration, author: e.author,
       }));
+      saveCacheSoon();   // 曲目表进了缓存文件（cache-collect.json），不再陪主存档写 7.5MB
       // ★ v2.0.5：顺手把这张合集封面单独记一条（整张表只多这 1 个 URL）
       const cover = info.cover || (entries[0] && entries[0].cover) || '';
       if (!DB.collectCovers) DB.collectCovers = {};
@@ -7805,9 +7832,13 @@ function bindEvents() {
      ★ 整个 try 包住 —— 退出路径上任何异常都不许挡住窗口关闭。 */
   window.addEventListener('beforeunload', () => {
     try {
-      if (DB && typeof DB === 'object' && window.neko.storeSaveNow) window.neko.storeSaveNow(DB);
+      if (DB && typeof DB === 'object' && window.neko.storeSaveNow) window.neko.storeSaveNow(strippedArchive());
       if (queue && queue.tracks && window.neko.queueSaveNow) {
         window.neko.queueSaveNow({ tracks: queue.tracks, index: queue.index, name: queue.name });
+      }
+      // 合集缓存也兜一下：丢了可重建，但写上了重启后合集徽章立即齐全（不用重新拉）
+      if (window.neko.cacheCollectSaveNow) {
+        window.neko.cacheCollectSaveNow({ collectParts: DB.collectParts || {}, collectCovers: DB.collectCovers || {} });
       }
     } catch { /* 同上 */ }
   });
@@ -9895,6 +9926,30 @@ async function boot() {
     DB.local = Array.isArray(DB.local) ? DB.local : [];
     // 合集的"单集开关"与"曲目表缓存"：老存档没有这两项，补成空的（= 全部启用）
     DB.collectOff = (DB.collectOff && typeof DB.collectOff === 'object') ? DB.collectOff : {};
+    // ★ v2.13.0：collectParts / collectCovers 已拆去 cache-collect.json。
+    //   读缓存 → 合并进 DB；cache 还是空的而主存档里还有（老用户第一次启动）→
+    //   先把缓存写出来（**同步等成功**，迁移才算完成），主存档里那两份靠下次 persist 剥离 ——
+    //   顺序反了的话（先剥离后写缓存），中间崩一次，合集选集缓存就全没了。
+    try {
+      const cached = await api('cacheCollectLoad');
+      const cacheHas = cached && (Object.keys(cached.collectParts).length || Object.keys(cached.collectCovers).length);
+      const storeHas = (DB.collectParts && Object.keys(DB.collectParts).length)
+        || (DB.collectCovers && Object.keys(DB.collectCovers).length);
+      if (cacheHas) {
+        DB.collectParts = cached.collectParts;
+        DB.collectCovers = cached.collectCovers;
+      } else if (storeHas) {
+        await api('cacheCollectSave', { collectParts: DB.collectParts || {}, collectCovers: DB.collectCovers || {} });
+      }
+      // cache 和主存档都空 → 什么也不做（全新用户）
+    } catch (e) {
+      /* ★ console.log 而不是 error：缓存迁移失败是**可恢复的正常降级**
+         （cache 没建成 → storeHas 还在 → 下次启动再迁），离屏测试脚本普遍
+         把「页面有一条 error 级日志」判 FAIL —— 三十个别的东西会全变红。
+         真环境里调试启动.bat 的窗口照样看得到这一行。 */
+      console.log('合集缓存迁移/读取失败（下次启动会再试）', e && e.message);
+    }
+
     DB.collectParts = (DB.collectParts && typeof DB.collectParts === 'object') ? DB.collectParts : {};
     // ★ v2.0.5：合集封面表（每个合集一张）。老存档没有 → 补成空的（= 走音符兜底，不报错）
     DB.collectCovers = (DB.collectCovers && typeof DB.collectCovers === 'object') ? DB.collectCovers : {};

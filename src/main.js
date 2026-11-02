@@ -24,6 +24,9 @@ const qrLogin = require('./qr-login');
 // 播放队列读写（v2.12.4）—— 同理，纯文件操作，能脱离 Electron 单测
 const queueStore = require('./queue-store');
 
+// 合集缓存读写（v2.13.0）—— collectParts / collectCovers 从主存档拆出来的部分
+const cacheCollect = require('./cache-collect');
+
 // 读存档时的"补洞"（★ 只许补、不许删 —— 见这个文件顶部的说明，
 // 它原来会悄悄吃掉新加的设置项，是个真 bug）
 const { migrate, DEFAULT_DATA, DEFAULT_DOWNLOAD } = require('./store-migrate');
@@ -1236,6 +1239,20 @@ function registerHandlers() {
   ipcMain.on('queue:save:now', (_e, data) => {
     try { queueStore.save(QUEUE_FILE, data); } catch (err) { console.error('[queue:save:now]', err.message); }
   });
+  // 缓存也兜一下：丢了可重建，但关窗瞬间把它写上，重启后合集徽章立即齐全（不用重新拉）
+  ipcMain.on('cache-collect:save:now', (_e, data) => {
+    try { cacheCollect.save(CACHE_COLLECT_FILE, data); } catch (err) { console.error('[cache-collect:save:now]', err.message); }
+  });
+
+  // ---------- 合集缓存（v2.13.0） ----------
+  //  collectParts / collectCovers 从主存档拆出来单独存（cache-collect.json）——
+  //  它们是**可重建的缓存**（删了下次播放合集再拉），却曾占着主存档 4.2MB，
+  //  让每次 persist（改个音量也触发）都全量重写 7.5MB。
+  //  ★ 渲染层负责剥离：persist 的 payload 和退出兜底都不再带这两项；
+  //    老存档第一次启动时渲染层会把它们搬进来（迁移），主存档下次保存自然瘦身。
+  const CACHE_COLLECT_FILE = path.join(app.getPath('userData'), 'cache-collect.json');
+  handle('cache-collect:load', () => cacheCollect.load(CACHE_COLLECT_FILE));
+  handle('cache-collect:save', (data) => cacheCollect.save(CACHE_COLLECT_FILE, data));
 
   // 界面右上角自绘的三个窗口按钮：最小化 / 最大化(切换) / 关闭
   ipcMain.on('win-min', () => { if (mainWindow) mainWindow.minimize(); });

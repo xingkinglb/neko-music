@@ -46,6 +46,14 @@ let infoCalls = 0;
 
 ipcMain.handle('store:load', () => ({ ok: true, data: lastSaved || { playlists: [], favorites: [], history: [], settings: {}, lastTrack: null } }));
 ipcMain.handle('store:save', (_e, data) => { lastSaved = JSON.parse(JSON.stringify(data)); return { ok: true, data: true }; });
+/* ★ v2.13.0：collectParts/collectCovers 拆到了 cache-collect.json ——
+   这里的 mock 走**真实的 cache-collect 模块 + 临时文件**，
+   迁移 / 兜底 / 重启后从 cache 恢复，整条链路都是真代码。 */
+const cacheCollect = require(path.join(ROOT, 'src', 'cache-collect.js'));
+const R6CACHE = path.join(require('os').tmpdir(), 'neko-r6-cache.json');
+ipcMain.handle('cache-collect:load', () => ({ ok: true, data: cacheCollect.load(R6CACHE) }));
+ipcMain.handle('cache-collect:save', (_e, d) => ({ ok: true, data: cacheCollect.save(R6CACHE, d) }));
+ipcMain.on('cache-collect:save:now', (_e, d) => { cacheCollect.save(R6CACHE, d); });
 ipcMain.handle('bili:hasCookie', () => ({ ok: true, data: false }));
 ipcMain.handle('cookie:get', () => ({ ok: true, data: '' }));
 ipcMain.handle('bili:subtitle', () => ({ ok: false, error: '测试环境不给字幕', reason: 'none' }));

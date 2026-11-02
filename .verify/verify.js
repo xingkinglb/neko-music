@@ -124,7 +124,7 @@ const preloadOn = {};
 for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.invoke\(\s*'([^']+)'/gm)) preloadInvoke[m[1]] = m[2];
 for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.send\(\s*'([^']+)'/gm))   preloadSend[m[1]]   = m[2];
 for (const m of preload.matchAll(/^\s*([\w]+):\s*\([^)]*\)\s*=>\s*ipcRenderer\.on\(\s*'([^']+)'/gm))     preloadOn[m[1]]     = m[2];
-const handlers = new Set([...mainjs.matchAll(/handle\(\s*'([\w:]+)'/g)].map((m) => m[1]));
+const handlers = new Set([...mainjs.matchAll(/handle\(\s*'([\w:-]+)'/g)].map((m) => m[1]));
 const onHandlers = new Set([...mainjs.matchAll(/ipcMain\.on\(\s*'([\w:-]+)'/g)].map((m) => m[1]));
 const allChannels = new Set([...handlers, ...onHandlers]);
 let ipcBad = false;
@@ -437,7 +437,7 @@ if (/window\.neko\.(loadData|saveData)\(/.test(appCode)) {
 if (!/mainWindow\.on\('close',[\s\S]*?requestMainWindowClose\(\)/.test(mainjs) || !/win:prepare-close/.test(preload) || !/flushPersistence\(\)[\s\S]*?closeReady\(saved\)/.test(appjs)) {
   err('关闭路径没有等待渲染端 flush 保存 —— 窗口关闭时 300ms 防抖写入可能丢失');
 } else ok('关闭按钮 / Alt+F4 都等待最后一次存档成功再退出');
-if (!/JSON\.parse\(JSON\.stringify\(DB\)\)/.test(appjs) || !/return false/.test(appjs) || !/toast\('本机保存失败：'/.test(appjs)) {
+if (!/JSON\.parse\(JSON\.stringify\(strippedArchive\(\)\)\)/.test(appjs) || !/function strippedArchive/.test(appjs) || !/return false/.test(appjs) || !/toast\('本机保存失败：'/.test(appjs)) {
   err('保存没有快照 / 失败反馈 —— 用户仍可能无提示地丢失本机数据');
 } else ok('保存使用快照，失败会给出可见提示（关窗失败也不会把窗口卡住）');
 if (!/\.workbuddy\//.test(gitignore) || !/node_modules\//.test(gitignore) || !/同步到GitHub\.bat/.test(gitignore)) {
@@ -5054,3 +5054,17 @@ if (!/beforeunload/.test(appjs) || !/storeSaveNow/.test(appjs) || !/queueSaveNow
 if (!/const saveStore = \(data\) =>/.test(mainjs) || !/ipcMain\.on\('store:save:now'/.test(mainjs)) {
   err('saveStore 没抽出来共用 / 主进程没接退出兜底消息');
 } else ok('saveStore 抽出共用，主进程接得住兜底消息');
+
+/* v2.13.0 存档瘦身（Neo 拍板的待办第 1 条）：collectParts/collectCovers（4.2MB 可重建缓存）
+   拆去 cache-collect.json；persist / beforeunload 的 payload 剥离；
+   migrate 顺手剥掉 {ok,data} 历史残骸（远古信封没解包就 persist，156KB 冗余副本跟到今天）。
+   ★ 离屏迁移实测在 test-round32（payload 实测 7.49MB → 0.9KB）。 */
+if (!/function strippedArchive/.test(appjs) || !/api\(\s*'cacheCollectLoad'/.test(appjs) || !/api\(\s*'cacheCollectSave'/.test(appjs)) {
+  err('存档瘦身三件套不全（strippedArchive / cacheCollectLoad / cacheCollectSave）');
+} else ok('★ 存档瘦身：缓存拆去 cache-collect.json，persist 前剥离（7.49MB → KB 级）');
+if (!/'ok' in d\) delete d\.ok/.test(fs.readFileSync(path.join(ROOT, 'src', 'store-migrate.js'), 'utf8')) || !/'data' in d\) delete d\.data/.test(fs.readFileSync(path.join(ROOT, 'src', 'store-migrate.js'), 'utf8'))) {
+  err('migrate 没剥掉 ok/data 残骸 —— 156KB 冗余副本继续跟着每次全量写盘');
+} else ok('★ migrate 剥离 ok/data 历史残骸（migrate 唯二的删除，round11 守着）');
+if (/DB\.collectCovers\[track\.bvid\] = track\.cover;[\s\S]{0,120}persistLater\(\)/.test(appjs)) {
+  err('封面写入还在触发 persistLater —— 应该 saveCacheSoon（写缓存自己的文件）');
+} else ok('缓存写入点改走 saveCacheSoon，不再陪主存档全量重写');

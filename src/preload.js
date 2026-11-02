@@ -120,6 +120,12 @@ contextBridge.exposeInMainWorld('neko', {
   // "往返响应"不可靠，send 只要消息进入主进程事件队列就一定会被处理。
   storeSaveNow: (data) => ipcRenderer.send('store:save:now', data),
   queueSaveNow: (data) => ipcRenderer.send('queue:save:now', data),
+  cacheCollectSaveNow: (data) => ipcRenderer.send('cache-collect:save:now', data),
+
+  // ---------- 合集缓存（v2.13.0） ----------
+  // collectParts / collectCovers 拆到 cache-collect.json 的读写
+  cacheCollectLoad: () => ipcRenderer.invoke('cache-collect:load'),
+  cacheCollectSave: (data) => ipcRenderer.invoke('cache-collect:save', data),
 
   // ---------- 关于 / 检查更新（v2.12.4） ----------
   // 版本号从主进程的 package.json 读（渲染层拿不到）
