@@ -1,0 +1,48 @@
+# 静态自检流水线。
+#
+# ★ 为什么这三个脚本能上 CI，而别的不能：
+#   .verify/verify.js / check-readme.js / check-icons.js 全部只用 Node 内置模块
+#   （fs / path / zlib），**零第三方依赖**，三个加起来 0.9 秒跑完。
+#   所以这里刻意**不跑 npm install** —— 省 30 秒，也让流水线不受依赖变更影响。
+#
+# ★ 为什么不把 test-round*.js 也放进来：
+#   那一批是 Electron 离屏实测，要图形环境、30 个脚本、跑 12 分钟，
+#   而且它们本来就要求本地真机验收（有些断言依赖真实渲染时序）。
+#   放进来只会让 CI 又慢又飘，红了你也不知道是真坏了还是环境问题。
+#
+# ★ 换行符不会捣乱：.gitattributes 已经统一 eol=lf，
+#   仓库里存的本来就是 LF，Linux runner 上读出来和本地一模一样。
+
+name: 自检
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # 允许在网页 Actions 页手动点一下跑
+
+permissions:
+  contents: read # 只读就够，不需要写权限
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 三步分开写，不串成一行：红了的时候一眼能看出挂在哪一类，
+      # 而不是只看到一个笼统的 "exit code 1"。
+      - name: 静态自检（64 大类）
+        run: node .verify/verify.js
+
+      - name: README 体检（7 项）
+        run: node .verify/check-readme.js
+
+      - name: 图标体检（38 项）
+        run: node .verify/check-icons.js
