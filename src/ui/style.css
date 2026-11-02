@@ -1507,6 +1507,21 @@ body.glass-live .lyric-overlay {
 }
 .switch-row input { display: none; }   /* 真正的 checkbox 藏起来，用下面的 .switch 画 */
 .switch-label { flex: 1; font-size: 13.5px; }
+/* 「实验性」角标：跟在开关标题后面，一眼看出这东西还不完善。
+   配色沿用歌词页的 .lyric-tag.est（琥珀底）—— 那是同一层语义："别太当真"。
+   ★ 不能用 --accent：有一套主题就叫「薄荷绿」，状态色跟着主题跑就没有警示意味了。 */
+.tag-exp {
+  display: inline-block;
+  margin-left: 7px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  vertical-align: 1px;
+  color: #ffd9a0;
+  background: rgba(120, 78, 20, 0.5);
+  border: 1px solid rgba(255, 190, 120, 0.32);
+}
 .switch {
   position: relative;
   width: 40px; height: 22px; border-radius: 11px;
