@@ -3873,6 +3873,97 @@ function impBlockedHTML() {
 }
 
 /** 按当前状态画导入页 */
+/* ---------------- 我的主页（v2.12.4 批三） ----------------
+   和「导入我的 B 站收藏夹」共用同一组数据接口（myInfo / favFolders / favMedias），
+   但目标不同：那边是「挑 → 批量加进歌单」的导入流程，这边是「点开就播」的浏览页。
+   两个入口并存 —— 导入的按钮和流程原样保留，谁的活也不抢。 */
+let myPageState = null;   // { me, folders, loading, error }
+
+async function openMyPage() {
+  currentView = 'my';
+  // 已经认过人就不重复请求（切走再回来直接用缓存；想刷新重启软件即可 —— 低频页面）
+  if (myPageState) { renderMyPage(); return; }
+  myPageState = { me: null, folders: null, loading: true, error: null };
+  renderMyPage();
+  try {
+    const me = await api('myInfo');   // 没 Cookie / 过期会抛（reason: no-cookie / cookie-expired）
+    myPageState.me = me;
+    myPageState.folders = (await api('favFolders', me.mid)) || [];
+    myPageState.loading = false;
+  } catch (err) {
+    myPageState.loading = false;
+    myPageState.error = err;
+  }
+  if (currentView === 'my') renderMyPage();   // 用户中途切走了就别抢画面
+}
+
+function renderMyPage() {
+  currentView = 'my';
+  const st = myPageState;
+  if (!st || st.loading) {
+    content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在认出你是谁…</div>`;
+    return;
+  }
+  // 没登录 / Cookie 过期 → 和导入页同一套引导（扫码登录就在设置里，引导里能直接说清楚）
+  if (st.error && (st.error.reason === 'no-cookie' || st.error.reason === 'cookie-expired')) {
+    content().innerHTML = impBlockedHTML();
+    return;
+  }
+  if (st.error) {
+    content().innerHTML = `<div class="err">读取失败：${esc(st.error.message || String(st.error))}</div>`;
+    return;
+  }
+  const folders = st.folders || [];
+  content().innerHTML = `
+    <div class="block-head">
+      <div class="my-head">
+        ${st.me.face
+          ? `<img class="my-face" src="${esc(st.me.face)}" alt="" referrerpolicy="no-referrer" />`
+          : `<span class="my-face my-face-empty">${ic('i-user')}</span>`}
+        <div>
+          <div class="block-title">${esc(st.me.name)}</div>
+          <div class="block-sub">${folders.length} 个收藏夹 · 点开一个就像歌单一样听</div>
+        </div>
+      </div>
+    </div>
+    ${folders.length
+      ? `<div class="card-grid">${folders.map((f) => `
+          <div class="card" data-myfav="${esc(f.id)}" data-name="${esc(f.title)}">
+            <div class="thumb${f.cover ? '' : ' no-cover'}"${f.cover ? ` style="background-image:url('${esc(f.cover)}')"` : ''}></div>
+            <div class="c-title">${esc(f.title)}${f.private ? '<span class="c-priv">私密</span>' : ''}</div>
+            <div class="c-sub">${f.count} 个视频</div>
+          </div>`).join('')}</div>`
+      : `<div class="empty"><div class="big">${ic('i-heart')}</div><div class="msg">你的 B 站账号下没有收藏夹</div><div class="hint">在 B 站网页上建一个，回来这里就能看到。</div></div>`}
+    <div class="my-import-tip">想把收藏夹批量加进本地歌单？侧栏「我的歌单」旁的下载按钮就是干这个的。</div>`;
+
+  content().querySelectorAll('[data-myfav]').forEach((el) => {
+    el.addEventListener('click', () => openMyFolder(el.dataset.myfav, el.dataset.name));
+  });
+}
+
+/** 点开一个收藏夹 → 复用解析页那套（可播 / 可收藏 / 可加歌单 / 批量选择全都现成），
+ *  parsedOrigin 指回我的主页，「← 返回：我的主页」就自然成立。 */
+async function openMyFolder(mediaId, name) {
+  content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在读取「${esc(name)}」…</div>`;
+  try {
+    const res = await api('favMedias', mediaId, 1);
+    const me = myPageState && myPageState.me;
+    const tracks = res.list.map((m) => ({
+      bvid: m.bvid, cid: null, page: 1,
+      title: m.title, author: m.author || (me ? me.name : ''),
+      cover: m.cover, duration: m.duration,
+    }));
+    parsedOrigin = { view: 'my', label: '我的主页', scroll: 0 };
+    parsedView = {
+      info: { title: name, owner: { name: me ? me.name : '' } },
+      pages: tracks, seasonTracks: [], tracks,
+    };
+    renderParsed();
+  } catch (err) {
+    content().innerHTML = `<div class="err">读取失败：${esc(err.message)}</div>`;
+  }
+}
+
 function renderImportMine() {
   if (!impState) { currentView = 'discovery'; renderAll(); return; }
 
@@ -5959,6 +6050,7 @@ function renderPlaylistSidebar() {
   }
   ul.innerHTML = DB.playlists.map((p) => `
     <li class="playlist-row ${currentView === 'playlist:' + p.id ? 'active' : ''}" data-pl="${p.id}">
+      <span class="drag-handle" title="拖动调整顺序"><svg viewBox="0 0 10 14" width="9" height="13" fill="currentColor"><circle cx="3" cy="2" r="1.3"/><circle cx="7" cy="2" r="1.3"/><circle cx="3" cy="7" r="1.3"/><circle cx="7" cy="7" r="1.3"/><circle cx="3" cy="12" r="1.3"/><circle cx="7" cy="12" r="1.3"/></svg></span>
       <span class="name">${ic('i-note')}<span class="nm">${esc(p.name)}</span></span>
       <span class="cnt">${p.tracks.length}</span>
       <button class="del" data-del="${p.id}" title="删除">✕</button>
@@ -5971,6 +6063,56 @@ function renderPlaylistSidebar() {
       //   那条清理规则只在 renderAll 里有一处，从这个入口进来也能被清掉。
       currentView = 'playlist:' + el.dataset.pl;
       renderAll();
+    });
+  });
+  bindPlaylistDrag(ul);
+}
+
+/* ---------------- 歌单拖动排序（v2.12.4 批三） ----------------
+   ★ 手柄平时隐藏（hover 才浮现）—— 侧栏空间小，常驻一个把手太吵。
+   ★ li 平时不可拖（draggable=true 会把"点击进入歌单"也变成拖动），
+     按住手柄那一刻才临时打开，dragend 关掉。
+   ★ 和「拖动多选」（dragSel）天然隔离：那是内容区列表的 pointer 事件，
+     这里是侧栏歌单行的 HTML5 DnD，两套互不接触。 */
+let dragPlId = null;
+
+function bindPlaylistDrag(ul) {
+  ul.querySelectorAll('.playlist-row').forEach((li) => {
+    const id = li.dataset.pl;
+    const handle = li.querySelector('.drag-handle');
+    if (!handle) return;
+    handle.addEventListener('mousedown', () => { li.draggable = true; });
+    li.addEventListener('dragstart', (e) => {
+      dragPlId = id;
+      li.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', id); } catch { /* 某些平台不允许，无碍 */ }
+    });
+    li.addEventListener('dragend', () => {
+      li.draggable = false;
+      li.classList.remove('dragging');
+      ul.querySelectorAll('.playlist-row').forEach((r) => r.classList.remove('drag-over'));
+      dragPlId = null;
+    });
+    li.addEventListener('dragover', (e) => {
+      if (!dragPlId || dragPlId === id) return;
+      e.preventDefault();   // 不 preventDefault 浏览器不给 drop
+      li.classList.add('drag-over');
+    });
+    li.addEventListener('dragleave', () => li.classList.remove('drag-over'));
+    li.addEventListener('drop', (e) => {
+      e.preventDefault();
+      li.classList.remove('drag-over');
+      if (!dragPlId || dragPlId === id) return;
+      const from = DB.playlists.findIndex((p) => p.id === dragPlId);
+      const to = DB.playlists.findIndex((p) => p.id === id);
+      if (from < 0 || to < 0) return;
+      const [moved] = DB.playlists.splice(from, 1);
+      DB.playlists.splice(to, 0, moved);
+      dragPlId = null;
+      persistLater();
+      renderPlaylistSidebar();   // 顺序变了，当场重画
+      toast('已调整歌单顺序');
     });
   });
 }
@@ -6000,6 +6142,7 @@ function renderAll() {
     if (!discoveryResults.length && !discoveryLoading && !discoveryError) loadDiscovery();
   }
   else if (currentView === 'favorites') renderFavorites();
+  else if (currentView === 'my') { openMyPage(); }   // v2.12.4 批三：我的主页（async，自己管渲染）
   else if (currentView === 'history') renderHistory();
   else if (currentView === 'downloads') renderDownloads();
   else if (currentView === 'local') renderLocal();   // v2.8.0 批次 B

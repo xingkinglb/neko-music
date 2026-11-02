@@ -374,6 +374,22 @@ if (!/function sortedView/.test(appjs) || !/return list\.slice\(\)\.sort\(/.test
 if (!/sortState\.view !== currentView/.test(appjs)) {
   err('排序状态没有按视图隔离（会在别的页面误生效）');
 } else ok('排序状态按视图隔离（sortState.view 核对）');
+
+/* v2.12.4 批三：我的主页。★ 和「导入我的收藏夹」是**并存**关系 ——
+   导入的入口（btnImportMine）和流程必须原样保留，只许加不许动。 */
+if (!/data-view="my"/.test(html) || !/id="i-user"/.test(html)) {
+  err('侧栏没有「我的主页」入口（或缺 i-user 图标）');
+} else if (!/function renderMyPage/.test(appjs) || !/function openMyFolder/.test(appjs)) {
+  err('我的主页的渲染函数不全');
+} else if (!/parsedOrigin = \{ view: 'my'/.test(appjs)) {
+  err('点开收藏夹后没有把 parsedOrigin 指回我的主页（返回按钮会跳去别处）');
+} else if (!/btnImportMine/.test(html) || !/function renderImportMine/.test(appjs)) {
+  err('「导入我的收藏夹」入口丢了 —— 我的主页是加进去的，不是顶替的');
+} else ok('我的主页：入口 / 渲染 / 返回链路齐全，导入功能原样保留');
+/* 歌单拖动：手柄（hover 浮现）+ 重排 + 持久化，行为在 test-round30 里实测。 */
+if (!/drag-handle/.test(appjs) || !/function bindPlaylistDrag/.test(appjs)) {
+  err('歌单侧栏没有拖动排序（手柄或重排绑定丢了）');
+} else ok('歌单拖动排序：手柄 / 重排 / 持久化齐全');
 if (!/id="btnRefreshDiscovery"/.test(appjs) || !/function renderDiscovery/.test(appjs) || !/发现失败：/.test(appjs) || !/正在为你发现音乐/.test(appjs)) {
   err('发现页缺少刷新或加载 / 空 / 错误状态 UI');
 } else ok('发现页有刷新按钮及加载、空、错误状态');

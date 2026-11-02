@@ -227,6 +227,10 @@
     <symbol id="i-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
       <path d="M3.4 7a1.8 1.8 0 0 1 1.8-1.8h4l2.1 2.5h8.3A1.8 1.8 0 0 1 21.4 9.5v8A1.8 1.8 0 0 1 19.6 19.3H5.2A1.8 1.8 0 0 1 3.4 17.5z"/>
     </symbol>
+    <symbol id="i-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="8" r="4"/>
+      <path d="M4.5 20.2c0-3.8 3.3-6.2 7.5-6.2s7.5 2.4 7.5 6.2"/>
+    </symbol>
 
     <!-- ---- 重试：环形箭头 ---- -->
     <symbol id="i-retry" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
@@ -295,6 +299,11 @@
            搜索功能本身没删 —— 顶部搜索栏回车后仍会渲染「搜索结果页」。 -->
       <div class="nav-item active" data-view="discovery">
         <span class="ico"><svg class="ic"><use href="#i-note"/></svg></span><span>发现</span>
+      </div>
+      <!-- 我的主页（v2.12.4 批三）：登录后直接看自己的收藏夹，点开像歌单一样播。
+           和「导入我的 B 站收藏夹」（侧栏 ⬇ 按钮）并存：那边是批量导入，这边是日常听。 -->
+      <div class="nav-item" data-view="my">
+        <span class="ico"><svg class="ic"><use href="#i-user"/></svg></span><span>我的主页</span>
       </div>
       <div class="nav-item" data-view="favorites">
         <span class="ico"><svg class="ic"><use href="#i-heart"/></svg></span><span>我喜欢</span>
