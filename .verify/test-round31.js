@@ -169,6 +169,56 @@ app.whenReady().then(async () => {
   else if (r6.onTitle !== '第2首') bad(`面板里高亮的不是正在播的那集（高亮了「${r6.onTitle}」）`);
   else ok('定位到合集行 + 自动打开选集面板 + 面板里高亮第 2 首');
 
+  /* ================= 4.6) UP 合集（season，每集 bvid 不同） ================= */
+  say('\n[4.6] UP 合集：每集 bvid 各不相同，播到第 18 集：');
+  await ev(`(() => {
+    /* season 型：入口行的 bvid 是第 1 集的 —— 随机播到第 18 集（bvid=EP18）时，
+       按 bvid 找入口行**必然落空**。这就是 Neo 抓的「有些合集连合集都定位不到」
+       （分P 型 bvid 相同能找到，season 型找不到）。入口行只能靠反查曲目表找到。 */
+    const entries = Array.from({ length: 20 }, (_, i) => ({
+      bvid: 'EP' + (i + 1), cid: 100 + i, page: 1, title: '第' + (i + 1) + '集', duration: 200,
+    }));
+    parsedView = {
+      info: { title: 'UP 合集', owner: { name: 'UP' } },
+      pages: [], seasonTracks: [],
+      tracks: [{ bvid: 'EP1', cid: 100, title: 'UP 合集', author: 'UP', duration: 1200, seasonCount: 20 }],
+    };
+    DB.collectParts['EP1'] = entries;
+    // 随机播放播到第 18 集
+    queue = {
+      tracks: [{ bvid: 'EP18', cid: 117, title: '第18集', author: 'UP', duration: 200 }],
+      index: 0, name: 'UP 合集', source: { view: 'parsed' },
+    };
+    currentView = 'parsed';
+    renderAll();
+    return true;
+  })()`);
+  await sleep(500);
+  const r7 = await ev(`(async () => {
+    let toastText = '';
+    const orig = window.toast;
+    window.toast = (m) => { toastText = String(m); };
+    locateCurrentTrack();
+    await new Promise((r) => setTimeout(r, 700));
+    window.toast = orig;
+    const maskOn = document.getElementById('collectMask').classList.contains('show');
+    const list = document.getElementById('collectList');
+    const onRow = list.querySelector('.collect-row.on');
+    return {
+      toastText, maskOn,
+      onTitle: onRow ? (onRow.querySelector('.ct') || {}).textContent || '' : '',
+      scrolled: list.scrollTop > 0,
+      listH: list.clientHeight,
+    };
+  })()`);
+  say(`    toast：「${r7.toastText}」 面板：${r7.maskOn} 高亮：「${r7.onTitle}」 滚动：${r7.scrolled}`);
+  if (r7.toastText.includes('找不到')) bad('season 合集按 bvid 找入口行落空 —— 还是弹「找不到」');
+  else if (!r7.maskOn) bad('season 合集没有打开选集面板');
+  else if (r7.onTitle !== '第18集') bad(`面板里高亮的不是第 18 集（高亮了「${r7.onTitle}」）`);
+  else ok('season 合集：反查曲目表找到入口行，面板打开并高亮第 18 集');
+  if (r7.onTitle === '第18集' && !r7.scrolled) bad('高亮了但没滚动到可视区（在屏幕外等于没定位）');
+  else if (r7.onTitle === '第18集') ok(`面板自动滚到了当前集（scrollTop > 0，列表高 ${r7.listH}px）`);
+
   /* ================= 5) 页面报错 ================= */
   say('\n[5] 页面报错：');
   if (errors.length) { errors.slice(0, 4).forEach((e) => say('    ' + e)); bad(`页面报了 ${errors.length} 条错`); }

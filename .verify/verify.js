@@ -5023,3 +5023,13 @@ if (!/no supported source/i.test(appjs) || !/音频流拿不到/.test(appjs)) {
 if (!/let openPanel = null/.test(appjs) || !/if \(openPanel\) expandCollection\(openPanel\)/.test(appjs)) {
   err('合集里的歌不能定位 —— 摊平条目要落到合集入口行并自动打开选集面板');
 } else ok('合集定位：落到入口行 + 自动打开选集面板（面板里高亮当前集）');
+
+/* v2.12.5 Neo 抓的续：season 型 UP 合集每集 bvid 各不相同，入口行按 bvid 找不到 ——
+   要反查曲目表（collectParts）；面板打开后还要把高亮行滚到可视区
+   （不滚的话高亮在第 40 集、打开看到第 1 集，等于没定位）。 */
+if (!/parts\.some\(\(e\) => e\.bvid === cur\.bvid/.test(appjs)) {
+  err('合集入口行只按 bvid 找 —— season 型 UP 合集（每集 bvid 不同）定位不到');
+} else ok('★ 合集入口行支持反查曲目表（season 型每集 bvid 不同也能定位）');
+if (!/collect-row\.on/.test(appjs) || !/centerInScroll\(\$\('collectList'\), onRow\)/.test(appjs)) {
+  err('选集面板打开后没有滚到当前集（高亮在屏幕外等于没定位）');
+} else ok('★ 选集面板自动滚动到正在播的那集');

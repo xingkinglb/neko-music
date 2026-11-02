@@ -2153,6 +2153,13 @@ function renderCollectList(filter) {
     : `<div class="err">没有匹配的条目</div>`;
 
   syncCollectBar();
+
+  /* v2.12.5：把「正在播的那集」滚到面板可视区中间。
+     ★ 不滚的话，高亮行排在第 40 集，打开面板看到的是第 1 集 ——
+       高亮其实做了，但用户看不见，体感就是「打开了面板却没有定位」
+       （Neo 抓的第二个反馈就是这个）。搜索过滤导致重画时也一样居中。 */
+  const onRow = document.querySelector('#collectList .collect-row.on');
+  if (onRow) centerInScroll($('collectList'), onRow);
 }
 
 /**
@@ -2483,7 +2490,19 @@ function scrollToCurrentRow(cur) {
      正好满足 Neo 要的"定位到合集位置，再在合集列表里定位到该歌曲"。 */
   let openPanel = null;
   if (i < 0 && cur && cur.bvid) {
-    i = tracks.findIndex((t) => t && !t.localPath && t.bvid === cur.bvid && maybeCollection(t));
+    /* 摊平条目在列表上没有自己的行 —— 找它所属的合集入口行。
+       ★ 要走两条路：**分P 型**入口和各集同一个 bvid，按 bvid 就能找到；
+         **UP 合集（season）每集 bvid 各不相同**，入口行的 bvid 是第 1 集的 ——
+         按 bvid 永远找不到，只能反查曲目表：哪个入口行的 collectParts 里含有这一首。
+         （Neo 抓的「有些合集能定位、有些连合集都定位不到」就是这两种类型的差异：
+          随机播放播到 season 合集的后几集时，入口行按 bvid 匹配必然落空。） */
+    i = tracks.findIndex((t) => {
+      if (!t || t.localPath || !t.bvid || !maybeCollection(t)) return false;
+      if (t.bvid === cur.bvid) return true;
+      const parts = DB.collectParts[t.bvid];
+      return !!(parts && parts.some((e) => e.bvid === cur.bvid
+        && (e.cid == null || cur.cid == null || String(e.cid) === String(cur.cid))));
+    });
     if (i >= 0) openPanel = tracks[i];
   }
 
