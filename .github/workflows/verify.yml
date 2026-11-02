@@ -31,10 +31,15 @@ jobs:
       - name: 取代码
         uses: actions/checkout@v4
 
+      # ★ 必须是 22，不能是 20。
+      #   .verify/ 下的脚本有 32 处写成 `xxx.matchAll(re).map(...)` —— matchAll 返回的是
+      #   **迭代器**而不是数组，能直接 .map 靠的是 Node 22 才有的 Iterator Helpers。
+      #   在 Node 20 上会当场 TypeError（appjs.matchAll(...).map is not a function），
+      #   整份自检连第一条断言都跑不到。src/ 里的产品代码没有这个写法，所以只影响自检。
       - name: 装 Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       # 三步分开写，不串成一行：红了的时候一眼能看出挂在哪一类，
       # 而不是只看到一个笼统的 "exit code 1"。
