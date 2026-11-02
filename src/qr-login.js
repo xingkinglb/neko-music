@@ -54,23 +54,61 @@ function toPath(qr) {
   return { path: parts.join(''), size: n + QUIET * 2 };
 }
 
-/** 从 poll 成功的 url 里抠出 cookie。
- *  B 站给的是 https://passport.biligame.com/crossDomain?DedeUserID=…&SESSDATA=…&bili_jct=…
- *  只取登录真正需要的几个字段；多带的字段一律不要（少存就少风险）。 */
-function cookieFromUrl(u) {
+/** 从 poll 成功的**响应头**里抠 cookie。
+ *  官方文档原话：「验证登录成功后会进行设置以下 cookie 项：DedeUserID / DedeUserID__ckMd5 /
+ *  SESSDATA / bili_jct」—— 也就是走 Set-Cookie 响应头。
+ *  ★ 这是 2026-11-02 真机扫码踩出来的：code=0 了，但 data.url 里抠不出 SESSDATA，
+ *    界面卡在「登录成功但没拿到 SESSDATA」。当时错在只认 data.url。 */
+function cookieFromSetCookie(res) {
+  let list = [];
   try {
-    const sp = new URL(u).searchParams;
-    const keys = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'];
-    const out = [];
-    for (const k of keys) {
-      const v = sp.get(k);
-      if (v) out.push(k + '=' + v);
+    if (res && res.headers && typeof res.headers.getSetCookie === 'function') {
+      list = res.headers.getSetCookie();   // Node 20 的 undici 提供的，能正确拆多条
+    } else {
+      const raw = (res && res.headers && res.headers.get('set-cookie')) || '';
+      // ★ 不能简单 split(',')：Expires=Wed, 21 Oct 2026 10:00:00 GMT 里也有逗号。
+      //   只在「逗号后面紧跟着 name=」时才切。
+      list = raw.split(/,(?=\s*[A-Za-z0-9_.#-]+=)/);
     }
-    // 没有 SESSDATA 就等于没登录 —— 宁可报失败，也别把半截 cookie 存进去
-    return /(^|; )SESSDATA=/.test(out.join('; ')) ? out.join('; ') : '';
   } catch {
     return '';
   }
+
+  const got = new Map();
+  for (const line of list) {
+    const head = String(line).split(';')[0];   // 去掉 Path / Expires / HttpOnly 那些属性
+    const i = head.indexOf('=');
+    if (i < 0) continue;
+    const k = head.slice(0, i).trim();
+    const v = head.slice(i + 1).trim();
+    if (v) got.set(k, v);                      // 值保持原样，不解码
+  }
+  return assembleCookie(got);
+}
+
+/** 从 data.url 里抠 cookie（老版本接口会带，留着当后备）。
+ *  ★ 不用 URL.searchParams：它会把 %2C 解成逗号，而 SESSDATA 的值里本来就带
+ *    **编码过的**逗号，解码后再拼回 Cookie 头，服务端会从逗号处截断 —— 看着有值，其实登录不了。 */
+function cookieFromUrl(u) {
+  const s = String(u || '');
+  const qi = s.indexOf('?');
+  if (qi < 0) return '';
+  const got = new Map();
+  for (const pair of s.slice(qi + 1).split('&')) {
+    const i = pair.indexOf('=');
+    if (i < 0) continue;
+    got.set(pair.slice(0, i), pair.slice(i + 1));
+  }
+  return assembleCookie(got);
+}
+
+const COOKIE_KEYS = ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid'];
+
+/** 只取登录真正需要的几个字段，按固定顺序拼。
+ *  没有 SESSDATA 一律当失败 —— 宁可报错，也别把半截 cookie 存进去当"登录了"。 */
+function assembleCookie(got) {
+  if (!got.has('SESSDATA')) return '';
+  return COOKIE_KEYS.filter((k) => got.has(k)).map((k) => k + '=' + got.get(k)).join('; ');
 }
 
 /** 生成一张新二维码。返回 { key, url, path, size } —— path 直接塞进 <path d>。 */
@@ -112,11 +150,26 @@ async function qrPoll(key) {
   if (c === 86090) return { state: 'scanned' };
   if (c === 86038) return { state: 'expired' };
   if (c === 0) {
-    const cookie = cookieFromUrl(j.data.url);
-    if (!cookie) return { state: 'error', message: '登录成功但没拿到 SESSDATA' };
+    // ★ 两个来源都试。Set-Cookie 是官方文档写的主路（真机上也是这条有值），
+    //   data.url 只是"游戏分站跨域登录地址"，新版不一定带 SESSDATA —— 留作后备。
+    let cookie = cookieFromSetCookie(res);
+    if (!cookie) cookie = cookieFromUrl(j.data && j.data.url);
+    if (!cookie) {
+      // 失败时把"到底拿到了什么"带出去 —— 只给字段名、不给值，不泄露凭据。
+      // 没有这个的话，下次再遇到只能瞎猜（这次就是这么卡住的）。
+      const hint = [];
+      try {
+        const sc = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+        hint.push('响应头: ' + (sc.map((x) => String(x).split('=')[0].trim()).filter(Boolean).join(' / ') || '空'));
+      } catch {
+        hint.push('响应头: 读不出来');
+      }
+      hint.push('data: ' + Object.keys(j.data || {}).join(' / '));
+      return { state: 'error', message: '登录成功但没拿到 SESSDATA（' + hint.join('；') + '）' };
+    }
     return { state: 'ok', cookie };
   }
   return { state: 'error', message: j.data.message || '未知状态 ' + c };
 }
 
-module.exports = { qrGenerate, qrPoll, toPath, cookieFromUrl };
+module.exports = { qrGenerate, qrPoll, toPath, cookieFromUrl, cookieFromSetCookie };
