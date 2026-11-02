@@ -350,12 +350,30 @@ if (/data-view="search"/.test(navBlock)) {
 } else if (firstView !== 'discovery') {
   err(`侧边栏第一项不是「发现」（现在是 ${firstView}）`);
 } else ok('侧边栏无「搜索」入口，且「发现」排在第一');
-if (!/const DISCOVERY_KEYWORDS = \['歌曲', '音乐'\]/.test(appjs) || !/api\('search', keyword, 1\)/.test(appjs)) {
-  err('发现页没有通过现有搜索 API 查询「歌曲」和「音乐」');
-} else ok('发现页通过现有搜索 API 查询歌曲与音乐');
-if (!/discoverySearchCache = new Map\(\)/.test(appjs) || !/unique\.has\(track\.bvid\)/.test(appjs) || !/pool\.slice\(0, DISCOVERY_SIZE\)/.test(appjs)) {
+/* v2.12.4：关键词从写死的常量改成可编辑的 chips。
+   默认值仍是「歌曲 / 音乐」（DEFAULT_DISCOVERY_KEYWORDS），
+   但真正用的是 discoveryCfg() 返回的（用户改过的优先）。 */
+if (!/const DEFAULT_DISCOVERY_KEYWORDS = \['歌曲', '音乐'\]/.test(appjs) || !/api\('search', keyword, 1\)/.test(appjs)) {
+  err('发现页没有通过现有搜索 API 查询关键词（默认「歌曲」和「音乐」）');
+} else ok('发现页通过现有搜索 API 查询关键词（默认歌曲与音乐，可自行增删改）');
+if (!/function discoveryCfg/.test(appjs) || !/discoveryChips/.test(appjs) || !/dchip-x/.test(appjs)) {
+  err('发现页的关键词标签（chips）没了 —— 改回写死的了？');
+} else if (!/saveDiscoveryCfg/.test(appjs) || !/discovery: \(old\.discovery && typeof old\.discovery === 'object'\)/.test(appjs)) {
+  err('关键词的改动没有存进存档（migrateSettings 里丢了 discovery 字段）');
+} else ok('关键词标签可点可删可加，改动写进存档');
+if (!/discoverySearchCache = new Map\(\)/.test(appjs) || !/unique\.has\(track\.bvid\)/.test(appjs) || !/pool\.slice\(0, cfg\.size\)/.test(appjs)) {
   err('发现页缺少会话搜索缓存、bvid 去重或随机展示数量限制');
-} else ok('发现页有会话内缓存、bvid 去重与最多 12 条抽样');
+} else ok('发现页有会话内缓存、bvid 去重与按用户设置的数量抽样');
+
+/* v2.12.4：列表排序（我喜欢 / 歌单）。★ 核心红线：只排**副本**。
+   sortedView 若直接 list.sort()，DB.favorites / DB.playlists 的原始顺序就被改掉了 ——
+   那是用户手动维护的顺序（以后的拖动排序也写在那里），排序一走它必须原样还原。 */
+if (!/function sortedView/.test(appjs) || !/return list\.slice\(\)\.sort\(/.test(appjs)) {
+  err('列表排序没有返回副本（sortedView 直接改了源数组，会污染手动排的顺序）');
+} else ok('列表排序：sortedView 排的是副本，源数据顺序不动');
+if (!/sortState\.view !== currentView/.test(appjs)) {
+  err('排序状态没有按视图隔离（会在别的页面误生效）');
+} else ok('排序状态按视图隔离（sortState.view 核对）');
 if (!/id="btnRefreshDiscovery"/.test(appjs) || !/function renderDiscovery/.test(appjs) || !/发现失败：/.test(appjs) || !/正在为你发现音乐/.test(appjs)) {
   err('发现页缺少刷新或加载 / 空 / 错误状态 UI');
 } else ok('发现页有刷新按钮及加载、空、错误状态');

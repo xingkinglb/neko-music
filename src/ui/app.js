@@ -755,6 +755,10 @@ function migrateSettings() {
       ? Math.round(old.opsOpacity) : DEFAULT_SETTINGS.opsOpacity,
     // v2.12.0：AI 歌词。老存档没有这一项 → 全默认（关着，不花钱）。
     aiLyrics: sanitizeAiLyrics(old.aiLyrics),
+    // v2.12.4：发现页的关键词和数量。老存档没有 → null（discoveryCfg() 会给默认值）。
+    // ★ 这里只做"原样保留"，规范化（去重 / 夹范围）在 discoveryCfg() 里做 ——
+    //   migrateSettings 每次启动都跑，把校验放那边等于每次启动都白做一遍。
+    discovery: (old.discovery && typeof old.discovery === 'object') ? old.discovery : null,
   };
   if (typeof old.theme === 'string') DB.settings.theme = old.theme;
   if (typeof old.volume === 'number') DB.settings.volume = old.volume;
@@ -3004,8 +3008,35 @@ let discoveryLoading = false;
 let discoveryError = '';
 let discoveryPromise = null;
 const discoverySearchCache = new Map();
-const DISCOVERY_KEYWORDS = ['歌曲', '音乐'];
-const DISCOVERY_SIZE = 12;
+
+/* ---------------- 发现页的关键词与数量（v2.12.4） ----------------
+   ★ 关键词和数量都可以自己改（见 renderDiscovery 里那排小标签）。
+     用户改过的存进 settings.discovery；没改过（null）就用这里的默认 ——
+     默认单独放常量而不是写死在读档逻辑里，将来想调默认词也不会覆盖用户改好的。 */
+const DEFAULT_DISCOVERY_KEYWORDS = ['歌曲', '音乐'];
+const DISCOVERY_SIZE_DEFAULT = 12;
+const DISCOVERY_SIZE_MIN = 3;
+const DISCOVERY_SIZE_MAX = 50;
+
+/** 读发现页配置。永远返回合法值：关键词 1~10 个（去重、去空白），数量夹在范围内。 */
+function discoveryCfg() {
+  const d = DB.settings.discovery;
+  let kws = Array.isArray(d && d.keywords)
+    ? d.keywords.map((k) => String(k).trim()).filter(Boolean)
+    : [];
+  if (!kws.length) kws = DEFAULT_DISCOVERY_KEYWORDS.slice();
+  kws = [...new Set(kws)].slice(0, 10);
+  const raw = d == null ? NaN : Number(d.size);
+  const size = Math.min(DISCOVERY_SIZE_MAX, Math.max(DISCOVERY_SIZE_MIN, Number.isFinite(raw) ? Math.round(raw) : DISCOVERY_SIZE_DEFAULT));
+  return { keywords: kws, size };
+}
+
+/** 把（已规范化的）配置写回存档。关键词一变，旧的搜索缓存就全作废了。 */
+function saveDiscoveryCfg(cfg) {
+  DB.settings.discovery = cfg;
+  discoverySearchCache.clear();
+  persistLater();
+}
 
 async function renderSearch() {
   if (!searchResults.length) {
@@ -3068,11 +3099,20 @@ function renderDiscovery() {
     content().innerHTML = `<div class="empty"><div class="big">${ic('i-note')}</div><div class="msg">暂时没有发现音乐</div><div class="hint">试试刷新，稍后再来看看</div><button class="ghost-btn" id="btnRefreshDiscovery">刷新</button></div>`;
     return;
   }
+  const cfg = discoveryCfg();
   content().innerHTML = `
     <div class="block-head">
       <div>
         <div class="block-title">发现</div>
-        <div class="block-sub">从「歌曲」和「音乐」中随机挑选 · ${discoveryResults.length} 个视频</div>
+        <div class="discovery-chips" id="discoveryChips">
+          ${cfg.keywords.map((k) => `
+            <span class="dchip" data-kw="${esc(k)}" title="点击改名">${esc(k)}<button class="dchip-x" data-dx="${esc(k)}" title="删除这个关键词">×</button></span>`).join('')}
+          ${cfg.keywords.length < 10 ? `<button class="dchip dchip-add" id="btnDchipAdd" title="加一个关键词">＋</button>` : ''}
+          <span class="dchip-size" title="一次挑出多少个视频（点数字可以直接输入）">数量
+            <button class="mini-btn" id="dsizeMinus">−</button><b id="dsizeVal">${cfg.size}</b><button class="mini-btn" id="dsizePlus">＋</button>
+          </span>
+        </div>
+        <div class="block-sub">从上面这些关键词里随机挑选 · ${discoveryResults.length} 个视频 · 改完关键词会自动重新挑一批</div>
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayDiscovery">${ic('i-play')}<span>播放全部</span></button>
@@ -3080,6 +3120,60 @@ function renderDiscovery() {
       </div>
     </div>
     ${trackListHTML(discoveryResults)}`;
+
+  /* ---- 关键词 / 数量的编辑（v2.12.4） ---- */
+  // loadDiscovery(true) 自己会把页面切成 loading → 新结果，不需要 renderAll
+  const reload = () => loadDiscovery(true);
+  // 点标签本体 = 改名（用 ✕ 删除、＋ 新增，避免三个动作挤在一个小标签上互相误触）
+  document.querySelectorAll('#discoveryChips .dchip[data-kw]').forEach((el) => {
+    el.addEventListener('click', async (e) => {
+      if (e.target.classList.contains('dchip-x')) return;   // 点到 ✕ 交给删除那条管
+      const old = el.dataset.kw;
+      const name = await askName('改关键词', old, '改好');
+      if (name == null || name === old) return;
+      const c = discoveryCfg();
+      c.keywords = c.keywords.map((k) => (k === old ? name : k));
+      saveDiscoveryCfg(c);
+      reload();
+    });
+  });
+  // ✕ = 删。至少要留一个 —— 全删光就不知道该搜什么了
+  document.querySelectorAll('#discoveryChips .dchip-x').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const c = discoveryCfg();
+      if (c.keywords.length <= 1) { toast('至少留一个关键词'); return; }
+      c.keywords = c.keywords.filter((k) => k !== el.dataset.dx);
+      saveDiscoveryCfg(c);
+      reload();
+    });
+  });
+  const addKw = $('btnDchipAdd');
+  if (addKw) addKw.addEventListener('click', async () => {
+    const name = (await askName('加关键词', '', '加上')) || '';
+    const word = name.trim();
+    if (!word) return;
+    const c = discoveryCfg();
+    if (c.keywords.includes(word)) { toast('已经有这个关键词了'); return; }
+    c.keywords.push(word);
+    saveDiscoveryCfg(c);
+    reload();
+  });
+  // 数量：−/＋ 每次步进 5；点数字直接输入想要的值
+  const setSize = (v) => {
+    const c = discoveryCfg();
+    const next = Math.min(DISCOVERY_SIZE_MAX, Math.max(DISCOVERY_SIZE_MIN, Math.round(v)));
+    if (next === c.size) return;
+    c.size = next;
+    saveDiscoveryCfg(c);
+    reload();
+  };
+  $('dsizeMinus').addEventListener('click', () => setSize(discoveryCfg().size - 5));
+  $('dsizePlus').addEventListener('click', () => setSize(discoveryCfg().size + 5));
+  $('dsizeVal').addEventListener('click', async () => {
+    const v = parseInt(await askName('一次挑出多少个视频（3~50）', String(discoveryCfg().size), '确定'), 10);
+    if (Number.isFinite(v)) setSize(v);
+  });
 }
 
 async function loadDiscovery(refresh = false) {
@@ -3091,7 +3185,8 @@ async function loadDiscovery(refresh = false) {
   renderDiscovery();
   discoveryPromise = (async () => {
     try {
-      const batches = await Promise.all(DISCOVERY_KEYWORDS.map(async (keyword) => {
+      const cfg = discoveryCfg();
+      const batches = await Promise.all(cfg.keywords.map(async (keyword) => {
         if (!discoverySearchCache.has(keyword)) {
           const request = api('search', keyword, 1).then((res) => res.list.map((v) => ({
             bvid: v.bvid, cid: null, page: 1, title: v.title, author: v.author,
@@ -3111,7 +3206,7 @@ async function loadDiscovery(refresh = false) {
         const j = Math.floor(Math.random() * (i + 1));
         [pool[i], pool[j]] = [pool[j], pool[i]];
       }
-      discoveryResults = pool.slice(0, DISCOVERY_SIZE);
+      discoveryResults = pool.slice(0, cfg.size);
     } catch (err) {
       discoveryError = err.message || '请检查网络后重试';
     } finally {
@@ -3344,9 +3439,85 @@ function listSearchHTML() {
 /** 当前页面的列表区 HTML。
  *  ★ 搜索时**只替换这一块**（见 refreshListOnly）—— 重画整个 content 会让输入框
  *    失焦、光标跳到开头，一个字都打不连续。 */
+/* ---------------- 列表排序（v2.12.4） ----------------
+   ★ 只改显示，绝不动源数据 —— 这是 Neo 拍板的（"只改显示"）。
+     歌单里手动排的顺序（以后的拖动排序）写在 DB.playlists 里，
+     排序视图要是把它改了，两边就打架了。切走视图自动还原。
+   ★ "添加顺序"没有精确时间戳：favorites 是新的插在最前（[track, ...old]），
+     所以数组原始顺序 = 添加时间倒序，直接用它当代理，不需要给老数据补字段。 */
+let sortState = null;   // { view, by, dir }；null = 没排序
+
+const SORT_OPTIONS = [
+  { by: 'title',    name: '歌名' },
+  { by: 'artist',   name: '歌手 / UP 主' },
+  { by: 'duration', name: '时长' },
+  { by: 'added',    name: '添加顺序' },
+];
+
+/** 把列表按当前排序状态排一份**副本**。没排序 / 视图对不上 → 原样返回。 */
+function sortedView(list) {
+  if (!sortState || sortState.view !== currentView || !Array.isArray(list)) return list;
+  if (sortState.by === 'added') {
+    // 数组顺序就是添加时间倒序（见上面注释），升降序就是正/反
+    return sortState.dir === 1 ? list.slice().reverse() : list.slice();
+  }
+  const cmp = {
+    // 中文按拼音排（localeCompare 指定 zh 地区）；numeric 让"第2首"排在"第10首"前面
+    title:  (a, b) => String(a.title  || '').localeCompare(String(b.title  || ''), 'zh-Hans-CN', { numeric: true }),
+    artist: (a, b) => String(a.author || '').localeCompare(String(b.author || ''), 'zh-Hans-CN', { numeric: true }),
+    duration: (a, b) => (a.duration || 0) - (b.duration || 0),
+  }[sortState.by];
+  if (!cmp) return list;
+  return list.slice().sort((a, b) => cmp(a, b) * sortState.dir);
+}
+
+/** 「排序」按钮 + 弹出菜单（我喜欢 / 歌单两个页面共用）。
+ *  交互和文件管理器一致：点某一项 → 按它升序；再点同一项 → 换降序；第三次点 → 取消。 */
+function sortBtnHTML() {
+  const cur = sortState && sortState.view === currentView ? SORT_OPTIONS.find((o) => o.by === sortState.by) : null;
+  const label = cur ? `排序：${cur.name}${sortState.dir === 1 ? ' ↑' : ' ↓'}` : '排序';
+  const items = SORT_OPTIONS.map((o) => {
+    const active = cur && cur.by === o.by;
+    return `<button class="sort-item${active ? ' on' : ''}" data-by="${o.by}">${o.name}${active ? (sortState.dir === 1 ? ' ↑' : ' ↓') : ''}</button>`;
+  }).join('');
+  return `<span class="sort-wrap">
+    <button class="ghost-btn${cur ? ' on' : ''}" id="btnSort">${ic('i-order')}<span>${esc(label)}</span></button>
+    <span class="sort-menu" id="sortMenu">${items}</span>
+  </span>`;
+}
+
+/** 给刚渲染出来的排序按钮绑事件。两个页面各自渲染后都调它。 */
+function bindSortBtn() {
+  const btn = $('btnSort');
+  const menu = $('sortMenu');
+  if (!btn || !menu) return;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const show = !menu.classList.contains('show');
+    menu.classList.toggle('show', show);
+    // 菜单开着的时候，点页面任何别处都把它关掉（只挂一次，点了就摘）
+    if (show) document.addEventListener('click', () => menu.classList.remove('show'), { once: true });
+  });
+  menu.addEventListener('click', (e) => {
+    const by = e.target && e.target.dataset && e.target.dataset.by;
+    if (!by) return;
+    e.stopPropagation();
+    if (sortState && sortState.view === currentView && sortState.by === by) {
+      // 同一项：升 → 降 → 取消，回到没排序
+      if (sortState.dir === 1) sortState.dir = -1;
+      else sortState = null;
+    } else {
+      sortState = { view: currentView, by, dir: 1 };
+    }
+    renderAll();
+  });
+}
+
 function currentListHTML() {
   const picking = !!selPick;
-  const list = currentTracks();
+  // ★ 排序只影响显示：sortedView 返回的是排好序的**副本**，且自带视图核对
+  //   （sortState.view 对不上当前视图就原样返回，所以在别的页面不会误生效）
+  const list = sortedView(currentTracks());
   const q = listSearchQuery();
   const innerHits = q ? (t) => collectInnerHits(t, q) : null;
   const emptyHint = q ? '换个关键词试试，或者点右边的 ✕ 清空搜索' : '';
@@ -3428,11 +3599,13 @@ function renderFavorites() {
       </div>
       ${listSearchHTML()}
       <div class="block-actions">
+        ${sortBtnHTML()}
         <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectFav">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
       </div>
     </div>
     ${picking ? selBarHTML() : ''}
     <div id="listBody">${currentListHTML()}</div>`;
+  bindSortBtn();
 }
 
 /* ---------- 页面 4：最近播放 ---------- */
@@ -3466,6 +3639,7 @@ function renderPlaylist(playlistId) {
       </div>
       ${listSearchHTML()}
       <div class="block-actions">
+        ${sortBtnHTML()}
         <button class="ghost-btn${picking ? ' on' : ''}" id="btnSelectPl">${ic('i-check')}<span>${picking ? '退出批量选择' : '批量选择'}</span></button>
         <button class="ghost-btn" id="btnRenamePl">重命名</button>
         <button class="ghost-btn" id="btnDelPl">删除歌单</button>
@@ -3473,6 +3647,7 @@ function renderPlaylist(playlistId) {
     </div>
     ${picking ? selBarHTML() : ''}
     <div id="listBody">${currentListHTML()}</div>`;
+  bindSortBtn();
 }
 
 /* ---------- 页面 6：导入收藏夹 ---------- */
