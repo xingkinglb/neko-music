@@ -11,6 +11,7 @@
 ![platform](https://img.shields.io/badge/platform-Windows-4c8dff)
 ![electron](https://img.shields.io/badge/Electron-33-37d6c0)
 ![node](https://img.shields.io/badge/node-%E2%89%A518-9be36f)
+![自检](https://github.com/xingkinglb/neko-music/actions/workflows/verify.yml/badge.svg?branch=main)
 
 <img src="docs/images/hero.png" alt="Neko Music 主界面：发现页 + 动态背景" width="880">
 
