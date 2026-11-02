@@ -127,6 +127,48 @@ app.whenReady().then(async () => {
   if (!r4.my || !r4.folder || !r4.old) bad(`定位来源恢复没认全新视图：${JSON.stringify(r4)}`);
   else ok('my / myfolder / playlist 都能恢复来源');
 
+  /* ================= 4.5) 合集摊平条目 → 打开选集面板 ================= */
+  say('\n[4.5] 合集里的歌（摊平条目在列表上没有自己的行）：');
+  await ev(`(() => {
+    // 解析页：列表上只有一行合集入口（cid 是 1P 的，parts 记了 3 —— 有「选集」徽章）
+    parsedView = {
+      info: { title: '音乐合集', owner: { name: 'UP' } },
+      pages: [{ cid: 1, duration: 300 }],
+      seasonTracks: [],
+      tracks: [{ bvid: 'BVpp', cid: 1, title: '音乐合集', author: 'UP', duration: 900, parts: 3 }],
+    };
+    // 曲目表（分P 摊平后每集 cid 不同 —— 这就是入口行和摊平条目"sameTrack 对不上"的原因）
+    DB.collectParts['BVpp'] = [
+      { bvid: 'BVpp', cid: 1, page: 1, title: '第1首', duration: 300 },
+      { bvid: 'BVpp', cid: 2, page: 2, title: '第2首', duration: 300 },
+      { bvid: 'BVpp', cid: 3, page: 3, title: '第3首', duration: 300 },
+    ];
+    queue = {
+      tracks: [{ bvid: 'BVpp', cid: 2, title: '第2首', author: 'UP', duration: 300 }],
+      index: 0, name: '音乐合集', source: { view: 'parsed' },
+    };
+    currentView = 'parsed';
+    renderAll();
+    return true;
+  })()`);
+  await sleep(500);
+  const r6 = await ev(`(async () => {
+    let toastText = '';
+    const orig = window.toast;
+    window.toast = (m) => { toastText = String(m); };
+    locateCurrentTrack();
+    await new Promise((r) => setTimeout(r, 700));
+    window.toast = orig;
+    const maskOn = document.getElementById('collectMask').classList.contains('show');
+    const onRow = document.querySelector('#collectList .collect-row.on');
+    return { toastText, maskOn, onTitle: onRow ? (onRow.querySelector('.ct') || {}).textContent || '' : '' };
+  })()`);
+  say(`    toast：「${r6.toastText}」 面板打开：${r6.maskOn} 面板高亮：「${r6.onTitle}」`);
+  if (r6.toastText.includes('找不到')) bad('合集摊平条目定位失败 —— 还是弹「找不到」');
+  else if (!r6.maskOn) bad('定位到了合集行但没有自动打开选集面板');
+  else if (r6.onTitle !== '第2首') bad(`面板里高亮的不是正在播的那集（高亮了「${r6.onTitle}」）`);
+  else ok('定位到合集行 + 自动打开选集面板 + 面板里高亮第 2 首');
+
   /* ================= 5) 页面报错 ================= */
   say('\n[5] 页面报错：');
   if (errors.length) { errors.slice(0, 4).forEach((e) => say('    ' + e)); bad(`页面报了 ${errors.length} 条错`); }

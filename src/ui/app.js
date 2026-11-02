@@ -224,6 +224,13 @@ function isPlayInterrupted(err) {
 function cleanPlayError(err) {
   const msg = String((err && err.message) || err || '').trim();
   const cut = msg.replace(/\s*https?:\/\/\S+\s*$/i, '').trim();
+  // MEDIA_ERR_SRC_NOT_SUPPORTED（no supported source）：bili:// 转出来的流 Chromium 解不了 ——
+  // 几乎都是 B 站那边没给有效音频（风控 / 地址失效 / 该视频没有音频流），
+  // 不是软件坏了；playAt 里失败后会自动跳下一首，不会卡死。
+  // 原文是 Chromium 的英文原话，用户看不懂，翻译成人话。
+  if (/no supported source/i.test(cut)) {
+    return '这个视频的音频流拿不到（可能被限流或已失效），已自动跳下一首';
+  }
   return cut || '这首歌的音频地址取不到，换一首试试';
 }
 
@@ -2461,17 +2468,33 @@ function scrollToCurrentRow(cur) {
      这里放宽成：bvid 相同、且**任一边 cid 缺失**就认定是同一首 ——
      对单P 歌单完全正确；分P 的歧义（同 bvid 多集）只在两边 cid 都齐全时才存在，
      那种情况 sameTrack 依然严格。定位本身只是滚动+高亮，宽一点没有代价。 */
-  const i = tracks.findIndex((t) => {
+  const match = (t) => {
     if (sameTrack(t, cur)) return true;
     return !!(t && cur && t.bvid && t.bvid === cur.bvid
       && !t.localPath && !cur.localPath
       && (t.cid == null || cur.cid == null));
-  });
+  };
+  let i = tracks.findIndex(match);
+
+  /* 合集（分P / season）摊平后的条目在列表里**没有自己的行** —— 列表上只有一行入口，
+     它的 cid 和摊平条目对不上（分P 每集 cid 不同），所以上面那步找不到。
+     这时找 bvid 相同的合集入口行：滚过去、高亮，然后**打开选集面板** ——
+     面板的渲染本来就会把正在播的那集高亮（renderCollectList 里的 sameTrack(e, cur)），
+     正好满足 Neo 要的"定位到合集位置，再在合集列表里定位到该歌曲"。 */
+  let openPanel = null;
+  if (i < 0 && cur && cur.bvid) {
+    i = tracks.findIndex((t) => t && !t.localPath && t.bvid === cur.bvid && maybeCollection(t));
+    if (i >= 0) openPanel = tracks[i];
+  }
+
   if (i < 0) return false;
   const row = document.querySelectorAll('#content .track')[i];
   if (!row) return false;
   centerInScroll(content(), row);
   flashRow(row);
+  // 打开面板要放在高亮之后 —— 面板是模态的（collectMask 盖住界面），
+  // 先开面板的话那一下 flashRow 就被盖住了，看不到"先落在合集行上"的过渡
+  if (openPanel) expandCollection(openPanel);
   return true;
 }
 

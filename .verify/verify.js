@@ -5013,3 +5013,13 @@ if (!/t\.cid == null \|\| cur\.cid == null/.test(appjs)) {
 if (!/view === 'my' \|\| view === 'myfolder'/.test(appjs)) {
   err('locateCanRestore 没认得 my / myfolder（我的主页里点定位会退回队列抽屉）');
 } else ok('locateCanRestore 认得我的主页的新视图');
+
+/* v2.12.5 Neo 抓的：播放失败弹 Chromium 原话（no supported source），用户看不懂。
+   翻译成人话：音频流拿不到（风控/失效），且 playAt 本来就会自动跳下一首。 */
+if (!/no supported source/i.test(appjs) || !/音频流拿不到/.test(appjs)) {
+  err('播放失败没翻译 MEDIA_ERR_SRC_NOT_SUPPORTED（还在弹 Chromium 英文原话）');
+} else ok('播放失败错误已翻译（no supported source → 音频流拿不到）');
+/* 合集定位：摊平条目在列表上没有自己的行，要落到合集入口行并自动打开选集面板。 */
+if (!/let openPanel = null/.test(appjs) || !/if \(openPanel\) expandCollection\(openPanel\)/.test(appjs)) {
+  err('合集里的歌不能定位 —— 摊平条目要落到合集入口行并自动打开选集面板');
+} else ok('合集定位：落到入口行 + 自动打开选集面板（面板里高亮当前集）');
