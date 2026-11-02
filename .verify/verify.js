@@ -5002,3 +5002,14 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
 
 if (fail === 0) console.log('\n全部静态自检通过 ✅（共 64 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
+
+/* v2.12.5 Neo 抓的老 bug：定位按钮在歌单里永远失败。
+   播放时 ensureCid 补的是**队列副本**的 cid，源列表（从搜索加进来的歌）cid 还是 null，
+   sameTrack 严格比 cid → null ≠ 202 → 永远「这个列表里已经找不到这一首了」。
+   scrollToCurrentRow 必须放宽：cid 任一边缺失就按 bvid 认（分P 歧义只在两边都有 cid 时存在）。 */
+if (!/t\.cid == null \|\| cur\.cid == null/.test(appjs)) {
+  err('定位还是严格比 cid —— 歌单里 cid=null 的歌永远定位不到');
+} else ok('★ 定位用放宽匹配：播过的歌在歌单 / 我喜欢里能定位了');
+if (!/view === 'my' \|\| view === 'myfolder'/.test(appjs)) {
+  err('locateCanRestore 没认得 my / myfolder（我的主页里点定位会退回队列抽屉）');
+} else ok('locateCanRestore 认得我的主页的新视图');

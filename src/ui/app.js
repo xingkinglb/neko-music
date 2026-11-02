@@ -2404,6 +2404,8 @@ function closeQueue() {
 function locateCanRestore(view) {
   if (!view) return false;
   if (view === 'favorites' || view === 'history' || view === 'local') return true;
+  // v2.12.5：我的主页 / 它点开的收藏夹也能定位（my 页本身没列表，会退回队列抽屉）
+  if (view === 'my' || view === 'myfolder') return true;
   if (view.startsWith('playlist:')) {
     const id = view.slice('playlist:'.length);
     return DB.playlists.some((p) => p.id === id);
@@ -2451,7 +2453,20 @@ function flashQueueCurrent() {
  *    一个上千首的歌单平滑滚到第 800 行要滚好几秒，反而不像"定位"。 */
 function scrollToCurrentRow(cur) {
   const tracks = currentTracks();
-  const i = tracks.findIndex((t) => sameTrack(t, cur));
+  /* ★ 定位用"放宽版"匹配，不能直接 sameTrack：
+     播放时 ensureCid 补的是**队列副本**的 cid，源列表（歌单 / 收藏）里那首歌的 cid
+     常常还是 null（从搜索加进来的歌都是播放时才补的）——
+     按 sameTrack 严格比 cid 的话，null ≠ 补齐后的 202，「定位」在歌单里
+     永远找不到刚播过的那首，只会一直弹"已经找不到这一首了"（Neo 抓的老 bug）。
+     这里放宽成：bvid 相同、且**任一边 cid 缺失**就认定是同一首 ——
+     对单P 歌单完全正确；分P 的歧义（同 bvid 多集）只在两边 cid 都齐全时才存在，
+     那种情况 sameTrack 依然严格。定位本身只是滚动+高亮，宽一点没有代价。 */
+  const i = tracks.findIndex((t) => {
+    if (sameTrack(t, cur)) return true;
+    return !!(t && cur && t.bvid && t.bvid === cur.bvid
+      && !t.localPath && !cur.localPath
+      && (t.cid == null || cur.cid == null));
+  });
   if (i < 0) return false;
   const row = document.querySelectorAll('#content .track')[i];
   if (!row) return false;
