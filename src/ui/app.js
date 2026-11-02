@@ -7798,6 +7798,20 @@ function updateVolumeUI(v) {
 }
 
 function bindEvents() {
+  /* 退出兜底（v2.12.5）：persist（300ms）和 saveQueueSoon（800ms）都是防抖落盘，
+     关窗时机不巧（防抖还没响）会丢最近一次改动 —— 歌单里加的歌、刚切的队列位置。
+     beforeunload 里用**单向消息**把两份状态立即推给主进程写盘：
+     send 入队即达，不依赖 invoke 的往返响应（退出场景下那个不可靠）。
+     ★ 整个 try 包住 —— 退出路径上任何异常都不许挡住窗口关闭。 */
+  window.addEventListener('beforeunload', () => {
+    try {
+      if (DB && typeof DB === 'object' && window.neko.storeSaveNow) window.neko.storeSaveNow(DB);
+      if (queue && queue.tracks && window.neko.queueSaveNow) {
+        window.neko.queueSaveNow({ tracks: queue.tracks, index: queue.index, name: queue.name });
+      }
+    } catch { /* 同上 */ }
+  });
+
   /* ---- 顶部搜索框：按回车搜索 ---- */
   $('searchInput').addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;

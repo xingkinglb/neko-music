@@ -115,6 +115,12 @@ contextBridge.exposeInMainWorld('neko', {
   queueLoad: () => ipcRenderer.invoke('queue:load'),
   queueSave: (data) => ipcRenderer.invoke('queue:save', data),
 
+  // ---------- 退出兜底（v2.12.5，单向消息） ----------
+  // beforeunload 里用。★ 为什么是 send 不是 invoke：退出场景下 invoke 的
+  // "往返响应"不可靠，send 只要消息进入主进程事件队列就一定会被处理。
+  storeSaveNow: (data) => ipcRenderer.send('store:save:now', data),
+  queueSaveNow: (data) => ipcRenderer.send('queue:save:now', data),
+
   // ---------- 关于 / 检查更新（v2.12.4） ----------
   // 版本号从主进程的 package.json 读（渲染层拿不到）
   appVersion: () => ipcRenderer.invoke('app:version'),

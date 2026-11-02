@@ -16,6 +16,8 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..');
+const queueStore = require(path.join(ROOT, 'src', 'queue-store.js'));
+const Q31FILE = path.join(ROOT, '.verify', 'tmp-round31-queue.json');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let fail = 0;
 const ok = (m) => console.log('  ✓ ' + m);
@@ -31,6 +33,8 @@ ipcMain.handle('bili:hasCookie', () => ({ ok: true, data: false }));
 ipcMain.handle('bg:pick', () => ({ ok: true, data: null }));
 ipcMain.handle('queue:load', () => ({ ok: true, data: null }));
 ipcMain.handle('queue:save', () => ({ ok: true, data: true }));
+/* 退出兜底的接收端（和 main.js 里同一个 queue-store —— 真代码真落盘） */
+ipcMain.on('queue:save:now', (_e, d) => { queueStore.save(Q31FILE, d); });
 ipcMain.handle('bili:audioUrl', () => ({ ok: true, data: { url: 'bili://x', duration: 200, backup: [] } }));
 require('./stub-download-ipc.js')();
 
@@ -260,6 +264,27 @@ app.whenReady().then(async () => {
   else if (!r8.inView) bad('第 90 行没滚进可视区');
   else if (!r8.viewStable) bad('定位把页面跳走了 —— 队列定位只许在抽屉里滚动');
   else ok('清搜索 → 滚到第 90 行 → 闪一下，全程没有离开队列抽屉');
+
+  /* ================= 4.8) 退出兜底：防抖没落盘就关窗，也不丢 ================= */
+  say('\n[4.8] 退出兜底（beforeunload 单向消息）：');
+  /* 队列保存有 800ms 防抖 —— 改完立刻关窗，改动会丢。
+     修复后：beforeunload 里用单向消息把队列立即推给主进程写盘。
+     这里模拟"改了 index 但防抖还没响就关窗"：reload 触发 beforeunload，
+     真实的 queue:save:now 处理器（本脚本注册的，走同一个 queue-store）应该立刻落盘。 */
+  await ev(`(() => {
+    queue.index = 33;          // 改动只在内存里，防抖 800ms 还没响
+    saveQueueSoon();           // 挂上防抖，但下面不等它
+    return true;
+  })()`);
+  fs.existsSync(Q31FILE) && fs.unlinkSync(Q31FILE);   // 先删掉旧文件，防串
+  win.webContents.reload();   // ← 触发 beforeunload（send 立即推），不等防抖
+  await sleep(500);           // 只等 500ms —— 连防抖的一半都不到
+  const r9 = fs.existsSync(Q31FILE)
+    ? (JSON.parse(fs.readFileSync(Q31FILE, 'utf8')).index)
+    : '(没有文件)';
+  say(`    reload 后 500ms（防抖尚未到期），落盘的 index = ${r9}`);
+  if (r9 === 33) ok('beforeunload 的兜底生效了 —— 防抖没响也立刻落盘');
+  else bad(`退出兜底没生效（拿到 ${r9}，期望 33）—— "改完立刻关窗"会丢队列位置`);
 
   /* ================= 5) 页面报错 ================= */
   say('\n[5] 页面报错：');

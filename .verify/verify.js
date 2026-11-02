@@ -5043,3 +5043,14 @@ if (!/id="btnQueueLocate"/.test(html)) {
 } else if (!/\$\('queueSearch'\)\.value = '';\s*\n\s*renderQueueList\(''\);/.test(appjs)) {
   err('队列定位没有先清搜索 —— 过滤中正在播的行不在渲染里，定位会失败');
 } else ok('★ 队列专属定位：清搜索 → 滚动 → 闪，全程不出抽屉');
+
+/* v2.12.5 最终体检发现的隐患：persist（300ms）/ saveQueueSoon（800ms）防抖期间关窗，
+   最近一次改动会丢（历史存在的洞，队列记忆让它更容易被感知）。
+   修复：beforeunload 里用**单向消息**立即推给主进程写盘 —— send 入队即达，
+   退出场景下 invoke 的往返响应不可靠；saveStore 抽出供正常保存和兜底共用。 */
+if (!/beforeunload/.test(appjs) || !/storeSaveNow/.test(appjs) || !/queueSaveNow/.test(appjs)) {
+  err('没有退出兜底 —— 防抖期间关窗会丢最近一次改动');
+} else ok('★ 退出兜底：beforeunload 单向消息立即落盘（主存档 + 队列）');
+if (!/const saveStore = \(data\) =>/.test(mainjs) || !/ipcMain\.on\('store:save:now'/.test(mainjs)) {
+  err('saveStore 没抽出来共用 / 主进程没接退出兜底消息');
+} else ok('saveStore 抽出共用，主进程接得住兜底消息');

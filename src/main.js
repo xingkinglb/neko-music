@@ -1202,7 +1202,8 @@ function registerHandlers() {
 
   // 存档写成"原子操作"：先写临时文件，写完了再改名顶替。
   // 这样万一写到一半断电/崩溃，原来的好文件还在，不会出现"存档变空"的惨剧。
-  handle('store:save', (data) => {
+  // ★ v2.12.5 抽成 saveStore：正常保存（handle）和退出兜底（store:save:now）共用一份。
+  const saveStore = (data) => {
     if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('存档数据格式无效');
     fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
     const tmp = DATA_FILE + '.tmp';
@@ -1217,6 +1218,23 @@ function registerHandlers() {
     //   否则新导入的歌要等下一次 load 才能播（表现为"刚加进来点了没反应"）。
     refreshLibraryCache(data);
     return true;
+  };
+
+  handle('store:save', (data) => {
+    saveStore(data);
+    return true;
+  });
+
+  /* 退出兜底（v2.12.5）：渲染层 beforeunload 时用**单向消息**把没落盘的改动推过来。
+     ★ 为什么不用 invoke：退出场景下 invoke 的"往返响应"不可靠 —— 渲染进程可能
+     等不到回复就没了。send 只要消息进了主进程事件队列就**一定会被处理**：
+     关窗瞬间消息已入队，主进程还活着（window-all-closed → app.quit 还要走几步）。
+     队列保存有 800ms 防抖、主存档 300ms —— 不加这个兜底，"改完立刻关窗"会丢。 */
+  ipcMain.on('store:save:now', (_e, data) => {
+    try { saveStore(data); } catch (err) { console.error('[store:save:now]', err.message); }
+  });
+  ipcMain.on('queue:save:now', (_e, data) => {
+    try { queueStore.save(QUEUE_FILE, data); } catch (err) { console.error('[queue:save:now]', err.message); }
   });
 
   // 界面右上角自绘的三个窗口按钮：最小化 / 最大化(切换) / 关闭
