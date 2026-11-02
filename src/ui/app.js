@@ -2581,6 +2581,19 @@ function bindQueue() {
     if (row) goTo(Number(row.dataset.qi));   // 走 goTo：随机模式的"上一首"才回得去
   });
 
+  /* 队列专属的定位（v2.12.5，Neo 要的）：只在抽屉里滚到正在播的那行、闪一下，
+     **不跳去任何页面** —— 播放条上那个准星是"跳回来源列表"，这个是"就在队列里找"。
+     队列上千首（他的 1138 首）时，正在播的那行翻半天找不到，这个一步到位。 */
+  $('btnQueueLocate').addEventListener('click', () => {
+    if (queue.index < 0 || !queue.tracks.length) { toast('还没有在播的歌'); return; }
+    // 搜索过滤中 → 先清掉搜索：正在播的那行可能被滤掉，根本不在渲染结果里
+    if (($('queueSearch').value || '').trim()) {
+      $('queueSearch').value = '';
+      renderQueueList('');
+    }
+    if (!flashQueueCurrent()) toast('这一首已经不在队列里了');
+  });
+
   $('btnQueueShuffle').addEventListener('click', () => {
     if (queue.tracks.length < 2) { toast('队列里的歌太少，不用打乱'); return; }
     // 注意：这里只是把"队列摆放顺序"打乱一次，跟播放模式里的"随机播放"不是一回事

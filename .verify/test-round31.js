@@ -219,6 +219,48 @@ app.whenReady().then(async () => {
   if (r7.onTitle === '第18集' && !r7.scrolled) bad('高亮了但没滚动到可视区（在屏幕外等于没定位）');
   else if (r7.onTitle === '第18集') ok(`面板自动滚到了当前集（scrollTop > 0，列表高 ${r7.listH}px）`);
 
+  /* ================= 4.7) 队列抽屉里的专属定位 ================= */
+  say('\n[4.7] 队列专属定位（只在抽屉里滚，不跳页面）：');
+  await ev(`(() => {
+    // 100 首的队列，正在播第 90 首 —— 翻着找要半天
+    queue = {
+      tracks: Array.from({ length: 100 }, (_, i) => ({ bvid: 'BVq' + i, cid: i, title: '队列歌 ' + (i + 1), duration: 200 })),
+      index: 89, name: 'x', source: { view: 'favorites' },
+    };
+    DB.favorites = queue.tracks.slice();
+    openQueue();
+    // 先把搜索框填上一个滤掉当前行的词 —— 定位必须先清掉搜索，不然那行不在渲染里
+    document.getElementById('queueSearch').value = '队列歌 1';
+    renderQueueList('队列歌 1');
+    return true;
+  })()`);
+  await sleep(400);
+  const r8 = await ev(`(async () => {
+    const beforeFiltered = document.querySelectorAll('#queueList .collect-row').length;
+    const beforeView = currentView;
+    document.getElementById('btnQueueLocate').click();
+    await new Promise((r) => setTimeout(r, 400));
+    const list = document.getElementById('queueList');
+    const flash = list.querySelector('.collect-row.locate-flash');
+    const row90 = list.querySelector('.collect-row[data-qi="89"]');
+    const inView = row90 ? (row90.getBoundingClientRect().top >= list.getBoundingClientRect().top - 5) : false;
+    return {
+      beforeFiltered,
+      afterRows: list.querySelectorAll('.collect-row').length,
+      search: document.getElementById('queueSearch').value,
+      flash: !!flash,
+      inView,
+      viewStable: currentView === beforeView,
+    };
+  })()`);
+  say(`    过滤时只有 ${r8.beforeFiltered} 行 → 定位后 ${r8.afterRows} 行（搜索已清：${JSON.stringify(r8.search)}）`);
+  if (r8.beforeFiltered >= 90) bad('前置条件不成立（搜索没有把当前行滤掉，用例失效）');
+  else if (r8.search !== '') bad('定位没有清掉搜索框 —— 正在播的行可能不在渲染结果里');
+  else if (!r8.flash) bad('没有闪一下（定位了但看不见）');
+  else if (!r8.inView) bad('第 90 行没滚进可视区');
+  else if (!r8.viewStable) bad('定位把页面跳走了 —— 队列定位只许在抽屉里滚动');
+  else ok('清搜索 → 滚到第 90 行 → 闪一下，全程没有离开队列抽屉');
+
   /* ================= 5) 页面报错 ================= */
   say('\n[5] 页面报错：');
   if (errors.length) { errors.slice(0, 4).forEach((e) => say('    ' + e)); bad(`页面报了 ${errors.length} 条错`); }

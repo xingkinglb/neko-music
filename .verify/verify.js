@@ -5033,3 +5033,13 @@ if (!/parts\.some\(\(e\) => e\.bvid === cur\.bvid/.test(appjs)) {
 if (!/collect-row\.on/.test(appjs) || !/centerInScroll\(\$\('collectList'\), onRow\)/.test(appjs)) {
   err('选集面板打开后没有滚到当前集（高亮在屏幕外等于没定位）');
 } else ok('★ 选集面板自动滚动到正在播的那集');
+
+/* v2.12.5：队列抽屉的专属定位按钮（Neo 要的）—— 只在抽屉里滚动+闪，
+   绝不跳页面；搜索过滤中要先清掉搜索（正在播的行可能被滤掉）。 */
+if (!/id="btnQueueLocate"/.test(html)) {
+  err('队列抽屉里没有「定位」按钮');
+} else if (!/btnQueueLocate'\)\.addEventListener/.test(appjs)) {
+  err('队列定位按钮没有绑事件');
+} else if (!/\$\('queueSearch'\)\.value = '';\s*\n\s*renderQueueList\(''\);/.test(appjs)) {
+  err('队列定位没有先清搜索 —— 过滤中正在播的行不在渲染里，定位会失败');
+} else ok('★ 队列专属定位：清搜索 → 滚动 → 闪，全程不出抽屉');

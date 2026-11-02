@@ -625,6 +625,9 @@
       <button class="modal-close" id="btnCloseQueue" title="收起（Esc）">✕</button>
     </div>
     <div class="collect-bar">
+      <!-- 队列专属定位（v2.12.5）：只在抽屉里滚到正在播的那行，不跳去任何页面。
+           队列上千首时正在播的那行翻半天找不到，这个一步到位。 -->
+      <button class="ghost-btn" id="btnQueueLocate">定位</button>
       <button class="ghost-btn" id="btnQueueShuffle">打乱顺序</button>
       <button class="ghost-btn" id="btnQueueClear">清空队列</button>
       <input class="collect-search" id="queueSearch" placeholder="在队列里找…" autocomplete="off" />
