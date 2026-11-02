@@ -3476,10 +3476,12 @@ function sortedView(list) {
 function sortBtnHTML() {
   const cur = sortState && sortState.view === currentView ? SORT_OPTIONS.find((o) => o.by === sortState.by) : null;
   const label = cur ? `排序：${cur.name}${sortState.dir === 1 ? ' ↑' : ' ↓'}` : '排序';
-  const items = SORT_OPTIONS.map((o) => {
-    const active = cur && cur.by === o.by;
-    return `<button class="sort-item${active ? ' on' : ''}" data-by="${o.by}">${o.name}${active ? (sortState.dir === 1 ? ' ↑' : ' ↓') : ''}</button>`;
-  }).join('');
+  // 菜单第一项永远是「默认顺序」—— 排着排着想回到收藏时的原始排列，一步就能回去
+  const items = `<button class="sort-item${cur ? '' : ' on'}" data-by="__default">默认顺序</button>`
+    + SORT_OPTIONS.map((o) => {
+      const active = cur && cur.by === o.by;
+      return `<button class="sort-item${active ? ' on' : ''}" data-by="${o.by}">${o.name}${active ? (sortState.dir === 1 ? ' ↑' : ' ↓') : ''}</button>`;
+    }).join('');
   return `<span class="sort-wrap">
     <button class="ghost-btn${cur ? ' on' : ''}" id="btnSort">${ic('i-order')}<span>${esc(label)}</span></button>
     <span class="sort-menu" id="sortMenu">${items}</span>
@@ -3502,6 +3504,8 @@ function bindSortBtn() {
     const by = e.target && e.target.dataset && e.target.dataset.by;
     if (!by) return;
     e.stopPropagation();
+    // 「默认顺序」= 回到收藏时的原始排列（sortState 清掉即可）
+    if (by === '__default') { sortState = null; renderAll(); return; }
     if (sortState && sortState.view === currentView && sortState.by === by) {
       // 同一项：升 → 降 → 取消，回到没排序
       if (sortState.dir === 1) sortState.dir = -1;
@@ -3515,9 +3519,9 @@ function bindSortBtn() {
 
 function currentListHTML() {
   const picking = !!selPick;
-  // ★ 排序只影响显示：sortedView 返回的是排好序的**副本**，且自带视图核对
-  //   （sortState.view 对不上当前视图就原样返回，所以在别的页面不会误生效）
-  const list = sortedView(currentTracks());
+  // ★ 排序已下沉到 currentTracks()（见那边注释）—— 点行播放、播放全部、批量勾选
+  //   和渲染走的都是同一个顺序。这里直接用，不要再套 sortedView（会排两次）。
+  const list = currentTracks();
   const q = listSearchQuery();
   const innerHits = q ? (t) => collectInnerHits(t, q) : null;
   const emptyHint = q ? '换个关键词试试，或者点右边的 ✕ 清空搜索' : '';
@@ -3941,27 +3945,59 @@ function renderMyPage() {
   });
 }
 
-/** 点开一个收藏夹 → 复用解析页那套（可播 / 可收藏 / 可加歌单 / 批量选择全都现成），
- *  parsedOrigin 指回我的主页，「← 返回：我的主页」就自然成立。 */
-async function openMyFolder(mediaId, name) {
-  content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在读取「${esc(name)}」…</div>`;
+/* 我的收藏夹浏览视图（v2.12.5）：带总数和分页。
+   ★ 第一版只取了第一页 30 条 —— Neo 抓的：「不是照搬吗咋没搬全」。
+     favMedias 的返回里 total / hasMore 是现成的（bilibili.js 早就带出来了），
+     分页条组件 paginationHTML 也是现成的，没理由不齐 —— 这就是照搬没搬全的教训。
+   ★ 不再复用解析页（parsed）：那边没有"总数 / 翻页"的概念，硬塞会把它的
+     数据结构撑歪。独立视图 + paginationHTML，四十行就齐了。 */
+let myFolderState = null;   // { id, name, list, page, total, loading, error }
+
+async function openMyFolder(mediaId, name, page = 1) {
+  // 翻页时保留旧列表 —— 翻页的瞬间不至于闪成空白
+  const keep = myFolderState && myFolderState.id === mediaId ? myFolderState.list : [];
+  myFolderState = { id: mediaId, name, list: keep, page, total: keep.length, loading: true, error: null };
+  currentView = 'myfolder';
+  renderMyFolder();
   try {
-    const res = await api('favMedias', mediaId, 1);
+    const res = await api('favMedias', mediaId, page);
     const me = myPageState && myPageState.me;
-    const tracks = res.list.map((m) => ({
+    myFolderState.list = res.list.map((m) => ({
       bvid: m.bvid, cid: null, page: 1,
       title: m.title, author: m.author || (me ? me.name : ''),
       cover: m.cover, duration: m.duration,
     }));
-    parsedOrigin = { view: 'my', label: '我的主页', scroll: 0 };
-    parsedView = {
-      info: { title: name, owner: { name: me ? me.name : '' } },
-      pages: tracks, seasonTracks: [], tracks,
-    };
-    renderParsed();
+    myFolderState.total = res.total || myFolderState.list.length;
+    myFolderState.loading = false;
   } catch (err) {
-    content().innerHTML = `<div class="err">读取失败：${esc(err.message)}</div>`;
+    myFolderState.loading = false;
+    myFolderState.error = err;
   }
+  if (currentView === 'myfolder') renderMyFolder();   // 用户中途切走了就别抢画面
+}
+
+function renderMyFolder() {
+  const st = myFolderState;
+  currentView = 'myfolder';
+  const count = st.total || st.list.length;
+  const totalPages = Math.max(1, Math.ceil(count / 30));
+  content().innerHTML = `
+    <div class="block-head">
+      <div>
+        <button class="ghost-btn" id="btnMyBack">← 返回我的主页</button>
+        <div class="block-title" style="margin-top:10px">${esc(st.name)}</div>
+        <div class="block-sub">共 ${count} 个视频${st.loading ? ' · 正在读取…' : ''}</div>
+      </div>
+      <div class="block-actions">${sortBtnHTML()}</div>
+    </div>
+    ${st.error ? `<div class="err">读取失败：${esc(st.error.message || String(st.error))}</div>` : ''}
+    <div id="listBody">${trackListHTML(currentTracks(), {
+      emptyIcon: 'i-note',
+      emptyText: st.loading ? '正在读取…' : '这个收藏夹是空的',
+      emptyHint: st.loading ? '' : '可能里面还没放东西',
+    })}</div>
+    ${count > 30 ? paginationHTML(st.page, totalPages) : ''}`;
+  bindSortBtn();
 }
 
 function renderImportMine() {
@@ -8003,6 +8039,9 @@ function bindEvents() {
       // 按当前在哪一页决定翻谁的页 —— 别让它俩互相踩。
       if (currentView === 'importMine') {
         if (impState && p >= 1 && p !== impState.page) loadImpList(p);
+      } else if (currentView === 'myfolder') {
+        // v2.12.5：我的主页点开的收藏夹 —— 翻页逻辑和 UP 主页同一个套路
+        if (myFolderState && p >= 1 && p !== myFolderState.page) openMyFolder(myFolderState.id, myFolderState.name, p);
       } else if (upState && p >= 1 && p !== upState.page) {
         loadUp(p);
       }
@@ -8014,6 +8053,7 @@ function bindEvents() {
     const idEl = e.target.closest('[id]');
     const id = idEl ? idEl.id : '';
     // 详情页返回：回原来那一页（直接粘链接解析进来的那种没有"来路"，就回「发现」首页）
+    if (id === 'btnMyBack') { currentView = 'my'; renderAll(); return; }
     if (id === 'btnParsedBack') {
       if (parsedOrigin) {
         const o = parsedOrigin;
@@ -9575,7 +9615,22 @@ function totalDuration() {
 }
 
 /** 当前页面正在显示的那组曲目 */
+/**
+ * 当前页面的曲目 —— **排序后的**。
+ * ★ 为什么排序套在这一层而不是只在渲染时：点行播放（currentTracks()[i]）、
+ *   播放全部、批量勾选、列表渲染，全部从这一处取曲目 —— 只在这里排一次，
+ *   「看到的顺序」和「点下去播的顺序」就永远一致。
+ *   之前只排在渲染层（sortedView 只套在 currentListHTML 里），结果显示 A,B,C、
+ *   点了却播源顺序 —— Neo 抓的那个"排序后播放的还是默认顺序"就是它。
+ * ★ 排的是副本（sortedView 保证），DB.favorites / DB.playlists 的源顺序不动。
+ */
 function currentTracks() {
+  return sortedView(currentTracksRaw());
+}
+
+/** 当前页面的曲目（**原始顺序**，不套排序）。一般调用方应该用 currentTracks()。
+ *  需要原始顺序的场景：写回类操作（按索引改源数据）目前没有，留个口子备用。 */
+function currentTracksRaw() {
   if (currentView === 'discovery') return discoveryResults;
   // ★ v2.10.0：这两页有列表内搜索 —— 搜索中返回**筛选后**的数组。
   //   这样点行播放、全选、拖选、批量操作全都自动对齐（看到什么就是什么），
@@ -9594,6 +9649,8 @@ function currentTracks() {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
     return pl ? listSearchFilter(pl.tracks) : [];
   }
+  // v2.12.5：我的主页点开的收藏夹（带分页，myFolderState 管状态）
+  if (currentView === 'myfolder' && myFolderState) return myFolderState.list;
   return searchResults;
 }
 
@@ -9610,6 +9667,9 @@ function viewLabel() {
   if (currentView === 'local') return '本地歌曲';        // v2.8.0 批次 B
   if (currentView === 'up' && upState) return `${upState.name} 的视频`;
   if (currentView === 'parsed' && parsedView) return parsedView.info.title;
+  // v2.12.5：我的主页（点开的收藏夹用夹子名，队列抽屉里的「来自」就是它）
+  if (currentView === 'my') return '我的主页';
+  if (currentView === 'myfolder' && myFolderState) return myFolderState.name;
   if (currentView.startsWith('playlist:')) {
     const pl = DB.playlists.find((p) => 'playlist:' + p.id === currentView);
     return pl ? pl.name : '歌单';

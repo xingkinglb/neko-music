@@ -375,17 +375,35 @@ if (!/sortState\.view !== currentView/.test(appjs)) {
   err('排序状态没有按视图隔离（会在别的页面误生效）');
 } else ok('排序状态按视图隔离（sortState.view 核对）');
 
+/* v2.12.5 Neo 抓的：排序后显示变了、点行播放却是默认顺序 ——
+   因为播放走 currentTracks()，排序只套在渲染层。现在排序下沉到
+   currentTracks()（currentTracksRaw 存原始），显示/播放/批量勾选全部同一顺序。 */
+if (!/function currentTracks\(\) \{\s*return sortedView\(currentTracksRaw\(\)\);/.test(appjs)) {
+  err('排序没有下沉到 currentTracks() —— 显示和播放的顺序又分家了');
+} else if (/sortedView\(currentTracks\(\)\)/.test(appjs)) {
+  err('currentListHTML 还在套 sortedView —— 排序下沉后这里再套是排两次');
+} else ok('★ 排序下沉到 currentTracks()：看到 / 点到 / 播出的就是同一个顺序');
+/* 排序菜单的第一项永远是「默认顺序」—— 排着想回原始排列，一步回去 */
+if (!/data-by="__default"/.test(appjs)) {
+  err('排序菜单没有「默认顺序」项（回不去原始排列了）');
+} else ok('排序菜单带「默认顺序」');
+
 /* v2.12.4 批三：我的主页。★ 和「导入我的收藏夹」是**并存**关系 ——
    导入的入口（btnImportMine）和流程必须原样保留，只许加不许动。 */
 if (!/data-view="my"/.test(html) || !/id="i-user"/.test(html)) {
   err('侧栏没有「我的主页」入口（或缺 i-user 图标）');
 } else if (!/function renderMyPage/.test(appjs) || !/function openMyFolder/.test(appjs)) {
   err('我的主页的渲染函数不全');
-} else if (!/parsedOrigin = \{ view: 'my'/.test(appjs)) {
-  err('点开收藏夹后没有把 parsedOrigin 指回我的主页（返回按钮会跳去别处）');
+} else if (!/currentView === 'myfolder'/.test(appjs) || !/id="btnMyBack"/.test(appjs)) {
+  err('点开收藏夹没有独立浏览视图（v2.12.5 改的：总数 + 分页 + 返回链路，别退回只取一页的旧版）');
 } else if (!/btnImportMine/.test(html) || !/function renderImportMine/.test(appjs)) {
   err('「导入我的收藏夹」入口丢了 —— 我的主页是加进去的，不是顶替的');
-} else ok('我的主页：入口 / 渲染 / 返回链路齐全，导入功能原样保留');
+} else ok('我的主页：入口 / 渲染 / 总数分页 / 返回链路齐全，导入功能原样保留');
+/* v2.12.5 Neo 抓的：收藏夹只加载第一页 30 条、没有总数和分页。
+   favMedias 早就返回 total，分页条组件 paginationHTML 也是现成的 —— 搬就是了。 */
+if (!/paginationHTML\(st\.page, totalPages\)/.test(appjs) || !/myFolderState\.total = res\.total/.test(appjs)) {
+  err('收藏夹浏览视图没有接上总数和分页（又只搬了一半）');
+} else ok('收藏夹浏览视图带总数 + 分页条（paginationHTML 复用现有组件）');
 /* 歌单拖动：手柄（hover 浮现）+ 重排 + 持久化，行为在 test-round30 里实测。 */
 if (!/drag-handle/.test(appjs) || !/function bindPlaylistDrag/.test(appjs)) {
   err('歌单侧栏没有拖动排序（手柄或重排绑定丢了）');
