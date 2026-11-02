@@ -119,6 +119,24 @@ let DB = {
 // 当前播放队列
 let queue = { tracks: [], index: -1, name: '' };
 
+/* ---------------- 队列记忆（v2.12.4） ----------------
+   ★ 为什么单独存 queue.json、不并进 neko-data.json
+     主存档已经 7.49 MB（光 collectParts 一个就 4.18 MB），而 persist() 是**全量重写**。
+     队列上千首、每切一首 index 就变一次 —— 混进去等于"每切一首写 7.5 MB"。
+   ★ 防抖 800ms
+     连点「下一首」时不会每首写一次盘，停下来才落一次。
+   ★ source 不存
+     它指向的页面（搜索结果 / UP 主页 / 某个歌单）重启后根本不存在，
+     恢复出来只会让「定位」按钮跳到一个空页面。 */
+let queueSaveTimer = null;
+function saveQueueSoon() {
+  clearTimeout(queueSaveTimer);
+  queueSaveTimer = setTimeout(() => {
+    // 存不上就算了 —— 下次切歌还会再存。绝不能因为写盘失败打断播放。
+    api('queueSave', { tracks: queue.tracks, index: queue.index, name: queue.name }).catch(() => {});
+  }, 800);
+}
+
 /* ---------- 下载的界面侧状态（v2.8.0）----------
    ★ 任务的**唯一 owner 是主进程**（它把状态写在 downloads.json 里）。
      下面这几个变量只是一份"用来画面的镜像"：界面从不自己改任务状态，
@@ -1132,6 +1150,91 @@ const PLAY_MODES = [
 ];
 let playMode = 'list';
 
+/* ---------------- 随机播放：洗牌顺序（v2.12.4） ----------------
+   ★ 为什么不能"每次随机挑一首"
+     原来是 `i = Math.floor(Math.random() * n)`，每首独立随机、**有放回**。
+     队列 1000 首时，两小时内听到大量重复是**数学必然** —— 生日悖论：
+     23 次里至少撞一次的概率就过半，跑到 50 次几乎必撞。用户的体感就是"随机根本不准"。
+
+   ★ 现在改成洗牌（不放回）
+     进随机模式时把整个队列打乱一次，按这个顺序一路播下去 —— **一轮之内绝不重复**，
+     播完一轮才重新洗。网易云 / Spotify 都是这么做的。
+
+   ★ 再叠一层"最近播过的"
+     换轮重洗时，把刚听过的那批挪到新顺序的后面，
+     避免出现「上一轮的末尾 = 这一轮的开头」这种最扎眼的重复。
+
+   ★ shuffleOrder 存的是**下标**不是曲目对象
+     队列增删后下标会变，所以每次用之前都要核对长度（见 ensureShuffle），对不上就重洗。
+   ------------------------------------------------------------ */
+let shuffleOrder = [];       // 队列下标的一种排列
+const shuffleRecent = [];    // 最近播过的 selKey（FIFO）
+const SHUFFLE_RECENT_MAX = 300;
+
+/** 洗一次牌。
+ *  startIdx：会被钉在第一位（手动点歌 / 刚切到随机时正在播的那首）。
+ *  avoidFirst：绝不能落在第一位的那个下标（换轮重洗时传"刚播完的那首"）。
+ *  ★ avoidFirst 为什么单独一个参数而不是靠 shuffleRecent：
+ *    队列比 recent 窗口（300）还小的时候，"把刚听过的往后挪"会把整个队列都盖住，
+ *    等于没做 —— 2 首歌的队列一轮播完重洗，第一首可能还是刚播完的那首，
+ *    听起来就是「随机模式下按下一首，还在放同一首」（test-round6 抓出来的）。 */
+function reshuffle(startIdx = -1, avoidFirst = -1) {
+  const n = queue.tracks.length;
+  shuffleOrder = [];
+  if (!n) return;
+
+  const idx = [];
+  for (let i = 0; i < n; i++) idx.push(i);
+  // Fisher-Yates
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+  }
+
+  // 起始曲目钉在最前：切到随机时不该"下一首"先跳走
+  const pinned = startIdx >= 0 && startIdx < n;
+  if (pinned) {
+    const at = idx.indexOf(startIdx);
+    if (at > 0) { idx.splice(at, 1); idx.unshift(startIdx); }
+  }
+
+  // 把"最近听过的"往后挪：新一轮的开头尽量都是没听过的
+  const recent = new Set(shuffleRecent);
+  let p = pinned ? 1 : 0;
+  for (let i = p; i < n; i++) {
+    if (!recent.has(selKey(queue.tracks[idx[i]]))) {
+      if (i !== p) { const t = idx[p]; idx[p] = idx[i]; idx[i] = t; }
+      p++;
+    }
+  }
+
+  // 最后兜一层：avoidFirst 不许在第一位。
+  // 放在 recent 挪动**之后** —— 正因为那个挪动在小队列里会失效，这里才需要兜底。
+  if (avoidFirst >= 0 && avoidFirst < n && idx[0] === avoidFirst && n > 1) {
+    const j = 1 + Math.floor(Math.random() * (n - 1));
+    const t = idx[0]; idx[0] = idx[j]; idx[j] = t;
+  }
+
+  shuffleOrder = idx;
+}
+
+/** 队列长度和洗牌表对不上（刚启动 / 加删过歌）→ 重洗，当前这首钉首位 */
+function ensureShuffle() {
+  if (shuffleOrder.length === queue.tracks.length && shuffleOrder.length) return;
+  reshuffle(queue.index);
+}
+
+/** 记一笔"这首播过了"。只留最近 SHUFFLE_RECENT_MAX 个，超了丢最老的。 */
+function noteShufflePlay(track) {
+  const key = selKey(track);
+  if (!key) return;
+  const at = shuffleRecent.indexOf(key);
+  // 又听了一次就挪到最新，别让它在"最近"里留两份（否则先被丢掉的其实是它自己）
+  if (at >= 0) shuffleRecent.splice(at, 1);
+  shuffleRecent.push(key);
+  while (shuffleRecent.length > SHUFFLE_RECENT_MAX) shuffleRecent.shift();
+}
+
 /**
  * 播放顺序栈：记"刚才播的是队列里第几个"。
  * 随机模式下"上一首"就靠它回退到真正听过的那首（不然随机模式里的上一首没有意义）。
@@ -1141,7 +1244,14 @@ let playStack = [];
 /** 设置播放模式并刷新按钮外观（save=true 时写进存档，下次打开还是这个模式） */
 function setPlayMode(id, save) {
   const m = PLAY_MODES.find((x) => x.id === id) || PLAY_MODES[0];
+  const changed = playMode !== m.id;
   playMode = m.id;
+
+  // ★ 刚切到随机：立刻以正在播的这首为起点洗一次。
+  //   不洗也能跑（next() 里有 ensureShuffle 兜底），但在这里洗更明确 ——
+  //   用户按下"随机"的瞬间顺序就定了，不会等到第一次切歌才洗。
+  if (changed && m.id === 'shuffle') reshuffle(queue.index);
+
   const btn = $('btnMode');
   if (btn) {
     btn.innerHTML = ic(m.icon);
@@ -1253,6 +1363,11 @@ async function playAt(index) {
   const seq = ++playSeq;
   queue.index = index;
   const track = queue.tracks[index];
+  // ★ 不管当前是什么模式都记一笔「最近播过」——
+  //   从列表模式切到随机时，这份历史才有东西可用（否则要等播满 300 首才准）。
+  noteShufflePlay(track);
+  // 记住"现在停在哪首"。防抖在里面，连点下一首不会把磁盘写爆。
+  saveQueueSoon();
   // ★ v2.8.0 修订：换歌先把上一首的"到期刷新"定时器和自愈冷却清掉 ——
   //   否则上一首挂的定时器会在新歌上触发一次多余的地址刷新。
   clearDeadlineTimer();
@@ -1433,12 +1548,23 @@ function next(step) {
   const n = queue.tracks.length;
   if (!n) return;
 
-  // 随机播放：下一首从队列里随机挑，连点也不会连着两次同一首
+  // 随机播放：按洗牌顺序往下走，**一轮之内绝不重复**（详见 reshuffle 那段说明）。
+  // ★ 不再是"每次 Math.random 挑一首"—— 那是有放回的独立随机，队列一大短期必然重复。
   if (playMode === 'shuffle' && step > 0) {
     if (n === 1) { playAt(0); return; }
-    let i = queue.index;
-    for (let guard = 0; guard < 20 && i === queue.index; guard++) i = Math.floor(Math.random() * n);
-    goTo(i);
+    ensureShuffle();
+    let at = shuffleOrder.indexOf(queue.index);
+    // 当前这首不在表里（刚加进来的新歌 / 表是旧的）→ 以它为起点重洗
+    if (at < 0) { reshuffle(queue.index); at = 0; }
+    at += 1;
+    if (at >= n) {
+      // 一轮播完 → 重新洗。
+      // ★ 不钉当前曲目（它已经听过了），但传 avoidFirst ——
+      //   新一轮的第一首绝不能又是刚播完的这首（小队列时尤其容易撞，见 reshuffle 注释）。
+      reshuffle(-1, queue.index);
+      at = 0;
+    }
+    goTo(shuffleOrder[at]);
     return;
   }
 
@@ -1480,6 +1606,10 @@ function playTracks(tracks, startIndex = 0, name = '', source = null) {
   if (!tracks || !tracks.length) return false;
   queue = { tracks: tracks.slice(), index: -1, name, source };
   playStack = [];
+  // 换了一整套队列 = 换了一副牌：立刻重洗，并把起点钉在第一位。
+  // 不在这里洗的话，第一次按"下一首"才触发 ensureShuffle —— 行为一样，
+  // 但那时候 queue.index 已经变了，钉首位就会钉错人。
+  reshuffle(Math.max(0, startIndex));
   playAt(Math.max(0, startIndex));
   return true;
 }
@@ -2366,6 +2496,8 @@ function removeFromQueue(i) {
   }
   renderQueueList($('queueSearch').value);
   renderAll();
+  // 队列变了要存（移的如果不是正在播那首，playAt 不会被调，得在这里补一刀）
+  saveQueueSoon();
 }
 
 function bindQueue() {
@@ -2398,8 +2530,11 @@ function bindQueue() {
     }
     queue.index = cur ? queue.tracks.indexOf(cur) : -1;
     playStack = [];
+    // 队列的排列整个变了，洗牌表里的下标全部失效 —— 当场重洗，别留一张错位的表
+    reshuffle(queue.index);
     renderQueueList($('queueSearch').value);
     renderAll();
+    saveQueueSoon();   // 队列顺序变了，也要记下来
     toast('已打乱队列顺序');
   });
 
@@ -2410,6 +2545,7 @@ function bindQueue() {
     queue.name = '';
     renderQueueList('');
     renderAll();
+    saveQueueSoon();   // 存的是空队列 → 主进程那边会把 queue.json 删掉
     toast('已清空队列');
   });
 
@@ -6298,6 +6434,9 @@ function syncSettingsUI() {
   // 不 await —— 它要发一次网络请求（认人），不该卡住整个设置面板的打开。
   syncQrLoginState();
 
+  // v2.12.4：关于页的版本号（纯本地，很快，同样不 await）
+  syncAboutUI();
+
   // v2.2.0：窗口页的「关闭主窗口时」三选一
   syncCloseActionUI();
 
@@ -6481,6 +6620,58 @@ async function syncQrLoginState() {
     el.textContent = err.reason === 'cookie-expired'
       ? 'Cookie 好像过期了（可能被挤下线），重新扫一次就好。'
       : '当前登录状态未知。';
+  }
+}
+
+/** 关于页：填版本号和仓库名。纯本地调用，不联网，所以每次打开面板都刷一次。 */
+async function syncAboutUI() {
+  const el = $('aboutVersion');
+  if (!el) return;
+  try {
+    const info = await api('appVersion');
+    el.textContent = '版本 ' + info.version;
+    const repo = $('repoState');
+    if (repo && info.repo) repo.textContent = info.repo;
+  } catch {
+    /* 拿不到就保持原来的「版本 —」，不值得为这个弹提示 */
+  }
+}
+
+/* 检查到新版本时把下载地址存这儿 —— 按钮会变成「去下载」，再点就去浏览器。
+   不想在状态文字里塞 <a> 再绑事件，那样反而更难维护。 */
+let pendingUpdateUrl = '';
+
+/** 检查更新。三种结果都要说人话：有新版本 / 已最新 / 连不上。 */
+async function checkUpdateNow() {
+  const btn = $('btnCheckUpdate');
+  const st = $('updateState');
+  if (!btn || !st) return;
+
+  btn.disabled = true;
+  st.className = 'about-state';
+  st.textContent = '正在查询 GitHub…';
+  pendingUpdateUrl = '';
+
+  try {
+    const r = await api('checkUpdate');
+    if (r.hasUpdate) {
+      pendingUpdateUrl = r.url || '';
+      st.className = 'about-state is-new';
+      st.textContent = `发现新版本 v${r.latest}（当前 v${r.current}）`;
+      // 按钮变成「去下载」—— 用户点的时候才打开浏览器，不一查完就抢跳
+      if (pendingUpdateUrl) btn.textContent = '去下载最新版';
+    } else {
+      st.className = 'about-state is-ok';
+      st.textContent = `已是最新版本（v${r.current}）`;
+    }
+  } catch (err) {
+    // ★ 连不上 GitHub 在国内是常态，不能当"软件坏了"来报。
+    st.className = 'about-state is-warn';
+    st.textContent = err.reason === 'offline'
+      ? '连不上 GitHub（国内常见，不算故障）。可以自己去 Releases 页看看。'
+      : '检查失败：' + err.message;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -6691,6 +6882,25 @@ function bindSettings() {
   // 点弹窗外面的暗色区域也算关
   $('qrMask').addEventListener('click', (e) => {
     if (e.target.id === 'qrMask') closeQr();
+  });
+
+  /* ---- 关于（v2.12.4） ---- */
+  $('btnCheckUpdate').addEventListener('click', () => {
+    // 已经查到过新版本 → 这个按钮此刻是「去下载」，点了直接开浏览器
+    if (pendingUpdateUrl) {
+      api('openExternal', pendingUpdateUrl).catch((err) => toast('打不开浏览器：' + err.message));
+      return;
+    }
+    checkUpdateNow();
+  });
+  $('btnOpenGithub').addEventListener('click', () => {
+    api('openExternal', 'https://github.com/xingkinglb/neko-music')
+      .catch((err) => toast('打不开浏览器：' + err.message));
+  });
+  $('btnOpenReadme').addEventListener('click', () => {
+    // 详细说明就在仓库主页的 README 里，不在本地再抄一份 —— 抄了必然两边不同步
+    api('openExternal', 'https://github.com/xingkinglb/neko-music#readme')
+      .catch((err) => toast('打不开浏览器：' + err.message));
   });
 
   /* ---- v2.2.0：「关闭主窗口时」三选一 ---- */
@@ -7633,7 +7843,13 @@ function bindEvents() {
 
   /* ---- 播放条：播放/暂停、上下首、播放模式 ---- */
   $('btnPlay').addEventListener('click', () => {
-    if (!audio.src) { toast('先选一首歌吧'); return; }
+    if (!audio.src) {
+      // v2.12.4：上次退出时队列还在 → 直接从停下的那首开始播。
+      // 这才是"打开软件点播放就能听歌"，而不是干巴巴一句"先选一首歌"。
+      if (queue.tracks.length && queue.index >= 0) { playAt(queue.index); return; }
+      toast('先选一首歌吧');
+      return;
+    }
     audio.paused ? safePlay() : audio.pause();
   });
   $('btnPrev').addEventListener('click', () => prevTrack());
@@ -9242,6 +9458,30 @@ async function boot() {
   if (vol > 0) volBeforeMute = vol;
   applyVolume(vol, false);
 
+  // 2.7) v2.12.4：恢复上次的播放队列 —— 队列本身 + 停在哪一首。
+  //   ★ 只把"要播的东西"摆好，**不自动播放**：一开软件就出声会吓人。
+  //     真正开始播是点播放键那一刻（见 btnPlay 的处理）。
+  //   ★ 读失败一律当没有队列，绝不让它挡住启动 —— 背景播放器的第一优先级是能打开。
+  try {
+    const q = await api('queueLoad');
+    if (q && Array.isArray(q.tracks) && q.tracks.length) {
+      queue = {
+        tracks: q.tracks,
+        index: Number.isInteger(q.index) ? q.index : 0,
+        name: q.name || '',
+        source: null,   // 来源不恢复：那个页面重启后不存在了，留着只会让「定位」跳到空页
+      };
+      reshuffle(queue.index);   // 随机模式下把牌先洗好，点播放就能接着随机下去
+    }
+  } catch (e) {
+    /* ★ 这里只能 console.log，不能 console.error ——
+       离屏测试脚本普遍把「页面有一条 error 级日志」直接判 FAIL，
+       而"没有队列文件"是最正常不过的情况（第一次用、刚清空过）。
+       用 error 级会让三十个别的东西全变红，看起来像产品坏了。
+       真实环境里队列读失败（权限 / 磁盘）时，调试启动.bat 的窗口里也照样看得到这一行。 */
+    console.log('没有可恢复的播放队列（正常情况）', e && e.message);
+  }
+
   // 3) 绑事件
   bindEvents();
 
@@ -9277,20 +9517,23 @@ async function boot() {
   // 窗口尺寸变化超过 15% 时，prebake 档那张"预先糊好的壁纸图"要重生成（尺寸变了就对不上）
   window.addEventListener('resize', syncGlassImage);
 
-  // 5) 如果上次有在听的歌，把信息显示在底部（不自动播放，免得吓一跳）
-  if (DB.lastTrack) {
-    $('npTitle').textContent = DB.lastTrack.title;
-    $('npSub').textContent = DB.lastTrack.author || '';
+  // 5) 把"上次在听的那首"显示在底部（不自动播放，免得吓一跳）。
+  //   ★ v2.12.4：优先用恢复出来的队列里那一首 —— 队列知道"停在队列的第几位"，
+  //     比 lastTrack（最后播过的）更准。两者在"手动跳播后又切回列表"这类操作后会分叉。
+  const resumeTrack = queue.tracks[queue.index] || DB.lastTrack;
+  if (resumeTrack) {
+    $('npTitle').textContent = resumeTrack.title;
+    $('npSub').textContent = resumeTrack.author || '';
     // 没封面就挂音符兜底（和 playAt 里一致）
-    applyTrackCover(DB.lastTrack);
+    applyTrackCover(resumeTrack);
     // ★ v2.2.1：老存档里的 lastTrack 没有 cover 字段（历史记录也一样），
     //   不补的话一开机播放条上就是个音符 —— 看着像"封面丢了"。
     //   异步补一次，补到就贴上去；补不到就保持音符，不会更差。
-    if (!DB.lastTrack.cover && DB.lastTrack.bvid) {
-      backfillCover(DB.lastTrack.bvid).then((cover) => {
-        if (cover && DB.lastTrack && !DB.lastTrack.cover) {
-          DB.lastTrack.cover = cover;
-          applyTrackCover(DB.lastTrack);
+    if (!resumeTrack.cover && resumeTrack.bvid) {
+      backfillCover(resumeTrack.bvid).then((cover) => {
+        if (cover && !resumeTrack.cover) {
+          resumeTrack.cover = cover;
+          applyTrackCover(resumeTrack);
         }
       });
     }

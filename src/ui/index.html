@@ -643,6 +643,7 @@
       <button class="tab" data-tab="window">窗口</button>
       <button class="tab" data-tab="keys">快捷键</button>
       <button class="tab" data-tab="download">下载</button>
+      <button class="tab" data-tab="about">关于</button>
     </div>
 
     <div class="modal-body">
@@ -1179,6 +1180,48 @@
             导入只是<b>记录路径</b>，不复制也不移动你的文件 —— 原文件被挪走或删掉后，
             那首歌会标成"失效"，可以重新定位或清理。
           </div>
+        </div>
+      </div>
+
+      <!-- ========== 关于（v2.12.4） ==========
+           为什么单独一页：版本号、去哪反馈、这东西合不合法 ——
+           这三件事用户迟早会找一次，散在各处不如集中在这儿。 -->
+      <div class="pane" data-pane="about">
+        <div class="about-hero">
+          <div class="about-title">Neko Music</div>
+          <div class="about-sub">用 B 站当曲库的桌面音乐播放器</div>
+          <div class="about-ver" id="aboutVersion">版本 —</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">检查更新</div>
+          <div class="about-row">
+            <button class="ghost-btn" id="btnCheckUpdate">检查更新</button>
+            <span class="about-state" id="updateState"></span>
+          </div>
+          <div class="field-hint">
+            装了新版本直接覆盖安装，歌单 / 设置 / 播放队列都会保留。
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">项目主页</div>
+          <div class="about-row">
+            <button class="ghost-btn" id="btnOpenGithub">在浏览器打开 GitHub</button>
+            <span class="about-state" id="repoState">xingkinglb/neko-music</span>
+          </div>
+          <div class="field-hint">源码、更新日志、问题反馈都在那儿。</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">免责说明</div>
+          <div class="about-legal">
+            <p>本项目是<b>个人学习 Electron 与网络编程</b>的练习作品，与哔哩哔哩官方没有任何关系，也未获其授权或认可。</p>
+            <p>它调用 B 站上<b>公开视频的音频流</b>来播放，也可以按你的指示把音频原样下载到本机保存。软件<b>不内置任何账号</b>，也不提供绕过登录或付费限制的能力。</p>
+            <p>音频版权归 B 站及原 UP 主所有，<b>仅供个人学习与试听</b>，请遵守相关法律法规与平台规则，不要用于商业用途或大规模传播。</p>
+            <p>第三方接口随时可能变更，因此<b>不保证长期可用</b>（软件按「现状」提供）。</p>
+          </div>
+          <button class="ghost-btn" id="btnOpenReadme">看完整说明</button>
         </div>
       </div>
 

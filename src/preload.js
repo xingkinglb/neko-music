@@ -110,6 +110,17 @@ contextBridge.exposeInMainWorld('neko', {
   // ★ 轮询放在界面这一层：什么时候该停只有界面知道（弹窗被关、切了标签、点了取消）
   qrPoll: (key) => ipcRenderer.invoke('bili:qrPoll', key),
 
+  // ---------- 播放队列记忆（v2.12.4） ----------
+  // 存的是 { tracks, index, name }，**不含 source**（那个指向的内存视图重启后不存在）
+  queueLoad: () => ipcRenderer.invoke('queue:load'),
+  queueSave: (data) => ipcRenderer.invoke('queue:save', data),
+
+  // ---------- 关于 / 检查更新（v2.12.4） ----------
+  // 版本号从主进程的 package.json 读（渲染层拿不到）
+  appVersion: () => ipcRenderer.invoke('app:version'),
+  // 查 GitHub 的 releases/latest。连不上时主进程抛 reason='offline'，界面据此说人话
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+
   // 用系统默认浏览器打开一个网址。
   // 网页自己没法调系统浏览器，必须请主进程用系统的 shell 打开。
   // 安全上只允许 http/https，主进程会再校验一次，防止被拿去打开本地文件。

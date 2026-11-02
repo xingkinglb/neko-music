@@ -21,6 +21,9 @@ const bili = require('./bilibili');
 // B 站扫码登录（v2.12.4）—— 纯主进程模块，不碰界面，可以单独 node 测
 const qrLogin = require('./qr-login');
 
+// 播放队列读写（v2.12.4）—— 同理，纯文件操作，能脱离 Electron 单测
+const queueStore = require('./queue-store');
+
 // 读存档时的"补洞"（★ 只许补、不许删 —— 见这个文件顶部的说明，
 // 它原来会悄悄吃掉新加的设置项，是个真 bug）
 const { migrate, DEFAULT_DATA, DEFAULT_DOWNLOAD } = require('./store-migrate');
@@ -55,6 +58,30 @@ migrateKnownUserFiles();
 const DATA_FILE = path.join(app.getPath('userData'), 'neko-data.json');
 // 用户自己填的 B 站登录 Cookie（可选，填了搜索会更稳）
 const COOKIE_FILE = path.join(app.getPath('userData'), 'cookie.txt');
+
+// ---- 播放队列（v2.12.4）----
+// ★ 为什么不并进 neko-data.json：那份已经 7.49 MB（光 collectParts 就 4.18 MB），
+//   而且 persist() 是**全量重写**。队列上千首、每切一首 index 就变一次，
+//   混进去等于每切一首写 7.5MB。单独一个文件，写入量小一个数量级。
+const QUEUE_FILE = path.join(app.getPath('userData'), 'queue.json');
+
+// ---- 仓库地址（v2.12.4）----
+//  「关于」页的链接和「检查更新」都从这一处取，别在两处各写一遍字符串。
+const GH_REPO = 'xingkinglb/neko-music';
+
+/** 版本号比较：a 比 b 新返回 1，旧返回 -1，一样返回 0。
+ *  只认 x.y.z 的数字段；`2.12.10` 必须大于 `2.12.9`（按字符串比会错）。 */
+function cmpVersion(a, b) {
+  const pa = String(a).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).replace(/^v/, '').split('.').map((x) => parseInt(x, 10) || 0);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  return 0;
+}
 
 // ---- AI 歌词（v2.12.0）----
 //  Key 存 ai-key.bin（safeStorage 加密），缓存存 ai-lyrics-cache.json —— 都**不进存档**：
@@ -1071,6 +1098,54 @@ function registerHandlers() {
     fs.writeFileSync(COOKIE_FILE, String(text || ''), 'utf8');
     bili.setUserCookie(text);   // 立刻生效，不用重启软件
     return true;
+  });
+
+  // ---------- 播放队列记忆（v2.12.4） ----------
+  //  具体读写逻辑在 src/queue-store.js（抽出去是为了能脱离 Electron 单测）。
+  //  ★ source（"这次是从哪个页面点进来的"）**不存** —— 它指向的内存视图
+  //    重启后根本不存在，恢复出来只会让「定位」按钮跳到一个空页面。
+  handle('queue:load', () => queueStore.load(QUEUE_FILE));
+  handle('queue:save', (data) => queueStore.save(QUEUE_FILE, data));
+
+  // ---------- 关于 / 检查更新（v2.12.4） ----------
+  handle('app:version', () => ({ version: app.getVersion(), repo: GH_REPO }));
+
+  //  ★ 连不上 GitHub **不算错误**：国内不翻墙访问 api.github.com 十次有八次失败，
+  //    把它当错误弹红字只会让人以为软件坏了。所以这里区分 reason='offline'，
+  //    界面据此说"连不上，自己去 Releases 看看"而不是报错。
+  //  ★ 只查 releases/latest（一个请求、不带 token、不统计下载）——
+  //    不自动下载、不自动安装，避免"检查个更新就偷偷装东西"的观感。
+  handle('update:check', async () => {
+    const current = app.getVersion();
+    let res;
+    try {
+      res = await fetch(`https://api.github.com/repos/${GH_REPO}/releases/latest`, {
+        headers: { 'User-Agent': 'neko-music', Accept: 'application/vnd.github+json' },
+        signal: AbortSignal.timeout(6000),
+      });
+    } catch (err) {
+      const e = new Error(err.name === 'TimeoutError' ? '连接超时（6 秒）' : '连不上 GitHub');
+      e.reason = 'offline';
+      throw e;
+    }
+    if (!res.ok) {
+      const e = new Error(`GitHub 返回 ${res.status}`);
+      e.reason = 'offline';
+      throw e;
+    }
+    const j = await res.json();
+    const latest = String(j.tag_name || '').replace(/^v/, '');
+    if (!/^\d+\.\d+\.\d+/.test(latest)) {
+      const e = new Error('返回里没有版本号');
+      e.reason = 'offline';
+      throw e;
+    }
+    return {
+      current,
+      latest,
+      hasUpdate: cmpVersion(latest, current) > 0,
+      url: j.html_url || `https://github.com/${GH_REPO}/releases`,
+    };
   });
 
   // ---------- B 站扫码登录（v2.12.4） ----------

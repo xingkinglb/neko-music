@@ -136,6 +136,13 @@ nekoCalls.forEach((name) => {
 });
 if (!ipcBad) ok(`渲染层调用的 ${nekoCalls.size} 个 neko 方法全部经 preload 接通到 main.js`);
 
+/* v2.12.4：队列存盘不许带 source。
+   source 是"这次从哪个页面点进来的"，指向的页面（搜索结果 / UP 主页）重启后不存在，
+   存下去再恢复只会让「定位」按钮跳到一个空页面 —— 看起来像"按钮坏了"。 */
+if (/queueSave'[\s\S]{0,300}?source/.test(appjs) || /saveQueueSoon[\s\S]{0,300}?source/.test(appjs)) {
+  err('队列存盘把 source 也带上了 —— 它指向的页面重启后不存在，恢复出来「定位」会跳到空页');
+} else ok('★ 队列存盘只存 tracks / index / name，不带 source');
+
 /* ---- 6) bg:// 协议两道安全闸（纯逻辑复刻） ---- */
 console.log('\n[5] bg:// 安全闸逻辑：');
 /* 用平台绝对路径，复刻真实运行环境里 BG_DIR 一定是绝对路径这一点 */
@@ -1123,6 +1130,30 @@ console.log('\n[31] 播放模式：一个按钮切换四种：');
   if (!/playMode === 'one'\)\s*\{\s*audio\.currentTime = 0/.test(appjs)) err('单曲循环没有读 playMode');
   else if (!/playMode === 'shuffle'\)/.test(appjs)) err('随机播放没有读 playMode');
   else ok('单曲循环 / 随机播放都读同一个 playMode（不会两套状态打架）');
+
+  /* v2.12.4：随机播放必须是"洗牌"，不能是"每次独立随机"。
+     ★ 反向断言在这儿最值钱：用户原话是"队列一千多歌，两小时听到很多重复"，
+       根因就是 `Math.floor(Math.random() * n)` —— 有放回随机，短期必然重复。
+       这写法太顺手，不留个断言很容易哪天被人"顺手改回去"。
+     ★ 这里不用 bodyOf（它定义在第 62 类的块里，这个作用域拿不到），
+       用"从函数签名截到最近的顶格 }"的方式切 next 的函数体。 */
+  if (!/function reshuffle\(/.test(appjs)) err('没有 reshuffle() —— 随机播放退回逐次随机了？');
+  else ok('有 reshuffle()：随机播放按洗牌表走');
+  {
+    const m = appjs.match(/function next\(step\) \{([\s\S]*?)\n\}/);
+    const fn = m ? m[1] : '';
+    if (!fn) err('切不出 next() 的函数体（签名变了？检查这条断言）');
+    else if (/Math\.random\(\)/.test(fn))
+      err('★ ★ next() 的随机分支又用 Math.random 了 —— 有放回随机，一轮之内会重复');
+    else if (!/shuffleOrder\.indexOf\(queue\.index\)/.test(fn))
+      err('★ next() 没按洗牌表取下一首');
+    else ok('★ ★ 反向断言：next() 不再逐次 Math.random，而是查洗牌表');
+  }
+  if (!/const SHUFFLE_RECENT_MAX = \d+/.test(appjs)) err('没有「最近播过」的上限常量（换轮时会扎堆）');
+  else ok('有 shuffleRecent 上限 —— 换轮重洗时把刚听过的挪到后面');
+  if (!/if \(changed && m\.id === 'shuffle'\) reshuffle\(queue\.index\)/.test(appjs))
+    err('切到随机模式时没有立刻洗牌');
+  else ok('切到随机模式立刻洗牌，并把正在播的那首钉在第一位');
 
   // 模式要记住
   if (!/playMode: 'list'/.test(appjs)) err('DEFAULT_SETTINGS 里没有 playMode 的默认值');
@@ -2413,8 +2444,11 @@ console.log('\n[49] 托盘 / 任务栏缩略图按钮 / 关窗弹窗（v2.2.0）
     err('cachedCollectEntries 里没有触发补封面 —— 缓存过的合集还是没封面');
   } else ok('取缓存曲目表发现没封面时会触发补一次');
 
-  if (!/backfillCover\(DB\.lastTrack\.bvid\)/.test(appjs)) {
-    err('开机恢复的 lastTrack 没封面时没有补 —— 一开机播放条就是个音符');
+  /* ★ v2.12.4：开机恢复的那首现在优先取自**队列**（resumeTrack = 队列第 index 首，
+     没有队列才退回 DB.lastTrack）—— 队列知道"停在队列第几位"，比 lastTrack 准。
+     断言跟着改成 resumeTrack，别让"变量名变了"被当成"功能没了"。 */
+  if (!/backfillCover\(resumeTrack\.bvid\)/.test(appjs)) {
+    err('开机恢复的那一首没封面时没有补 —— 一开机播放条就是个音符');
   } else ok('开机恢复的那一首也会补封面');
 
   if (!/DB\.collectCovers\[track\.bvid\] = track\.cover/.test(appjs)) {
