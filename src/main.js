@@ -18,6 +18,9 @@ const fs = require('fs');
 
 const bili = require('./bilibili');
 
+// B 站扫码登录（v2.12.4）—— 纯主进程模块，不碰界面，可以单独 node 测
+const qrLogin = require('./qr-login');
+
 // 读存档时的"补洞"（★ 只许补、不许删 —— 见这个文件顶部的说明，
 // 它原来会悄悄吃掉新加的设置项，是个真 bug）
 const { migrate, DEFAULT_DATA, DEFAULT_DOWNLOAD } = require('./store-migrate');
@@ -1069,6 +1072,14 @@ function registerHandlers() {
     bili.setUserCookie(text);   // 立刻生效，不用重启软件
     return true;
   });
+
+  // ---------- B 站扫码登录（v2.12.4） ----------
+  //  ★ qrcode_key 只走这两个通道：不写存档、不进日志。它是 3 分钟内能换一次登录的凭证，
+  //    比 cookie 本身还敏感（cookie 至少还得配上你的账号）。
+  //  ★ 扫码命成功后**不在这里落盘**：渲染层拿到 cookie 后走已有的 cookie:set，
+  //    复用那套"写文件 + 立刻 setUserCookie 生效"的逻辑。否则扫完还得重启才有字幕。
+  handle('bili:qrGenerate', () => qrLogin.qrGenerate());
+  handle('bili:qrPoll', (key) => qrLogin.qrPoll(key));
 
   // ---------- AI 歌词（v2.12.0） ----------
   //  ★ 这一组**都不接受渲染层传来的 Key**：主进程自己从 ai-key.bin 读。

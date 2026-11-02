@@ -6294,6 +6294,10 @@ function syncSettingsUI() {
     api('cookieGet').then((t) => { $('cookieInput').value = t || ''; }).catch(() => {});
   }
 
+  // v2.12.4：扫码登录那行「当前登录状态」。
+  // 不 await —— 它要发一次网络请求（认人），不该卡住整个设置面板的打开。
+  syncQrLoginState();
+
   // v2.2.0：窗口页的「关闭主窗口时」三选一
   syncCloseActionUI();
 
@@ -6335,6 +6339,149 @@ function syncCloseActionUI() {
     const el = $(map[k]);
     if (el) el.checked = (k === v);
   });
+}
+
+/* ============================================================
+   B 站扫码登录（v2.12.4）
+   ============================================================
+   为什么做：原来只能手填 SESSDATA —— 开 F12、翻 Application 面板、
+   在几十行 Cookie 里找那一行。大多数人到这一步就放弃了，
+   然后字幕永远拿不到、自己的收藏夹也导不进来。
+
+   ★ 轮询为什么放在这一层、而不是主进程：
+     什么时候该停**只有界面知道** —— 弹窗被关掉、用户点了「关闭」、切到别的标签页。
+     主进程自己起定时器收不住，会在用户看不见的地方一直打请求。
+   ★ qrcode_key 只活在这个闭包里（qrKey），不写存档、不进日志 —— 它能换一次登录。
+   ============================================================ */
+
+let qrTimer = null;   // 轮询定时器
+let qrKey = null;     // 当前这张码的 key
+let qrDeadline = 0;   // 到点自己先停（B 站那边 180 秒失效，这里留 5 秒余量）
+
+/** 停掉轮询。关弹窗 / 扫码成功 / 过期，三处都要调 —— 漏一处就会在后台一直打请求 */
+function stopQrPolling() {
+  if (qrTimer) { clearInterval(qrTimer); qrTimer = null; }
+  qrKey = null;
+}
+
+/** 弹窗里那行状态字 */
+function setQrState(text, kind) {
+  const el = $('qrState');
+  if (!el) return;
+  el.textContent = text || '';
+  el.classList.toggle('scanned', kind === 'scanned');
+  el.classList.toggle('err', kind === 'err');
+}
+
+/** 把一张码画进弹窗。给的是 SVG path，矢量，放大不糊，也不用处理 PNG 编码 */
+function paintQr(r) {
+  const svg = $('qrSvg');
+  const path = $('qrPath');
+  if (!svg || !path) return;
+  svg.setAttribute('viewBox', '0 0 ' + r.size + ' ' + r.size);
+  path.setAttribute('d', r.path || '');
+  $('qrOverlay').classList.remove('show');
+}
+
+/** 过期 / 失败时盖住二维码。
+ *  ★ 必须盖住：留着可扫的旧码，用户会一直对着一个死码扫，还以为是自己手机的问题。 */
+function coverQr(text) {
+  $('qrOverlayText').textContent = text;
+  $('qrOverlay').classList.add('show');
+}
+
+/** 生成新码 + 开始轮询。「扫码登录」和「重新生成」都走这里 */
+async function openQrLogin() {
+  stopQrPolling();   // ★ 先停旧的：否则连点两次会有两个定时器抢同一个 qrKey
+  $('qrMask').classList.add('show');
+  $('qrOverlay').classList.remove('show');
+  setQrState('正在生成二维码…');
+
+  try {
+    const r = await api('qrGenerate');
+    qrKey = r.key;
+    paintQr(r);
+    setQrState('用手机 B 站「扫一扫」');
+    qrDeadline = Date.now() + 175 * 1000;
+    startQrPolling();
+  } catch (err) {
+    setQrState('生成失败：' + err.message, 'err');
+    coverQr('二维码没能生成\n' + (err.message || ''));
+  }
+}
+
+/** 每 2 秒问一次。正常一屏码 5~30 秒能扫完 */
+function startQrPolling() {
+  qrTimer = setInterval(async () => {
+    if (!qrKey) { stopQrPolling(); return; }
+    if (Date.now() > qrDeadline) {
+      stopQrPolling();
+      setQrState('二维码过期了', 'err');
+      coverQr('二维码已过期\n点下面重新生成');
+      return;
+    }
+
+    let r;
+    try {
+      r = await api('qrPoll', qrKey);
+    } catch (err) {
+      // 网络抖一下不该当场判死：只提示，下一轮接着问（会不会无限重试由 qrDeadline 兜）
+      setQrState('网络不太好，重试中…', 'err');
+      return;
+    }
+
+    if (r.state === 'waiting') return;
+    if (r.state === 'scanned') {
+      setQrState('已扫描，请在手机上点「确认登录」', 'scanned');
+      return;
+    }
+    if (r.state === 'expired') {
+      stopQrPolling();
+      setQrState('二维码过期了', 'err');
+      coverQr('二维码已过期\n点下面重新生成');
+      return;
+    }
+    if (r.state === 'ok') {
+      stopQrPolling();
+      try {
+        // 复用「保存 Cookie」那条路：写文件 + bili.setUserCookie 立刻生效。
+        // 在这儿另写一遍落盘逻辑的话，扫完还得重启才有字幕。
+        await api('cookieSet', r.cookie);
+        $('cookieInput').value = r.cookie;
+        $('qrMask').classList.remove('show');
+        toast('登录成功 ✓ 字幕和收藏夹都能用了');
+        syncQrLoginState();
+      } catch (err) {
+        setQrState('保存 Cookie 失败：' + err.message, 'err');
+      }
+      return;
+    }
+    // error / 未知状态
+    stopQrPolling();
+    setQrState(r.message || '出错了', 'err');
+    coverQr('没能登录\n' + (r.message || ''));
+  }, 2000);
+}
+
+/** 设置页那行「当前登录状态」 */
+async function syncQrLoginState() {
+  const el = $('qrLoginState');
+  if (!el) return;
+  try {
+    const has = await api('hasCookie');
+    if (!has) {
+      el.textContent = '当前未登录。不登录也能听歌，但字幕、自己的收藏夹拿不到。';
+      return;
+    }
+    const me = await api('myInfo');
+    el.innerHTML = me && me.name ? '已登录：<b>' + esc(me.name) + '</b>' : '已登录';
+  } catch (err) {
+    // 「有 Cookie 但认不出人」= 过期了。这比「未登录」更值得说清楚，
+    // 否则用户会以为要重新填一遍几十行的 Cookie。
+    el.textContent = err.reason === 'cookie-expired'
+      ? 'Cookie 好像过期了（可能被挤下线），重新扫一次就好。'
+      : '当前登录状态未知。';
+  }
 }
 
 function bindSettings() {
@@ -6527,9 +6674,23 @@ function bindSettings() {
     try {
       await api('cookieSet', text);
       toast(text ? '已保存 ✓ 搜索会更稳定' : '已清空 Cookie');
+      syncQrLoginState();   // 手填 / 清空之后那行状态也要跟着变
     } catch (err) {
       toast('保存失败：' + err.message);
     }
+  });
+
+  /* ---- 扫码登录（v2.12.4） ---- */
+  $('btnQrLogin').addEventListener('click', openQrLogin);
+  $('btnQrRetry').addEventListener('click', openQrLogin);
+  const closeQr = () => {
+    stopQrPolling();   // ★ 关掉就必须停：否则弹窗没了、后台还在每 2 秒打一次
+    $('qrMask').classList.remove('show');
+  };
+  $('qrClose').addEventListener('click', closeQr);
+  // 点弹窗外面的暗色区域也算关
+  $('qrMask').addEventListener('click', (e) => {
+    if (e.target.id === 'qrMask') closeQr();
   });
 
   /* ---- v2.2.0：「关闭主窗口时」三选一 ---- */

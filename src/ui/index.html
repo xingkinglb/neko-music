@@ -1020,14 +1020,28 @@
 
       <!-- ========== B 站 ========== -->
       <div class="pane" data-pane="bilibili">
+        <!-- 扫码登录（v2.12.4）放在最前面：手填 Cookie 要开 F12、翻 Application 面板、
+             在几十行里找那一行 —— 大多数人到这一步就放弃了，然后字幕永远拿不到。
+             手填那条路完整保留在下面（也能用来排查"到底是没登录还是 Cookie 过期"）。 -->
         <div class="field">
-          <div class="field-label">登录 Cookie（填 SESSDATA）</div>
-          <textarea id="cookieInput" rows="7" spellcheck="false"
+          <div class="field-label">扫码登录（推荐）</div>
+          <div class="qr-entry">
+            <div class="qr-entry-text">
+              用手机 B 站扫一扫就行，不用去浏览器里翻 Cookie。
+              登录后字幕、自己的收藏夹、UP 主页都会稳得多。
+            </div>
+            <button class="primary-btn" id="btnQrLogin">扫码登录</button>
+          </div>
+          <div class="field-hint" id="qrLoginState">正在检查登录状态…</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">或者手动填 Cookie（SESSDATA）</div>
+          <textarea id="cookieInput" rows="5" spellcheck="false"
             placeholder="把浏览器里复制到的 SESSDATA 值粘贴到这里，也可以把整串 Cookie 都贴进来"></textarea>
           <div class="field-hint">
             怎么拿：浏览器打开 bilibili.com 并登录 → 按 F12 → 「Application / 应用程序」
             → 左侧 Cookies → www.bilibili.com → 找到 <b>SESSDATA</b> 那一行复制它的值。<br>
-            填了之后搜索会稳定很多。不填也能用，只是偶尔要重试。<br>
             <b>只存在你自己电脑里</b>，不会上传到任何地方。
           </div>
         </div>
@@ -1192,6 +1206,36 @@
     </div>
     <div class="prompt-body" id="promptBody"></div>
     <div class="prompt-foot" id="promptFoot"></div>
+  </div>
+</div>
+
+<!--
+  ============ 扫码登录（v2.12.4）============
+  ★ .qr-box 是**硬编码的白底**，不跟随主题。
+    现在整套界面是暗色，二维码一旦反色（黑底白块），有些手机的扫码器就认不出来。
+    所以这里宁可突兀一点，也保证一定能扫。
+  ★ 二维码是 SVG path，不是图片：矢量放大不糊，也不用处理 PNG 编码。
+-->
+<div class="modal-mask" id="qrMask">
+  <div class="modal qr-modal">
+    <div class="modal-head">
+      <span class="modal-title">扫码登录 B 站</span>
+      <button class="modal-close" id="qrClose" title="关闭">✕</button>
+    </div>
+    <div class="qr-body">
+      <div class="qr-box">
+        <svg class="qr-svg" id="qrSvg" viewBox="0 0 57 57" shape-rendering="crispEdges">
+          <path id="qrPath" d="" fill="#000" />
+        </svg>
+        <!-- 过期 / 失败时盖住这张码：留着可扫的旧码会让人一直扫一个死码 -->
+        <div class="qr-overlay" id="qrOverlay">
+          <div class="qr-overlay-text" id="qrOverlayText"></div>
+          <button class="primary-btn" id="btnQrRetry">重新生成</button>
+        </div>
+      </div>
+      <div class="qr-state" id="qrState">正在生成二维码…</div>
+      <div class="qr-tip">扫完还要在手机上点一下「确认登录」。</div>
+    </div>
   </div>
 </div>
 

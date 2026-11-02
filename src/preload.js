@@ -103,6 +103,13 @@ contextBridge.exposeInMainWorld('neko', {
   // 有没有填 B 站 Cookie（取字幕的前提，没填直接省掉一次白跑的请求）
   hasCookie: () => ipcRenderer.invoke('bili:hasCookie'),
 
+  // ---------- B 站扫码登录（v2.12.4） ----------
+  // 生成一张登录二维码 → { key, url, path, size }，path 直接塞进 SVG 的 <path d>
+  qrGenerate: () => ipcRenderer.invoke('bili:qrGenerate'),
+  // 问一次扫没扫（state: waiting / scanned / ok / expired / error）。
+  // ★ 轮询放在界面这一层：什么时候该停只有界面知道（弹窗被关、切了标签、点了取消）
+  qrPoll: (key) => ipcRenderer.invoke('bili:qrPoll', key),
+
   // 用系统默认浏览器打开一个网址。
   // 网页自己没法调系统浏览器，必须请主进程用系统的 shell 打开。
   // 安全上只允许 http/https，主进程会再校验一次，防止被拿去打开本地文件。
