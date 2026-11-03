@@ -29,3 +29,5 @@ neko-data.json
 neko-data.json.tmp
 cookie.txt
 backgrounds/
+.verify/tmp-*.json
+.verify/*-report.txt
