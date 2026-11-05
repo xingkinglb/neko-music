@@ -550,6 +550,23 @@ body.glass-prebake.has-imgbg .player {
 .block-sub { font-size: 12.5px; color: var(--muted); }
 .block-actions { display: flex; gap: 8px; }
 
+/* v2.13.0：搜索结果页的「已按相关度重排 / 按 B 站原序」小切换。
+   ★ 做成带下划线的文字按钮而不是普通 button：它属于"说明的一部分"，
+     块状按钮会让那一行看起来像工具栏，喧宾夺主。 */
+.rank-toggle {
+  display: inline;
+  padding: 0;
+  color: var(--muted-2);
+  font-size: 12.5px;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  transition: color 0.14s;
+}
+.rank-toggle:hover { color: var(--text-2); }
+.rank-toggle.on { color: var(--accent); }
+.rank-toggle.on:hover { color: var(--accent); filter: brightness(1.15); }
+
 /* ---------- v2.10.0：列表页头部的搜索区（只有「我喜欢」「歌单」两页用） ----------
    ★ 为什么要一个 .has-search 修饰类、而不是直接改 .block-head：
      另外 11 处 .block-head 都是"标题 + 按钮"两栏、靠 space-between 撑开的。
@@ -1258,6 +1275,61 @@ body.ops-always .track:hover .ops { opacity: 1; }
 .ico-btn:hover { background: rgb(var(--accent-rgb) / 0.2); color: var(--text); }
 .ico-btn:active { background: rgb(var(--accent-rgb) / 0.32); }
 .ico-btn.disabled { color: var(--muted-2); pointer-events: none; }
+
+/* ============ 倍速按钮 + 菜单（v2.13.0） ============
+   ★ 宽度**写死**，不用 min-width。
+     1.0× 是 4 个字符、0.75× 是 5 个字符 —— 用 min-width 的话切到 0.75× 时
+     按钮会变宽，把整条播放器往左挤一下，观感上像界面"抖了一下"。
+     这里是 flex 布局里的固定格，一变就带着邻居一起动（Neo 实测指出来的问题）。 */
+.speed-wrap { position: relative; display: flex; align-items: center; flex: 0 0 auto; }
+
+.speed-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 46px; height: 26px; padding: 0;   /* ← 定宽，内容居中，不随档位变 */
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.2px;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.14s, color 0.14s;
+}
+.speed-btn:hover { background: rgb(var(--accent-rgb) / 0.2); color: var(--text); }
+/* 非 1× 时点亮：一眼看出"歌在快放"，不然容易以为自己记错时间 */
+.speed-btn.on { color: var(--accent); background: rgb(var(--accent-rgb) / 0.16); }
+.speed-btn.open { background: rgb(var(--accent-rgb) / 0.28); color: var(--text); }
+
+.speed-pop {
+  position: absolute; right: -4px; bottom: calc(100% + 8px);
+  z-index: 42;
+  display: flex; flex-direction: column; gap: 1px;
+  min-width: 96px; padding: 5px;
+  background: rgba(20, 20, 30, 0.95);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+/* ★★ 这一条**必须显式写**：`hidden` 属性的 `display:none` 来自浏览器默认样式表，
+   优先级低于上面那条 `.speed-pop { display: flex }` —— 不写这一句，hidden 等于没用，
+   菜单会永远挂在屏幕上（v2.13.0 首版就是这个 bug，Neo 截图为证）。 */
+.speed-pop[hidden] { display: none; }
+/* hidden 撤掉的那一刻播一次入场动画（display:none → 有尺寸，animation 才会触发） */
+.speed-pop:not([hidden]) { animation: speed-in 0.14s ease; }
+@keyframes speed-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+}
+
+.speed-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  height: 30px; padding: 0 9px;
+  border-radius: 8px;
+  color: var(--text-2); font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.12s, color 0.12s;
+}
+.speed-item:hover { background: rgb(var(--accent-rgb) / 0.2); color: var(--text); }
+/* 打勾只在选中那一条显示（其余 opacity:0 占位，避免文字左右跳） */
+.speed-item .ic { width: 13px; height: 13px; opacity: 0; color: var(--accent); }
+.speed-item.on { color: var(--accent); }
+.speed-item.on .ic { opacity: 1; }
 
 /* 没有字幕之类的提示：在按钮上方淡入 → 停留 → 淡出消散（JS 加/移 .show） */
 .lyric-tip {
@@ -2033,6 +2105,7 @@ body.mini .np-meta      { order: 7; flex: 0 0 100%; }
 body.mini #btnMode,
 body.mini .progress-row,
 body.mini .lyric-wrap,
+body.mini .speed-wrap,
 body.mini #btnOpenBili,
 body.mini #btnDownload,
 body.mini .vol-pop { display: none; }
@@ -2759,3 +2832,178 @@ button.lyric-tag.busy { cursor: default; pointer-events: none; }
 /* 队列抽屉标题旁的定位按钮（v2.12.5）：播放条同款 ico-btn，
    和右侧的 ✕ 之间留一点距离，对齐到标题行的视觉中线上。 */
 .collect-head .ico-btn { margin-right: 2px; margin-top: 2px; }
+
+/* ================================================================
+   听歌统计页（v2.13.0）
+   ----------------------------------------------------------------
+   ★ 数字卡用 grid 均分四列，窄窗口自动折成两行 —— 不用 media query，
+     auto-fit + minmax 自己会算。
+   ★ 柱状图全部用 div 画，不引任何图表库：30 根柱子而已，
+     引个 200KB 的库来画它反而是负担。
+   ================================================================ */
+
+.stat-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+/* ★ v2.13.3：有背景图时底色不能再用 --panel（白色 4.5%）。
+   在浅色壁纸上（白衣服、皮肤）那层白等于不存在，灰字直接糊进背景 ——
+   Neo 截图里"排名数字、作者名、次数"全都快看不见了。
+   改用玻璃黑底 rgb(var(--glass-rgb) / …)：这个变量本来就是
+   "接近纯黑、保证白字可读"那一个（见文件头），四大面板用的也是它。
+   ★ 只在 body.has-bg 下换：没背景图时纯色底本来就暗，--panel 那层淡白
+     反而是"卡片浮起来"的层次，换了黑底会变成"卡片陷下去"。 */
+.stat-card {
+  padding: 16px 16px 14px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+body.has-bg .stat-card { background: rgb(var(--glass-rgb) / 0.46); }
+.stat-num {
+  font-size: 22px; font-weight: 600; line-height: 1.2;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+/* 单位跟着数字走小一号，不占一行 —— "23.5 小时" 挤成一行才像仪表盘 */
+.stat-unit {
+  margin-left: 3px;
+  font-size: 12px; font-weight: 500;
+  color: var(--muted);
+}
+.stat-label { margin-top: 6px; font-size: 12px; color: var(--text-2); }
+
+.stat-block {
+  padding: 16px 18px 18px;
+  border-radius: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  margin-bottom: 16px;
+}
+/* 同 .stat-card：只有铺了背景图才换黑底（理由见上） */
+body.has-bg .stat-block { background: rgb(var(--glass-rgb) / 0.46); }
+.stat-block-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 14px;
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+.stat-block-sub { font-size: 11.5px; font-weight: 400; color: var(--muted); }
+
+/* ---- 近 30 天柱状图 ---- */
+.stat-bars {
+  display: flex; align-items: flex-end; gap: 3px;
+  height: 110px;
+  padding-bottom: 16px;   /* 给底下的日期让位 */
+}
+.stat-bar {
+  position: relative;
+  flex: 1 1 0; min-width: 0;
+  height: 100%;
+  display: flex; align-items: flex-end;
+}
+.stat-bar-fill {
+  width: 100%;
+  border-radius: 3px 3px 0 0;
+  background: rgba(255, 255, 255, 0.09);   /* 没听的那天留一根淡淡的底 */
+  transition: height 0.25s ease, background 0.16s;
+}
+/* 听过的日子才上色 —— 一眼能看出哪几天在听 */
+.stat-bar.has .stat-bar-fill {
+  background: linear-gradient(180deg, var(--accent), var(--accent-2));
+}
+.stat-bar:hover .stat-bar-fill { filter: brightness(1.2); }
+/* 日期只标每 5 天一根，30 个全标会糊成一片 */
+.stat-bar-day {
+  position: absolute; left: 50%; bottom: -16px;
+  transform: translateX(-50%);
+  font-size: 9.5px; color: var(--muted-2);
+  white-space: nowrap;
+  opacity: 0;
+}
+.stat-bar:nth-child(5n+5) .stat-bar-day { opacity: 1; }
+
+/* ---- UP 主榜：横排小卡（v2.13.1 改的）----
+   ★ 原来它和"最常听的歌"并排两栏，但歌榜从 5 首放到 30 首之后，
+     两栏高度差太多（5 行 vs 30 行），右边会把左边拉出一大片空白。
+     改成：UP 榜全宽、横排五个小卡；歌榜全宽、自己分两列。 */
+.stat-ups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+}
+.stat-up {
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.stat-up:hover { background: rgb(var(--accent-rgb) / 0.14); }
+.stat-up-no {
+  flex: 0 0 auto;
+  font-size: 10.5px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.stat-up:nth-child(1) .stat-up-no { color: var(--accent); font-weight: 700; }
+.stat-up-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12.5px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stat-up-val {
+  flex: 0 0 auto;
+  font-size: 11px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 榜单：单列，每行铺满整行 ----
+   ★ 试过两列（宽屏分栏），两个问题：只有几首时会全堆在左列、右边空一大片；
+     行宽一窄，长歌名（B 站标题本来就长）被截得只剩半句。
+     单列铺满更实在 —— 30 首就老老实实排 30 行，页面本来就能滚。 */
+.stat-rank { display: flex; flex-direction: column; gap: 2px; }
+.stat-rank-row { width: 100%; }
+
+/* 本地歌的小标：一眼分清"这首在硬盘上"和"这首在 B 站" */
+.stat-local {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.13);
+  color: var(--text-2);
+  font-size: 10px; font-style: normal;
+  vertical-align: 1px;
+}
+
+.stat-rank-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 9px;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.stat-rank-row:hover { background: rgb(var(--accent-rgb) / 0.14); }
+.stat-rank-no {
+  flex: 0 0 18px;
+  font-size: 11px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+/* 前三名给点颜色奖励（纯装饰，不参与排序） */
+.stat-rank-row:nth-child(1) .stat-rank-no { color: var(--accent); font-weight: 700; }
+.stat-rank-row:nth-child(2) .stat-rank-no { color: var(--text-2); font-weight: 600; }
+.stat-rank-name {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 13px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stat-rank-name i { font-style: normal; color: var(--muted); font-size: 12px; }
+.stat-rank-val {
+  flex: 0 0 auto;
+  font-size: 11.5px; color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.stat-none { padding: 14px 4px; font-size: 12.5px; color: var(--muted-2); }

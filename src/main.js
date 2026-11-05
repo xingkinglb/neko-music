@@ -23,6 +23,8 @@ const qrLogin = require('./qr-login');
 
 // 播放队列读写（v2.12.4）—— 同理，纯文件操作，能脱离 Electron 单测
 const queueStore = require('./queue-store');
+// v2.13.0：听歌统计（纯文件读写 + 累加，和 queue-store 一个路子，能单独测）
+const statsStore = require('./stats-store');
 
 // 合集缓存读写（v2.13.0）—— collectParts / collectCovers 从主存档拆出来的部分
 const cacheCollect = require('./cache-collect');
@@ -67,6 +69,10 @@ const COOKIE_FILE = path.join(app.getPath('userData'), 'cookie.txt');
 //   而且 persist() 是**全量重写**。队列上千首、每切一首 index 就变一次，
 //   混进去等于每切一首写 7.5MB。单独一个文件，写入量小一个数量级。
 const QUEUE_FILE = path.join(app.getPath('userData'), 'queue.json');
+
+// ---- 听歌统计（v2.13.0）----
+// 同样是"高频小写入、丢了不致命"的数据，所以单开一个文件，理由和队列一模一样。
+const STATS_FILE = path.join(app.getPath('userData'), 'stats.json');
 
 // ---- 仓库地址（v2.12.4）----
 //  「关于」页的链接和「检查更新」都从这一处取，别在两处各写一遍字符串。
@@ -393,6 +399,37 @@ function sendToUi(channel, payload) {
   try {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
   } catch (_) {}
+}
+
+/* ---------- 听歌统计（v2.13.0） ----------
+   ★ 为什么主进程持有一份内存副本
+     界面每听一首就 record 一次，每次都"读盘 → 改 → 写盘"的话，
+     stats.json 会长到几百 KB，这个往返就变得很贵。
+     改成：启动时读一次进内存，之后只改内存 + 防抖写盘。
+
+   ★ 为什么是 2 秒防抖
+     连点「下一首」会连着触发好几条 record。攒一下只写一次。
+     退出时 saveStatsNow() 兜底，所以不会丢。 */
+let statsCache = null;
+let statsSaveTimer = null;
+
+function statsData() {
+  if (!statsCache) statsCache = statsStore.load(STATS_FILE);
+  return statsCache;
+}
+
+function saveStatsNow() {
+  if (!statsCache) return;   // 一次都没记过，别凭空造一个空文件
+  statsStore.save(STATS_FILE, statsCache);
+}
+
+function saveStatsSoon() {
+  if (statsSaveTimer) return;
+  statsSaveTimer = setTimeout(() => {
+    statsSaveTimer = null;
+    saveStatsNow();
+  }, 2000);
+  if (statsSaveTimer.unref) statsSaveTimer.unref();
 }
 
 // 配置对象要留着引用 —— 下载器是**惰性读** cfg 里的字段的，
@@ -1040,7 +1077,7 @@ function handle(channel, fn) {
 function registerHandlers() {
   handle('bili:parse', (text) => bili.parseUserInput(text));
   handle('bili:videoInfo', (bvid) => bili.getVideoInfo(bvid));
-  handle('bili:search', (keyword, page) => bili.searchVideos(keyword, page || 1));
+  handle('bili:search', (keyword, page, opts) => bili.searchVideos(keyword, page || 1, opts));
 
   // 拿到真实音频地址后，包一层 bili:// 给界面用
   handle('bili:audioUrl', async (bvid, cid) => {
@@ -1109,6 +1146,17 @@ function registerHandlers() {
   //    重启后根本不存在，恢复出来只会让「定位」按钮跳到一个空页面。
   handle('queue:load', () => queueStore.load(QUEUE_FILE));
   handle('queue:save', (data) => queueStore.save(QUEUE_FILE, data));
+
+  // ---------- 听歌统计（v2.13.0） ----------
+  //  ★ kind 只有两种：'play'（听够了，次数 +1）/ 'listen'（只是在听，只加秒数）。
+  //    界面那边决定什么时候算"听够"，主进程只管记 —— 判定规则要跟着 audio 走，
+  //    放主进程拿不到 currentTime。
+  handle('stats:load', () => statsData());
+  handle('stats:record', (entry, kind) => {
+    statsStore.record(statsData(), entry, kind === 'play' ? 'play' : 'listen');
+    saveStatsSoon();
+    return true;
+  });
 
   // ---------- 关于 / 检查更新（v2.12.4） ----------
   handle('app:version', () => ({ version: app.getVersion(), repo: GH_REPO }));
@@ -1242,6 +1290,14 @@ function registerHandlers() {
   // 缓存也兜一下：丢了可重建，但关窗瞬间把它写上，重启后合集徽章立即齐全（不用重新拉）
   ipcMain.on('cache-collect:save:now', (_e, data) => {
     try { cacheCollect.save(CACHE_COLLECT_FILE, data); } catch (err) { console.error('[cache-collect:save:now]', err.message); }
+  });
+  // v2.13.0：关窗时把"正在听的这一首"最后那点秒数补上，并立刻写盘。
+  // 走 send 不走 invoke 的理由同上；丢掉的话最多损失一首歌的零头，不值得为它冒险。
+  ipcMain.on('stats:record:now', (_e, entry, kind) => {
+    try {
+      statsStore.record(statsData(), entry, kind === 'play' ? 'play' : 'listen');
+      saveStatsNow();
+    } catch (err) { console.error('[stats:record:now]', err.message); }
   });
 
   // ---------- 合集缓存（v2.13.0） ----------
@@ -1738,6 +1794,11 @@ app.on('will-quit', () => {
     saveDownloadsNow();
   } catch (err) {
     console.error('[退出] 收尾下载任务失败：', err.message);
+  }
+  // v2.13.0：统计也是攒 2 秒写的，退出时补一下（beforeunload 那条一般已经写过了，
+  // 这里防的是"托盘退出 / 强制退出"这种没走渲染层 beforeunload 的路径）
+  try { saveStatsNow(); } catch (err) {
+    console.error('[退出] 保存听歌统计失败：', err.message);
   }
   destroyTray();
 });

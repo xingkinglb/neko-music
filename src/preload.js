@@ -18,8 +18,8 @@ contextBridge.exposeInMainWorld('neko', {
   // 查视频详情（标题、分P、合集）
   videoInfo: (bvid) => ipcRenderer.invoke('bili:videoInfo', bvid),
 
-  // 按关键词搜索
-  search: (keyword, page) => ipcRenderer.invoke('bili:search', keyword, page),
+  // 按关键词搜索。v2.13.0：第三个参数 { rank: false } 可关掉本地相关性重排
+  search: (keyword, page, opts) => ipcRenderer.invoke('bili:search', keyword, page, opts),
 
   // 拿到某个视频的音频流地址（返回的是 bili:// 开头的内部地址）
   audioUrl: (bvid, cid) => ipcRenderer.invoke('bili:audioUrl', bvid, cid),
@@ -114,6 +114,14 @@ contextBridge.exposeInMainWorld('neko', {
   // 存的是 { tracks, index, name }，**不含 source**（那个指向的内存视图重启后不存在）
   queueLoad: () => ipcRenderer.invoke('queue:load'),
   queueSave: (data) => ipcRenderer.invoke('queue:save', data),
+
+  // ---------- 听歌统计（v2.13.0） ----------
+  // kind：'play' = 听够了算一次播放（次数 +1）/ 'listen' = 只是在听（只加秒数）。
+  // ★ 判定"有没有听够"的是界面 —— 只有它拿得到 audio.currentTime。
+  statsLoad: () => ipcRenderer.invoke('stats:load'),
+  statsRecord: (entry, kind) => ipcRenderer.invoke('stats:record', entry, kind),
+  // 关窗时把最后一首歌的零头补上（单向消息，理由同 storeSaveNow）
+  statsRecordNow: (entry, kind) => ipcRenderer.send('stats:record:now', entry, kind),
 
   // ---------- 退出兜底（v2.12.5，单向消息） ----------
   // beforeunload 里用。★ 为什么是 send 不是 invoke：退出场景下 invoke 的

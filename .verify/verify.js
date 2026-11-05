@@ -5000,7 +5000,174 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
   else ok('★ 模型下拉是自绘的滚动列表（最多 ~7 行，其余滚）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 64 大类检查）');
+/* ================================================================
+   v2.13.0：倍速 / 搜索重排 / 真听过 / 听歌统计
+   ================================================================ */
+
+/* ① 倍速播放（0.75×~2.0×）
+   ★ 这一组最要紧的是"两处设 src 后都要 applySpeed" ——
+     换 audio.src 会把 playbackRate 打回 1，漏一处就是"切歌倍速失效"，
+     而这个 bug 只在切歌后才出现，手点两下根本发现不了。 */
+{
+  if (!/id="btnSpeed"/.test(html) || !/id="speedPop"/.test(html)) {
+    err('播放条没有倍速按钮 / 菜单容器');
+  } else if (!/audio\.src = myLocalSrc;[\s\S]{0,220}?applySpeed\(\)/.test(appjs)) {
+    err('★ 本地歌设完 src 后没重设倍速 —— 换 src 会把 playbackRate 打回 1');
+  } else if (!/audio\.src = info\.url;[\s\S]{0,220}?applySpeed\(\)/.test(appjs)) {
+    err('★ 在线歌设完 src 后没重设倍速 —— 这就是"切歌倍速失效"的根因');
+  } else if (!/audio\.preservesPitch = true/.test(appjs)) {
+    err('没设 preservesPitch —— 1.5× 可能变成"变调加速"，人声像鸭子');
+  } else if (!/SPEEDS\.includes\(Number\(old\.speed\)\)/.test(appjs)) {
+    err('存档里的 speed 没做合法性校验（0 或负数会让 playbackRate 抛异常）');
+  } else if (!/body\.mini \.speed-wrap/.test(css)) {
+    err('mini 模式没隐藏倍速按钮 —— 会插队把 ✕▢ 挤到第二行');
+  } else ok('★ 倍速：两处设 src 后都重设了（含 preservesPitch），mini 下收起');
+}
+
+/* ② 搜索结果本地相关性重排
+   ★ 权重和必须正好是 1：score 才好落在 0~1、调试时才看得懂"这首歌几分"。
+     浮点加法会有 1e-16 的误差，所以用容差比。 */
+{
+  let mod = null;
+  try { mod = require(path.join(ROOT, 'src', 'search-rank.js')); } catch (_) { mod = null; }
+  if (!mod || typeof mod.rankSearch !== 'function') {
+    err('src/search-rank.js 不存在或没导出 rankSearch');
+  } else {
+    const sum = Object.values(mod.W).reduce((a, b) => a + b, 0);
+    if (Math.abs(sum - 1) > 1e-9) {
+      err(`重排的四项权重加起来是 ${sum}，不是 1 —— 改了权重忘了配平`);
+    } else if (!/rankSearch\(keyword, list\)/.test(read('src/bilibili.js'))) {
+      err('searchVideos 没接重排（函数写了但没调用）');
+    } else {
+      // 真跑一遍：三小时合集不能压过原曲
+      const demo = mod.rankSearch('周杰伦 晴天', [
+        { title: '【合集】100 首华语金曲 3 小时不停', author: '搬运工', duration: '180:00' },
+        { title: '周杰伦 - 晴天（官方MV）', author: '周杰伦', duration: '04:29' },
+      ]);
+      if (!demo.length || demo[0].title.indexOf('晴天') < 0) {
+        err('★ 重排没把原曲顶上去（三小时合集还压在上面）');
+      } else ok('★ 搜索重排：四项权重和为 1，原曲能压过三小时合集');
+    }
+  }
+}
+
+/* ③ 「真听过」才算数
+   ★ 反向断言最重要：以前两处 play() 成功后直接 push 历史，
+     那种写法留着任何一处，这个功能就等于没做。 */
+{
+  if (!/Math\.min\(30, dur \* 0\.9\)/.test(appjs)) {
+    err('阈值不是 min(30 秒, 时长×90%)');
+  } else {
+    const writes = (appjs.match(/DB\.history = \[track, \.\.\.DB\.history\.filter/g) || []).length;
+    if (writes !== 1) {
+      err(`播放历史还有 ${writes} 处"play 成功就写"的旧写法（应该只剩 commitListen 里那一处）`);
+    } else if (!/addEventListener\('timeupdate', \(\) => \{[\s\S]{0,400}?tickListen\(\)[\s\S]{0,600}?if \(!d\) return/.test(appjs)) {
+      err('tickListen 没排在 timeupdate 的"没时长就 return"之前 —— 本地歌刚加载时不会统计');
+    } else if (!/if \(!\(d > 0\) \|\| d > 2\) return/.test(appjs)) {
+      err('没过滤拖进度条 —— 一拖到底就"听完了"');
+    } else ok('★ 真听过：min(30s, 90%) 阈值 + 增量累计 + 拖进度条不算');
+  }
+}
+
+/* ④ 听歌统计的落盘
+   ★ 单独一份 stats.json（理由同 queue.json）、原子写、LRU 上限 ——
+     少任何一条，这个文件都会慢慢长大或者写坏。 */
+{
+  let st = '';
+  try { st = read('src/stats-store.js'); } catch (_) { st = ''; }
+  if (!st) {
+    err('src/stats-store.js 不存在');
+  } else if (!/fs\.renameSync\(tmp, file\)/.test(st)) {
+    err('统计不是原子写（写到一半崩溃会把整个 stats.json 毁掉）');
+  } else if (!/KEEP_TRACKS = \d+/.test(st) || !/KEEP_DAYS = \d+/.test(st)) {
+    err('统计没有容量上限 —— stats.json 会一直长');
+  } else if (!/handle\('stats:record'/.test(mainCode) || !/ipcMain\.on\('stats:record:now'/.test(mainCode)) {
+    err('主进程没接 stats:record / stats:record:now');
+  } else if (!/app\.on\('will-quit'[\s\S]{0,600}?saveStatsNow\(\)/.test(mainCode)) {
+    err('退出时没补写统计 —— 防抖那 2 秒里的记录会丢');
+  } else ok('★ 听歌统计：独立 stats.json + 原子写 + LRU 上限 + 退出兜底');
+}
+
+/* ⑤ 统计页 */
+{
+  if (!/id="i-chart"/.test(html) || !/data-view="stats"/.test(html)) {
+    err('侧栏没有「听歌统计」入口');
+  } else if (!/currentView === 'stats'\) renderStats\(\)/.test(appjs)) {
+    err('renderAll 没有 stats 分支 —— 点了入口也不会画页面');
+  } else if (!/data-stat-track/.test(appjs) || !/function statTrackFrom/.test(appjs)) {
+    err('统计页的"最常听的歌"点不了（没有还原成可播 track 的那一步）');
+  } else ok('★ 统计页：侧栏入口 + renderAll 分支 + 榜单可点播');
+}
+
+/* ⑥ v2.13.1：两个"只有真点一下才会发现"的回归
+   ★ 第一条是最贵的：`hidden` 属性的 display:none 来自浏览器默认样式表，
+     优先级低于作者写的 `.speed-pop { display: flex }` —— 不显式补一句，
+     菜单的 hidden 等于没用，会永远挂在屏幕上（Neo 实测截图）。
+   ★ 第二条：按钮用 min-width 时，4 字符的 "1.0×" 和 5 字符的 "0.75×"
+     宽度不同，切档会把整条播放器挤一下。必须定宽。 */
+{
+  if (!/\.speed-pop\[hidden\]\s*\{\s*display:\s*none/.test(css)) {
+    err('★ .speed-pop 的 [hidden] 没写 display:none —— 菜单会一直展开、关不掉');
+  } else if (/\.speed-btn\s*\{[^}]*min-width/.test(css)) {
+    err('★ 倍速按钮还在用 min-width —— 切到 0.75× 会比 1.0× 宽一个字，把播放条挤一下');
+  } else ok('★ 倍速菜单能真正隐藏 + 按钮定宽（切档不挤布局）');
+}
+
+/* ⑦ v2.13.1：歌曲榜 5 首 → 30 首，且本地歌也能进榜 */
+{
+  if (!/\.slice\(0, 30\)/.test(appjs)) {
+    err('最常听的歌不是 30 首');
+  } else if (/\.filter\(\(t\) => t\.bvid &&/.test(appjs)) {
+    err('本地歌还是被排除在歌曲榜外（只按 bvid 过滤）');
+  } else if (!/function statTrackFrom[\s\S]{0,400}?t\.localPath \|\| \(String\(key\)\.startsWith\('l:'\)/.test(appjs)) {
+    err('本地歌没进榜，或进了榜但还原不成可播的 track（缺 localPath / 老记录拆 key 的兜底）');
+  } else if (!/localPath: String\(v\.localPath \|\| ''\)/.test(read('src/stats-store.js'))) {
+    err('stats-store 没存 localPath —— 本地歌在榜单里点不了');
+  } else ok('★ 歌曲榜 30 首，本地歌也进榜且可播');
+}
+
+/* ⑧ v2.13.2：合集曲目必须带 mid
+   ★ 这是 Neo 实测报的 bug：随机播到合集里的某一集，听歌统计的 UP 榜不涨。
+     根因是 buildCollectionEntries 只带了 author 名字、没带 mid，
+     而统计表是按 mid 归档的 —— 次数照样记，UP 榜上永远是 0。
+   ★ 四处都要带，漏一处就有一半场景不灵：
+     ① 新建曲目表 ② 写进缓存 ③ 老缓存还原时兜底 ④ 合集入口行（会进歌单/收藏） */
+{
+  if (!/const ownerMid = \(info\.owner && info\.owner\.mid\) \|\| 0/.test(appjs)) {
+    err('★ buildCollectionEntries 没带 mid —— 合集里的歌听再多次，UP 榜也不会涨');
+  } else if (!/author: e\.author, mid: e\.mid \|\| 0/.test(appjs)) {
+    err('曲目表缓存里没存 mid —— 重启后从缓存展开的合集又丢了 UP');
+  } else if (!/if \(!e\.mid\) e\.mid = mid/.test(appjs)) {
+    err('老缓存（曲目表里没有 mid）没有兜底补齐 —— 升级前的合集永远不会记 UP');
+  } else if (!/function makeEntryTrack[\s\S]{0,500}?mid: \(info\.owner && info\.owner\.mid\) \|\| 0/.test(appjs)) {
+    err('合集入口行没带 mid —— 它会进歌单/收藏，从那儿播就统计不到 UP');
+  } else ok('★ 合集曲目全程带 mid（新建 / 缓存 / 老缓存兜底 / 入口行）');
+}
+
+/* ⑨ UP 榜 10 位 */
+{
+  if (!/\.slice\(0, 10\);?[^\n]*5 → 10/.test(appjs) && !/topUps[\s\S]{0,300}?\.slice\(0, 10\)/.test(appjs)) {
+    err('UP 榜不是 10 位');
+  } else ok('★ UP 榜取前 10 位');
+}
+
+/* ⑩ v2.13.3：统计页必须单列铺满 + 有壁纸时要有深底
+   ★ "单列"是 Neo 明确要的：两列的话只有几首时会全堆在左列、右边空一大片，
+     而且 B 站那种长标题在窄栏里被截得只剩半句。
+   ★ 卡片底色：--panel 是白色 4.5%，铺在亮壁纸上等于没有 —— 灰字直接糊进背景。 */
+{
+  if (/\.stat-rank\.two-col/.test(css)) {
+    err('★ 歌曲榜又变回两列了 —— 应该是单列铺满（只有几首时两列会空一半）');
+  } else if (!/\.stat-rank-row\s*\{[^}]*width:\s*100%/.test(css)) {
+    err('歌曲榜的行没铺满整行（会缩成内容宽度，看起来只占一半）');
+  } else if (!/body\.has-bg \.stat-block\s*\{[^}]*rgb\(var\(--glass-rgb\) \/ 0\.4/.test(css)) {
+    err('★ 有壁纸时统计卡片没换深底 —— 浅色壁纸上文字会糊');
+  } else if (!/body\.has-bg \.stat-card\s*\{[^}]*rgb\(var\(--glass-rgb\) \/ 0\.4/.test(css)) {
+    err('★ 有壁纸时统计数字卡没换深底');
+  } else ok('★ 统计页：单列铺满 + 有壁纸时深底（亮壁纸下也读得清）');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 68 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
 
 /* v2.12.5 Neo 抓的老 bug：定位按钮在歌单里永远失败。

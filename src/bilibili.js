@@ -13,6 +13,9 @@
 const https = require('https');
 const crypto = require('crypto');
 
+// v2.13.0：搜索结果的相关性重排（纯逻辑，单独一个文件，理由见那个文件的头注释）
+const { rankSearch } = require('./search-rank');
+
 // ============================================================
 //  第 1 部分：伪装成浏览器
 // ============================================================
@@ -388,8 +391,9 @@ async function getVideoInfo(bvid) {
  * 搜索视频
  * @param {string} keyword 关键词
  * @param {number} page    页码，从 1 开始
+ * @param {object} [opts]  { rank: false } 可以关掉相关性重排（回到 B 站原序）
  */
-async function searchVideos(keyword, page = 1) {
+async function searchVideos(keyword, page = 1, opts) {
   const base = 'https://api.bilibili.com/x/web-interface/wbi/search/type';
   const query = await signParams({ search_type: 'video', keyword, page, page_size: 30 });
   const json = await requestJSON(`${base}?${query}`);
@@ -406,7 +410,13 @@ async function searchVideos(keyword, page = 1) {
     play: v.play,
     pubdate: v.pubdate,
   }));
-  return { list, numPages: json.data.numPages || 1 };
+
+  // ★ v2.13.0：本地重排。B 站的 totalrank 优化的是点击率 ——
+  //   搜「晴天」出来的第一页全是三小时合集和翻唱串烧，原曲被压在十几条之后。
+  //   默认重排，用户想按 B 站原序看可以传 { rank: false }。
+  const ranked = (!opts || opts.rank !== false) ? rankSearch(keyword, list) : list;
+
+  return { list: ranked, numPages: json.data.numPages || 1 };
 }
 
 /**

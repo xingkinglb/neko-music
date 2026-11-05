@@ -603,6 +603,12 @@ const DOWNLOAD_DEFAULTS = {
   skipExisting: true,   // 本地库里已有的跳过，不重复下
 };
 
+/** v2.13.0：可选的播放速度。
+ *  ★ 只给这六档，不做无级调节 —— 倍速是个"要么听得清、要么快点听完"的开关，
+ *    0.83× 这种奇怪的值除了让人误触没别的作用。
+ *  ★ 0.75 而非 0.5：0.5× 在大多数音频里已经糊得没法听了。 */
+const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2];
+
 /** 外观设置的默认值，用来给老存档补洞 */
 const DEFAULT_SETTINGS = {
   theme: 'pink',
@@ -615,6 +621,12 @@ const DEFAULT_SETTINGS = {
   autoLyric: false,   // 自动加载歌词：默认关（用户可开，或手动点「词」）
   lyricWin: null,     // 桌面歌词悬浮窗的设置（默认由 DEFAULT_LYRIC_WIN 补）
   playMode: 'list',   // 播放模式：list 列表循环 / one 单曲循环 / shuffle 随机 / order 顺序
+  // v2.13.0：播放速度。★ 全局一份，不按曲记 —— 听播客的人整场都 1.5×，
+  //   按曲记反而要一首首调。切歌 / 重启都沿用这个值。
+  speed: 1,
+  // v2.13.0：搜索是否走本地相关性重排。默认开 —— 这是纯粹的正向提升
+  // （B 站原序里长合集和翻唱串烧会压过原曲），但留个开关给"我就想看 B 站怎么排"的人。
+  searchRank: true,
   // v2.1.0：窗口状态 —— 上次是不是 mini、mini 展开没展开、完整模式下的窗口位置尺寸。
   // 缺省全为"不是 mini"，所以老存档零迁移，行为和以前一模一样。
   window: { mini: false, fullBounds: null, miniExpanded: false },
@@ -763,6 +775,12 @@ function migrateSettings() {
     lyricWin: null,   // 下面单独补（要逐项夹范围，不能整块照抄）
     // 播放模式：老存档（以前是"随机开关 + 循环开关"两个字段）里没有这一项，就默认列表循环
     playMode: isPlayModeId(old.playMode) ? old.playMode : DEFAULT_SETTINGS.playMode,
+    // v2.13.0：播放速度。只认菜单里那几个值 —— 手改坏了的存档（0 或者 -1）
+    // 会让 audio.playbackRate 抛异常，绝不能放过去。
+    speed: SPEEDS.includes(Number(old.speed)) ? Number(old.speed) : DEFAULT_SETTINGS.speed,
+    // v2.13.0：搜索重排开关。★ 只有明确的 false 才关（false 是用户的真实选择），
+    // 其余（没这一项 / 手改成了 null / "false" 字符串）一律回到默认的 true。
+    searchRank: old.searchRank !== false,
     // v2.1.0：窗口状态（mini 模式 + 完整模式的窗口位置尺寸）。
     // 老存档没有这一项 → 补成缺省（非 mini），打开后的行为完全不变。
     window: {
@@ -1390,6 +1408,115 @@ function applyTrackCover(track) {
   el.classList.toggle('no-art', !(track && track.cover));
 }
 
+/* ============================================================
+   第 3.5 部分：「真听过」判定 + 听歌统计（v2.13.0）
+   ------------------------------------------------------------
+   以前是「audio.play() 返回成功」就立刻写进播放历史 —— 于是点着玩两下，
+   历史里就多了一堆根本没听的歌，统计和"最近播放"跟着一起脏。
+
+   现在改成：**听够了才算**。
+     · 阈值 = min(30 秒, 时长 × 90%)
+       长歌听够 30 秒（不需要听完），20 秒的短片要听到 18 秒。
+       这个规则抄自同类项目的通行做法，对短歌公平，对长歌宽松。
+     · 累计的是 **currentTime 的增量**，不是墙钟时间。
+       倍速 2× 听 15 秒 = 听了 30 秒的内容，用墙钟会算错一半。
+     · 拖进度条（增量 > 2 秒）不计入 —— 否则一拖到底就"听完了"。
+
+   ★ 两个事件分开报，别混
+     'play'   = 达标，播放次数 +1（这一条的 sec 传 0，避免和下面重复加）
+     'listen' = 切歌 / 关窗时结算，只加秒数
+     分开的好处：听 5 分钟没达标就切走，次数不加、时长照样记 —— 这才对。
+   ============================================================ */
+
+/** 当前这一首的收听状态。track 为 null 表示"没在统计" */
+let listen = {
+  track: null,     // 正在统计的那首
+  sec: 0,          // 已累计的"实际播放"秒数
+  counted: false,  // 是否已经算过一次播放（防重复 commit）
+  lastT: 0,        // 上一次 timeupdate 时的 currentTime
+};
+
+/** 这次要听多久才算"听过" */
+function listenNeed() {
+  const dur = (isFinite(audio.duration) && audio.duration > 0)
+    ? audio.duration
+    : ((listen.track && listen.track.duration) || 0);
+  return dur > 0 ? Math.min(30, dur * 0.9) : 30;
+}
+
+/** 把一条 track 压成统计条目（本地歌没有 bvid，用文件路径当 key） */
+function statsEntry(track) {
+  if (!track) return null;
+  const lp = track.localPath || '';
+  return {
+    key: lp ? 'l:' + lp : `${track.bvid || ''}|${track.cid || 0}`,
+    bvid: track.bvid || '',
+    // ★ v2.13.1：本地歌必须带上路径 —— 统计表里只存 key（'l:路径'）的话，
+    //   榜单要想还原成"可播的 track"还得把 key 拆开反推，不如直接存一份路径。
+    localPath: lp,
+    title: track.title || '',
+    author: track.author || '',
+    mid: track.mid || 0,
+    cover: track.cover || '',
+    sec: 0,
+  };
+}
+
+/** 达标了：进播放历史 + 次数 +1 */
+function commitListen(track) {
+  if (!track) return;
+  DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
+  DB.lastTrack = track;
+  persistLater();
+  // sec 显式给 0：这一条只负责"次数 +1"，秒数留给切歌时的 settleListen 统一结算，
+  // 否则同一段听歌时长会在 days / tracks 里各加两遍。
+  const e = statsEntry(track);
+  if (e) api('statsRecord', Object.assign(e, { sec: 0 }), 'play').catch(() => {});
+}
+
+/** 切歌 / 关窗时结算：只加秒数，不动次数 */
+function settleListen(send) {
+  if (listen.track && listen.sec >= 1) {
+    const e = statsEntry(listen.track);
+    if (e) {
+      const payload = Object.assign(e, { sec: Math.round(listen.sec) });
+      // send=true 走单向消息（关窗时用，理由同 storeSaveNow）
+      if (send) { try { window.neko.statsRecordNow(payload, 'listen'); } catch { /* 退出路上不报错 */ } }
+      else api('statsRecord', payload, 'listen').catch(() => {});
+    }
+  }
+  resetListen();
+}
+
+function resetListen() {
+  listen = { track: null, sec: 0, counted: false, lastT: 0 };
+}
+
+/** 开始统计一首新歌（playAt 里调） */
+function beginListen(track) {
+  listen = { track: track || null, sec: 0, counted: false, lastT: 0 };
+}
+
+/**
+ * 每次 timeupdate 走一遍。
+ * ★ 放在"没有时长就 return"之前 —— 本地歌刚加载时 duration 还是 NaN，
+ *   但人已经在听了，不能因为画不了进度条就不统计。
+ */
+function tickListen() {
+  if (!listen.track) return;
+  const t = audio.currentTime || 0;
+  const d = t - listen.lastT;
+  listen.lastT = t;
+  // 负数 / 跳转（拖进度条、循环回到开头）：不算听过
+  if (!(d > 0) || d > 2) return;
+  if (audio.paused) return;
+  listen.sec += d;
+  if (!listen.counted && listen.sec >= listenNeed()) {
+    listen.counted = true;
+    commitListen(listen.track);
+  }
+}
+
 /**
  * 播放队列里的第 index 首
  */
@@ -1400,6 +1527,11 @@ async function playAt(index) {
   const seq = ++playSeq;
   queue.index = index;
   const track = queue.tracks[index];
+  // ★ v2.13.0：换歌先把上一首的收听时长结算掉，再开始统计这一首。
+  //   放在这么靠前的位置，是因为下面任何一条提前 return（取地址失败等）
+  //   都不该让上一首的时长白白丢掉。
+  settleListen();
+  beginListen(track);
   // ★ 不管当前是什么模式都记一笔「最近播过」——
   //   从列表模式切到随机时，这份历史才有东西可用（否则要等播满 300 首才准）。
   noteShufflePlay(track);
@@ -1445,6 +1577,7 @@ async function playAt(index) {
       audio.src = myLocalSrc;
       lastSetSrc = myLocalSrc;
       audio.volume = (DB.settings.volume ?? 80) / 100;
+      applySpeed();   // ★ v2.13.0：换 src 会把 playbackRate 打回 1，必须重设（本地歌这条也一样）
 
       // 本地歌的时长常常是未知的（导入时拿不到）→ 加载出元数据后回填，
       // 写回 DB.local 那条，下次进来就有时长了。
@@ -1472,7 +1605,8 @@ async function playAt(index) {
       if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
       endStartWait(seq);
 
-      DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
+      // ★ v2.13.0：这里**不再**写播放历史 —— 改成"听够了才写"（见 tickListen / commitListen）。
+      //   只记 lastTrack：播放条、下载按钮要靠它显示当前这首，那和"听没听过"是两回事。
       DB.lastTrack = track;
       persistLater();
       renderAll();
@@ -1520,6 +1654,7 @@ async function playAt(index) {
     lastSetSrc = info.url;
     mySrc = info.url;
     audio.volume = (DB.settings.volume ?? 80) / 100;
+    applySpeed();   // ★ v2.13.0：同上 —— 换 src 后 playbackRate 会回到 1，这里是"倍速切歌失效"的根因
     // ★ v2.8.0 修订：挂一个"到期前主动刷新"的定时器（预防式，见 armDeadlineTimer）
     armDeadlineTimer(info.url, seq);
 
@@ -1544,8 +1679,9 @@ async function playAt(index) {
     if (seq !== playSeq) return;   // 播放期间被切走 → 不记历史、不刷界面
     endStartWait(seq);
 
-    // 记入历史（同样的歌不重复记录，把它提到最前面）
-    DB.history = [track, ...DB.history.filter((t) => !sameTrack(t, track))].slice(0, 100);
+    // ★ v2.13.0：播放历史改由"听够了"触发（tickListen → commitListen），
+    //   这里只记 lastTrack。以前在这里直接 push 历史，等于"点一下就听过"，
+    //   连点着玩几下，「最近播放」就被污染了。
     DB.lastTrack = track;
     persistLater();
 
@@ -1966,7 +2102,16 @@ async function backfillCover(bvid) {
 
 async function collectEntriesFor(track) {
   const cached = DB.collectParts[track.bvid];
-  if (cached && cached.length > 1) return cachedCollectEntries(track.bvid, cached);
+  if (cached && cached.length > 1) {
+    const entries = cachedCollectEntries(track.bvid, cached);
+    // ★ v2.13.2：老缓存的曲目表里没有 mid（当年只存了 author）——
+    //   用合集入口这一条的 mid 就地补上。分P 和 UP 合集都是同一个 UP，
+    //   所以这个兜底是准的。★ 就地改而不是 map 出新数组：memo 里存的是同一份，
+    //   就地补才能只做一次，否则每次展开都要复制一遍上百集。
+    const mid = track.mid || 0;
+    if (mid) for (const e of entries) { if (!e.mid) e.mid = mid; if (!e.author) e.author = track.author || ''; }
+    return entries;
+  }
 
   if (collectFetching.has(track.bvid)) return collectFetching.get(track.bvid);
 
@@ -1980,7 +2125,7 @@ async function collectEntriesFor(track) {
       // 存一份剥掉封面 URL 的曲目表（封面是长链接，上百集全存会把存档撑大）
       DB.collectParts[track.bvid] = entries.map((e) => ({
         bvid: e.bvid, cid: e.cid, page: e.page,
-        title: e.title, duration: e.duration, author: e.author,
+        title: e.title, duration: e.duration, author: e.author, mid: e.mid || 0,
       }));
       saveCacheSoon();   // 曲目表进了缓存文件（cache-collect.json），不再陪主存档写 7.5MB
       // ★ v2.0.5：顺手把这张合集封面单独记一条（整张表只多这 1 个 URL）
@@ -2119,15 +2264,21 @@ async function expandCollection(track, fallback) {
 
 /** 把一个视频详情整理成面板条目（优先 UP 合集，其次分P） */
 function buildCollectionEntries(info) {
+  // ★ v2.13.2：每一集都带上 mid（UP 主的 uid）。
+  //   以前只带了 author 名字，结果"随机播到合集里的某一集"时，
+  //   听歌统计按 mid 归档找不到人 —— 播放次数照样记，但 UP 榜上永远是 0。
+  //   分P 和 UP 合集都是同一个 UP 的，直接用 info.owner 就行。
+  const ownerMid = (info.owner && info.owner.mid) || 0;
+  const ownerName = (info.owner && info.owner.name) || '';
   if (info.season && info.season.episodes && info.season.episodes.length) {
     return info.season.episodes.map((ep) => ({
       bvid: ep.bvid, cid: ep.cid, page: ep.page || 1, title: ep.title,
-      author: info.owner.name, cover: ep.cover || info.cover, duration: ep.duration,
+      author: ownerName, mid: ownerMid, cover: ep.cover || info.cover, duration: ep.duration,
     }));
   }
   return (info.pages || []).map((p) => ({
     bvid: info.bvid, cid: p.cid, page: p.page, title: p.title,
-    author: info.owner.name, cover: info.cover, duration: p.duration,
+    author: ownerName, mid: ownerMid, cover: info.cover, duration: p.duration,
   }));
 }
 
@@ -3144,11 +3295,18 @@ async function renderSearch() {
     </div>`;
     return;
   }
+  const ranked = DB.settings.searchRank !== false;
   content().innerHTML = `
     <div class="block-head">
       <div>
         <div class="block-title">“${esc(searchKeyword)}” 的搜索结果</div>
-        <div class="block-sub">第 ${searchPage} 页 · 共 ${searchResults.length} 条</div>
+        <div class="block-sub">
+          第 ${searchPage} 页 · 共 ${searchResults.length} 条 ·
+          <button class="rank-toggle${ranked ? ' on' : ''}" id="btnRankToggle"
+                  title="${ranked ? '当前按「标题相关度 + 时长合理性」重排，点一下换回 B 站原序' : '当前是 B 站原序（长合集容易压过原曲），点一下按相关度重排'}">
+            ${ranked ? '已按相关度重排' : '按 B 站原序'}
+          </button>
+        </div>
       </div>
       <div class="block-actions">
         <button class="ghost-btn" id="btnPlayAll">${ic('i-play')}<span>播放全部</span></button>
@@ -3165,7 +3323,8 @@ async function doSearch(keyword, page = 1) {
   syncNavHighlight();   // 搜索结果是"临时页"，进来就把侧栏高亮清掉（不然会停在上一项）
   content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在 B 站搜索…</div>`;
   try {
-    const res = await api('search', keyword, page);
+    // v2.13.0：默认走本地重排（把人要找的原曲顶上去），用户可在结果页一键换回 B 站原序
+    const res = await api('search', keyword, page, { rank: DB.settings.searchRank !== false });
     searchResults = res.list.map((v) => ({
       bvid: v.bvid,
       cid: null,        // 搜索结果没有 cid，播放时再补全
@@ -3724,6 +3883,242 @@ function renderHistory() {
       emptyText: '还没有播放记录',
     })}`;
 }
+
+/* ============================================================
+   页面：听歌统计（v2.13.0）
+   ------------------------------------------------------------
+   数据在 stats.json（主进程管），这里只负责读出来画图。
+   ★ 为什么每次进页面要重新拉一次、但 15 秒内不重复拉
+     renderAll 会被很多操作触发（切歌、收藏、排序…），每次都读一遍文件太浪费；
+     但统计是会变的（刚听完一首），缓存太久又会看到旧数字。15 秒是个折中。
+   ★ 正在听的那首的秒数还没结算（settleListen 要等切歌），
+     所以算总数时把 listen.sec 现加上，不然"听了半小时点进来还是 0"。
+   ============================================================ */
+
+let statsCache = null;    // 最近一次拉到的统计（null = 还没拉过）
+let statsAt = 0;          // 上次拉取的时间戳
+let statsPending = false; // 是否正在拉（防重复请求）
+
+/** 本地时区的 YYYY-MM-DD（和 stats-store.js 的 dayKey 保持一致） */
+function dateKeyOf(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 统计页的时长说法：59 秒 / 12 分钟 / 3.4 小时 / 128 小时 */
+function fmtSpan(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  if (s < 60) return s + ' 秒';
+  if (s < 3600) return Math.round(s / 60) + ' 分钟';
+  const h = s / 3600;
+  return (h >= 10 ? Math.round(h) : h.toFixed(1)) + ' 小时';
+}
+
+function renderStats() {
+  currentView = 'stats';
+
+  const stale = !statsCache || (Date.now() - statsAt > 15000);
+  if (stale && !statsPending) {
+    statsPending = true;
+    api('statsLoad')
+      .then((d) => {
+        statsCache = d || { days: {}, tracks: {}, ups: {} };
+        statsAt = Date.now();
+      })
+      .catch(() => {
+        if (!statsCache) statsCache = { days: {}, tracks: {}, ups: {} };
+        // ★ statsAt 失败也要更新 —— 否则 stale 永远为真，
+        //   finally 重画 → 又发请求 → 再失败，变成死循环打主进程。
+        statsAt = Date.now();
+      })
+      .finally(() => {
+        statsPending = false;
+        // 回来时人可能已经切走了 —— 别把别的页面盖掉
+        if (currentView === 'stats') renderStats();
+      });
+  }
+
+  if (!statsCache) {
+    content().innerHTML = `<div class="loading-block"><div class="spinner"></div>正在统计…</div>`;
+    return;
+  }
+
+  const days = statsCache.days || {};
+  const tracks = statsCache.tracks || {};
+  const ups = statsCache.ups || {};
+
+  // 正在听、还没结算的秒数也算进去（今天这一格和总数都要）
+  const liveSec = (listen.track && listen.sec > 0) ? listen.sec : 0;
+
+  let totalSec = liveSec;
+  let totalPlays = 0;
+  for (const k of Object.keys(days)) {
+    totalSec += days[k].sec || 0;
+    totalPlays += days[k].plays || 0;
+  }
+
+  // 活跃天数 + 连续天数。★ 今天还没听不算断 —— 早上打开软件不该看到"连续 0 天"
+  const dayKeys = Object.keys(days);
+  const today = new Date();
+  const todayKey = dateKeyOf(today);
+  let streak = 0;
+  {
+    const cur = new Date(today);
+    if (!days[todayKey]) cur.setDate(cur.getDate() - 1);
+    while (days[dateKeyOf(cur)]) {
+      streak += 1;
+      cur.setDate(cur.getDate() - 1);
+    }
+  }
+
+  // ---- 近 30 天柱状图 ----
+  const bars = [];
+  {
+    const cur = new Date(today);
+    cur.setDate(cur.getDate() - 29);
+    for (let i = 0; i < 30; i++) {
+      const k = dateKeyOf(cur);
+      const sec = (days[k] ? days[k].sec || 0 : 0) + (k === todayKey ? liveSec : 0);
+      bars.push({ k, sec, md: `${cur.getMonth() + 1}/${cur.getDate()}` });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+  const barMax = Math.max(1, ...bars.map((b) => b.sec));
+
+  // ---- 榜单 ----
+  const topUps = Object.keys(ups)
+    .map((k) => ({ mid: k, ...ups[k] }))
+    .filter((u) => (u.sec || 0) > 0)
+    .sort((a, b) => (b.sec || 0) - (a.sec || 0))
+    .slice(0, 10);   // v2.13.2：5 → 10（5 个太少，看不出"最近常听谁"）
+
+  // ★ v2.13.1：本地歌也进榜了（Neo 问"本地歌不能记录吗"——能，而且应该记）。
+  //   判据从"有 bvid"改成"有 bvid 或 localPath"：只要能还原成可播的 track 就该上榜。
+  //   本地歌点一下照样能播（走 local:// 那条路），只是没有 UP 主、不进 UP 榜。
+  const topTracks = Object.keys(tracks)
+    .map((k) => ({ key: k, ...tracks[k] }))
+    .filter((t) => (t.plays || 0) > 0 && (t.bvid || t.localPath))
+    .sort((a, b) => (b.plays - a.plays) || (b.sec - a.sec))
+    .slice(0, 30);   // v2.13.1：从 5 首放到 30 首
+
+  const empty = !dayKeys.length && !topTracks.length;
+
+
+  content().innerHTML = `
+    <div class="block-head">
+      <div>
+        <div class="block-title">听歌统计</div>
+        <div class="block-sub">${empty ? '还没有数据' : `一共 ${dayKeys.length} 天有记录 · 只统计「听过」的歌`}</div>
+      </div>
+    </div>
+
+    ${empty ? `
+      <div class="empty">
+        <div class="big">${ic('i-chart')}</div>
+        <div class="msg">还没有听歌记录</div>
+        <div class="hint">一首歌听满 30 秒（短片听到 90%）就会记进来</div>
+      </div>` : `
+
+      <div class="stat-cards">
+        <div class="stat-card">
+          <div class="stat-num">${fmtSpan(totalSec)}</div>
+          <div class="stat-label">总时长</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">${totalPlays}<span class="stat-unit">次</span></div>
+          <div class="stat-label">播放次数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">${dayKeys.length}<span class="stat-unit">天</span></div>
+          <div class="stat-label">活跃天数</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-num">${streak}<span class="stat-unit">天</span></div>
+          <div class="stat-label">连续收听</div>
+        </div>
+      </div>
+
+      <div class="stat-block">
+        <div class="stat-block-head">
+          <span>最近 30 天</span>
+          <span class="stat-block-sub">最高一天 ${fmtSpan(barMax === 1 && !bars.some(b => b.sec) ? 0 : barMax)}</span>
+        </div>
+        <div class="stat-bars">
+          ${bars.map((b) => `
+            <div class="stat-bar${b.sec > 0 ? ' has' : ''}" title="${b.k} · ${fmtSpan(b.sec)}">
+              <div class="stat-bar-fill" style="height:${Math.max(2, Math.round((b.sec / barMax) * 100))}%"></div>
+              <span class="stat-bar-day">${b.md}</span>
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="stat-block">
+        <div class="stat-block-head">
+          <span>最常听的 UP 主</span>
+          <span class="stat-block-sub">${topUps.length} 位 · 点一下进主页</span>
+        </div>
+        ${topUps.length ? `<div class="stat-ups">
+          ${topUps.map((u, i) => `
+            <div class="stat-up" data-stat-up="${esc(u.mid)}" data-up-name="${esc(u.name || '')}" title="点一下看他/她的全部投稿">
+              <span class="stat-up-no">${i + 1}</span>
+              <span class="stat-up-name">${esc(u.name || ('UID ' + u.mid))}</span>
+              <span class="stat-up-val">${fmtSpan(u.sec)}</span>
+            </div>`).join('')}
+        </div>` : `<div class="stat-none">还没有数据</div>`}
+      </div>
+
+      <div class="stat-block">
+        <div class="stat-block-head">
+          <span>最常听的歌</span>
+          <span class="stat-block-sub">${topTracks.length} 首 · 点一下播放</span>
+        </div>
+        ${topTracks.length ? `<div class="stat-rank">
+          ${topTracks.map((t, i) => `
+            <div class="stat-rank-row" data-stat-track="${esc(t.key)}" title="点一下播放">
+              <span class="stat-rank-no">${i + 1}</span>
+              <span class="stat-rank-name">${esc(t.title)}${t.author ? `<i> · ${esc(t.author)}</i>` : ''}${t.localPath ? '<em class="stat-local">本地</em>' : ''}</span>
+              <span class="stat-rank-val">${t.plays} 次</span>
+            </div>`).join('')}
+        </div>` : `<div class="stat-none">还没有数据</div>`}
+      </div>
+    `}`;
+}
+
+/** 从统计条目还原出一首能播的 track（cid 留空，播放时会自动补） */
+function statTrackFrom(key) {
+  const t = statsCache && statsCache.tracks && statsCache.tracks[key];
+  if (!t) return null;
+
+  // 本地歌：路径是唯一身份。文件被挪走 / 删掉的情况交给 playAt 自己判（它会标"文件不见了"），
+  // 这里不提前拦 —— 挪回来就还能播。
+  // ★ key 就是 'l:路径'，所以就算老记录里没存 localPath 字段也能从 key 拆出来（向后兼容）。
+  const lp = t.localPath || (String(key).startsWith('l:') ? String(key).slice(2) : '');
+  if (lp) {
+    return {
+      localPath: lp,
+      bvid: null,
+      cid: null,
+      page: 1,
+      title: t.title || '本地文件',
+      author: t.author || '',
+      mid: 0,
+      cover: t.cover || '',
+      duration: 0,
+    };
+  }
+
+  if (!t.bvid) return null;
+  return {
+    bvid: t.bvid,
+    cid: null,
+    page: 1,
+    title: t.title || '未知歌曲',
+    author: t.author || '',
+    mid: t.mid || 0,
+    cover: t.cover || '',
+    duration: 0,
+  };
+}
+
 
 /* ---------- 页面 5：某个歌单 ---------- */
 function renderPlaylist(playlistId) {
@@ -6277,6 +6672,7 @@ function renderAll() {
   else if (currentView === 'favorites') renderFavorites();
   else if (currentView === 'my') { openMyPage(); }   // v2.12.4 批三：我的主页（async，自己管渲染）
   else if (currentView === 'history') renderHistory();
+  else if (currentView === 'stats') renderStats();   // v2.13.0：听歌统计
   else if (currentView === 'downloads') renderDownloads();
   else if (currentView === 'local') renderLocal();   // v2.8.0 批次 B
   else if (currentView === 'up') renderUp();
@@ -7812,6 +8208,87 @@ function applyVolume(v, save) {
 /** 静音前的音量，用来在点"取消静音"时还原。只在本次运行里记，不写进存档。 */
 let volBeforeMute = 80;
 
+/* ============================================================
+   播放速度（v2.13.0）
+   ------------------------------------------------------------
+   ★ 为什么按钮上写字不画图标：倍速是个"状态"，不是"动作"。
+     1.5× 这三个字符比任何图标都清楚，还省一次辨认。
+   ★ 为什么全局一份：听播客的人整场都 1.5×，按曲记反而要一首首调。
+   ============================================================ */
+
+/** 1 → "1.0"、1.25 → "1.25"、0.75 → "0.75"（只有整数补一位小数，其余原样） */
+function fmtSpeed(v) {
+  return Number.isInteger(v) ? v.toFixed(1) : String(v);
+}
+
+/**
+ * 把当前速度刷到 audio 上，并同步按钮 / 菜单。
+ * ★★ 每次设完 audio.src 都必须再调一次 —— 换 src 会让浏览器把 playbackRate
+ *    打回 1。这是这类播放器最经典的"倍速切歌就失效"的根因，两处设 src 都要调。
+ * ★ preservesPitch 显式设 true：Chromium 的默认值虽然是 true，但显式写下来
+ *    才能防止以后某次改代码顺手把它带掉 —— 变了调的 1.5× 是没法听的。
+ */
+function applySpeed() {
+  const sp = SPEEDS.includes(Number(DB.settings.speed)) ? Number(DB.settings.speed) : 1;
+  try {
+    audio.preservesPitch = true;
+    audio.mozPreservesPitch = true;      // 老内核兜底（Electron 用不到，但留着不碍事）
+    audio.webkitPreservesPitch = true;
+    audio.playbackRate = sp;
+  } catch { /* audio 还没 ready —— 下一次 applySpeed 会补上 */ }
+  updateSpeedUI(sp);
+}
+
+/** 按钮上的数字 + 菜单里的打勾 */
+function updateSpeedUI(sp) {
+  const val = (typeof sp === 'number') ? sp : (Number(DB.settings.speed) || 1);
+  const btn = $('btnSpeed');
+  if (btn) {
+    const txt = fmtSpeed(val) + '×';
+    if (btn.textContent !== txt) btn.textContent = txt;
+    btn.title = `播放速度（当前 ${txt}），点一下换`;
+    // 非 1× 时按钮点亮 —— 一眼能看出"歌在快放"，不然容易以为自己记错时间
+    btn.classList.toggle('on', val !== 1);
+  }
+  const pop = $('speedPop');
+  if (pop) {
+    pop.querySelectorAll('.speed-item').forEach((b) => {
+      b.classList.toggle('on', Number(b.dataset.speed) === val);
+    });
+  }
+}
+
+function setSpeed(v) {
+  const sp = SPEEDS.includes(Number(v)) ? Number(v) : 1;
+  DB.settings.speed = sp;
+  applySpeed();
+  persistLater();
+  // 正在播的话给一句轻提示：改完没声音变化（比如本来就没歌）容易以为没生效
+  if (audio.src) toast(`播放速度 ${fmtSpeed(sp)}×`);
+}
+
+/** 菜单只画一次（六个按钮），之后靠 .on 类表示当前选中 */
+function renderSpeedMenu() {
+  const pop = $('speedPop');
+  if (pop) {
+    pop.innerHTML = SPEEDS.map((s) => `
+      <button class="speed-item" data-speed="${s}" type="button">
+        <span>${fmtSpeed(s)}×</span>
+        <svg class="ic"><use href="#i-check"/></svg>
+      </button>`).join('');
+  }
+  applySpeed();
+}
+
+function toggleSpeedMenu(open) {
+  const pop = $('speedPop');
+  const btn = $('btnSpeed');
+  if (!pop || !btn) return;
+  const want = (open === undefined) ? pop.hidden : !!open;
+  pop.hidden = !want;
+  btn.classList.toggle('open', want);
+}
+
 /** 把音量的三处显示同步：喇叭图标 + 浮层数字 + 竖向滑块 */
 function updateVolumeUI(v) {
   const val = (v === undefined) ? Math.round((audio.volume || 0) * 100) : v;
@@ -7840,6 +8317,8 @@ function bindEvents() {
       if (window.neko.cacheCollectSaveNow) {
         window.neko.cacheCollectSaveNow({ collectParts: DB.collectParts || {}, collectCovers: DB.collectCovers || {} });
       }
+      // v2.13.0：正在听的这首，把最后那点秒数补上（不然每次关窗都少记一首的零头）
+      settleListen(true);
     } catch { /* 同上 */ }
   });
 
@@ -7894,6 +8373,29 @@ function bindEvents() {
      和按钮的 title 一一对应（见 syncDownloadBtn）。 */
   // v2.10.0：定位到当前这首在列表里的位置（跳回来源页面 + 滚过去 + 闪一下）
   $('btnLocate').addEventListener('click', locateCurrentTrack);
+
+  /* ---- 倍速（v2.13.0）----
+     ★ btnSpeed 的 click 要 stopPropagation：不然它一路冒泡到下面那个
+       「点别处收起」的 document 监听，刚打开就被自己关掉。
+     ★ 用 click 不用 hover：六个档位是"选一次"的操作，悬停展开反而容易扫过误选。 */
+  renderSpeedMenu();
+  $('btnSpeed').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleSpeedMenu();
+  });
+  $('speedPop').addEventListener('click', (e) => {
+    const b = e.target.closest('.speed-item');
+    if (!b) return;
+    setSpeed(Number(b.dataset.speed));
+    toggleSpeedMenu(false);
+  });
+  // 点菜单以外的任何地方 / 按 Esc 都收起 —— 菜单不该赖在屏幕上
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#speedWrap')) toggleSpeedMenu(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') toggleSpeedMenu(false);
+  });
 
   $('btnDownload').addEventListener('click', async () => {
     const t = currentBarTrack();
@@ -8057,6 +8559,21 @@ function bindEvents() {
 
   /* ---- 内容区：列表点击（事件委托，一次绑定管所有动态行） ---- */
   $('content').addEventListener('click', async (e) => {
+    // v2.13.0：统计页的两个排行。★ 必须放在最前面 —— 这两行既不是歌曲行、
+    //   也没有 id，漏到最后会掉进"点整行=播放"或者什么都不发生。
+    const statUp = e.target.closest('[data-stat-up]');
+    if (statUp) {
+      openUpPage({ mid: Number(statUp.dataset.statUp), author: statUp.dataset.upName || '' });
+      return;
+    }
+    const statTrack = e.target.closest('[data-stat-track]');
+    if (statTrack) {
+      const t = statTrackFrom(statTrack.dataset.statTrack);
+      if (t) playTracks([t], 0, '听歌统计', null);
+      else toast('这一条已经找不回来了');
+      return;
+    }
+
     // 作者名：点开这个 UP 主的主页（看他的全部视频）。
     // 必须放在"点整行=播放"前面，否则点作者名会顺手把这首也播了。
     const upLink = e.target.closest('.a-link');
@@ -8188,6 +8705,14 @@ function bindEvents() {
     if (id === 'btnPlayDiscovery') { startFromView(discoveryResults, 0); return; }
     if (id === 'btnPrevPage') { if (searchPage > 1) doSearch(searchKeyword, searchPage - 1); return; }
     if (id === 'btnNextPage') { doSearch(searchKeyword, searchPage + 1); return; }
+    // v2.13.0：重排开关。切完立刻用新顺序重搜一次（不是只把已有的反个向 ——
+    //   重排是"重新按分数排"，倒序不等于 B 站原序）。
+    if (id === 'btnRankToggle') {
+      DB.settings.searchRank = DB.settings.searchRank === false;
+      persistLater();
+      doSearch(searchKeyword, 1);
+      return;
+    }
     if (id === 'btnUpBack') { currentView = 'discovery'; renderAll(); return; }
     // v2.5.0：只播当前这一页（翻页后 upState.list 自动就是当前页）。
     // 播 800 首会把队列、随机、单曲循环全搞难用，而且每首都得先补 cid 才能播。
@@ -8412,6 +8937,9 @@ function bindEvents() {
   audio.addEventListener('waiting', () => { healOnStall(); });
 
   audio.addEventListener('timeupdate', () => {
+    // ★ v2.13.0：先记收听进度。必须排在下面"没时长就 return"之前 ——
+    //   本地歌刚加载时 duration 还是 NaN，画不了进度条，但人已经在听了。
+    tickListen();
     // 正在拖动时不要抢着刷新画面，否则进度条会被自己拖回去，疯狂抖动
     if (seeking) return;
     const d = totalDuration();
@@ -9871,6 +10399,9 @@ function makeEntryTrack() {
     cid: null,                 // ★ 关键：不带 cid 才是"入口行"
     title: info.title,         // 用视频标题（Neo 定的），合集名放在 seasonTitle 里
     author: info.owner.name,
+    // ★ v2.13.2：入口行也要带 mid —— 它会进歌单 / 收藏 / 队列，
+    //   而听歌统计要靠 mid 归到 UP 榜（以前这一行没有 mid，从歌单播合集就统计不到人）。
+    mid: (info.owner && info.owner.mid) || 0,
     cover: info.cover,
     // 时长用**整段的总和**，不是 0 —— 入口行显示 0:00 看着像坏数据。
     // （18 集 × 3 分半 ≈ 1 小时，fmtTime 会写成 1:03:00，比 0:00 有意义得多。）
