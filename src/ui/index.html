@@ -1126,6 +1126,40 @@
             左键点它 → 把窗口叫回来。
           </div>
         </div>
+
+        <!-- ========== 开机自启动（v2.14.0） ==========
+             ★ 这个勾选框的"真值"在 Windows 的启动项里，不在我们的存档里 ——
+               用户可能在「任务管理器 → 启动」里禁用了它，所以每次打开设置页都向主进程
+               重新问一次（见 app.js 的 syncAutoLaunchUI）。 -->
+        <div class="field">
+          <div class="field-label">开机自启动</div>
+
+          <label class="switch-row">
+            <span class="switch-label">开机时自动启动 Neko Music</span>
+            <input type="checkbox" id="chkAutoLaunch" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint" id="autoLaunchHint">
+            只是让它蹲在右下角托盘里待命，<b>不会自动开始放歌</b>。
+          </div>
+
+          <label class="switch-row" style="margin-top:14px">
+            <span class="switch-label">启动时只留托盘，不弹出窗口</span>
+            <input type="checkbox" id="chkStartupSilent" />
+            <span class="switch"></span>
+          </label>
+          <div class="field-hint" id="startupSilentHint">
+            勾上：开机后安静待命，想听歌点一下托盘图标。<br />
+            不勾：开机就和平时双击一样，直接把窗口摆出来。
+          </div>
+
+          <div class="field-hint" style="margin-top:12px">
+            ⓘ 这一项交给 Windows 管（写在系统的「启动项」里）。如果你在
+            <b>任务管理器 → 启动</b> 里把它禁用了，这里不会知道 —— 去那边看才是真话。
+            <br />
+            <button class="ghost-btn" id="btnOpenStartupSettings" style="margin-top:8px">打开系统的启动项设置</button>
+          </div>
+        </div>
       </div>
 
       <!-- ========== 快捷键（v2.3.0） ==========

@@ -637,6 +637,13 @@ const DEFAULT_SETTINGS = {
   // v2.3.0：自定义快捷键。★ 只存"和默认不一样的那几条"（空对象 = 全用默认），
   // 所以老存档零迁移：没有这一项就是全默认，行为和以前一模一样。
   keys: {},
+  // v2.14.0：开机自启。
+  // ★ autoLaunch 这里是"用户的意图"，**不是真值** —— 真值在 Windows 的启动项里，
+  //   每次打开设置页都由主进程回读（用户可能在任务管理器里禁用了它）。
+  // ★ silent 只存在这儿：系统里存的是注册项的 args（--silent），读回来不保险。
+  // ★ silent 默认 **false**：开机就正常弹出窗口（Neo 明确要的）。
+  //   想"安静待命"的人自己去勾「启动时只留托盘」。
+  startup: { autoLaunch: false, silent: false },
   // v2.9.0：歌曲行右侧那排小按钮（♡ / ＋ / 下载 / 详情 / 移除）什么时候出现。
   //   'hover'  = 鼠标移到这一行才显示（老行为，默认）
   //   'always' = 一直显示（但压暗到 opsOpacity，鼠标到这一行再提亮）
@@ -806,6 +813,13 @@ function migrateSettings() {
       ? Math.round(old.opsOpacity) : DEFAULT_SETTINGS.opsOpacity,
     // v2.12.0：AI 歌词。老存档没有这一项 → 全默认（关着，不花钱）。
     aiLyrics: sanitizeAiLyrics(old.aiLyrics),
+    // v2.14.0：开机自启。★ 这个函数是"白名单重建"，**新加的设置项不写在这儿就会
+    //   存得进去、读不出来**（v2.2.0 那个 bug 就是这么来的）—— 加字段时别漏了这里。
+    startup: {
+      autoLaunch: !!(old.startup && old.startup.autoLaunch),
+      // 只有明确勾了才是"只留托盘"；没这一项 / 手改成 null 一律回到默认的 false（弹窗）
+      silent: !!(old.startup && old.startup.silent),
+    },
     // v2.12.4：发现页的关键词和数量。老存档没有 → null（discoveryCfg() 会给默认值）。
     // ★ 这里只做"原样保留"，规范化（去重 / 夹范围）在 discoveryCfg() 里做 ——
     //   migrateSettings 每次启动都跑，把校验放那边等于每次启动都白做一遍。
@@ -7287,6 +7301,11 @@ function syncSettingsUI() {
   // v2.2.0：窗口页的「关闭主窗口时」三选一
   syncCloseActionUI();
 
+  // v2.14.0：窗口页的「开机自启动」。★ 异步（要问主进程要系统里的真值），不 await ——
+  //   不该因为一次 IPC 卡住整个设置面板的打开。
+  syncAutoLaunchUI();
+
+
   // v2.3.0：快捷键页的列表（每次打开面板都重画一遍，改过的键位才会在框里显示出来）
   renderKeyList();
 
@@ -7325,6 +7344,96 @@ function syncCloseActionUI() {
     const el = $(map[k]);
     if (el) el.checked = (k === v);
   });
+}
+
+/* ============================================================
+   开机自启动（v2.14.0）
+   ============================================================
+   ★ 两个"值"要分清，混淆过一次就会写出"界面上开着、开机却不起"的 bug：
+
+     · **注册状态** —— 真值在 Windows 的启动项里（HKCU\...\Run）。
+       用户可能在「任务管理器 → 启动」里禁用了它，也可能重装过系统。
+       所以每次打开设置页都 `invoke('autoLaunchGet')` 问系统一次，用**它**回填勾选框。
+
+     · **「启动时只留托盘」** —— 这是我们自己的偏好，存在存档里，写的时候会变成
+       注册项的 `--silent` 参数。系统那边读回来不可靠，所以以存档为准。
+
+   两边对不上时：**界面按系统显示**，并顺手把存档改成一致（下次切换开关时不留旧值）。
+   ============================================================ */
+
+/** 存取"开机自启"这一组设置（缺字段就补，老存档零迁移） */
+function startupSetting() {
+  if (!DB.settings.startup || typeof DB.settings.startup !== 'object') {
+    DB.settings.startup = { autoLaunch: false, silent: false };
+  }
+  return DB.settings.startup;
+}
+
+/** 打开设置页时回填：先按存档摆一次，再用系统真值覆盖 autoLaunch */
+async function syncAutoLaunchUI() {
+  const chk = $('chkAutoLaunch');
+  const chkSilent = $('chkStartupSilent');
+  const hint = $('autoLaunchHint');
+  if (!chk || !chkSilent) return;
+
+  const st = startupSetting();
+  // 先按存档摆（避免"面板打开的一瞬间勾选框是空的"，等 IPC 回来再校正）
+  chkSilent.checked = !!st.silent;
+  chkSilent.disabled = !st.autoLaunch;
+
+  let sys = null;
+  try { sys = await api('autoLaunchGet'); } catch (_) { sys = null; }
+
+  if (!sys) {
+    // 读不到系统状态：别假装成功，也别把用户的勾去掉 —— 保持存档的样子
+    if (hint) hint.innerHTML = '读不到系统的启动项状态（可能被安全软件拦了）。开关仍然可以点。';
+    return;
+  }
+
+  if (sys.error) {
+    if (hint) hint.innerHTML = '读不到系统的启动项状态：' + esc(sys.error);
+    return;
+  }
+
+  chk.checked = !!sys.openAtLogin;
+  // 存档和系统不一致 → 以系统为准，并把存档修正过来（只改内存，随下一次 persist 落盘）
+  if (st.autoLaunch !== !!sys.openAtLogin) {
+    st.autoLaunch = !!sys.openAtLogin;
+    persistLater();
+  }
+  chkSilent.disabled = !chk.checked;
+
+  if (hint) {
+    // ★ 开发期要说明白：注册表里写的是 electron.exe，不是打包后的 exe
+    hint.innerHTML = sys.packaged
+      ? '只是让它蹲在右下角托盘里待命，<b>不会自动开始放歌</b>。'
+      : '当前是<b>开发模式</b>（没打包）：注册的是 <code>electron.exe</code> + 工程目录，'
+        + '只能用来验证流程，装成安装包后才是正常的 exe 路径。';
+  }
+}
+
+/** 真的去写系统启动项，并把结果回读一遍告诉用户 */
+async function applyAutoLaunch() {
+  const st = startupSetting();
+  try {
+    const r = await api('autoLaunchSet', !!st.autoLaunch, !!st.silent);
+    const real = !!(r && r.openAtLogin);
+    const chk = $('chkAutoLaunch');
+    if (chk) chk.checked = real;
+
+    if (real !== !!st.autoLaunch) {
+      // 写失败时 setLoginItemSettings **不会抛异常**，只能靠回读发现
+      st.autoLaunch = real;
+      persistLater();
+      toast(real ? '已加入开机启动' : '没能写进系统的启动项（可能被安全软件 / 组策略拦了）');
+    } else {
+      toast(real ? '已设为开机自启（下次开机生效）' : '已取消开机自启');
+    }
+    const chkSilent = $('chkStartupSilent');
+    if (chkSilent) chkSilent.disabled = !real;
+  } catch (err) {
+    toast('设置开机自启失败：' + err.message);
+  }
 }
 
 /* ============================================================
@@ -7758,6 +7867,29 @@ function bindSettings() {
       persistLater();
       forceReportUiState();   // ★ 必须强推：见 forceReportUiState 的说明（去重会把这一次吞掉）
     });
+  });
+
+  /* ---- v2.14.0：开机自启动 ---- */
+  $('chkAutoLaunch').addEventListener('change', () => {
+    const st = startupSetting();
+    st.autoLaunch = $('chkAutoLaunch').checked;
+    persistLater();
+    // 主开关关掉时，副开关跟着置灰（值留着，下次打开还在原处）
+    $('chkStartupSilent').disabled = !st.autoLaunch;
+    applyAutoLaunch();
+  });
+
+  // 「启动时只留托盘」改的是注册项里的 --silent 参数，所以**必须重写一次注册项**，
+  // 否则下次开机还是按老参数启动。
+  $('chkStartupSilent').addEventListener('change', () => {
+    const st = startupSetting();
+    st.silent = $('chkStartupSilent').checked;
+    persistLater();
+    if (st.autoLaunch) applyAutoLaunch();
+  });
+
+  $('btnOpenStartupSettings').addEventListener('click', () => {
+    api('openStartupSettings').catch((err) => toast('打不开系统设置：' + err.message));
   });
 
   /* ---- v2.8.0：下载分页 ----

@@ -146,6 +146,15 @@ contextBridge.exposeInMainWorld('neko', {
   // 安全上只允许 http/https，主进程会再校验一次，防止被拿去打开本地文件。
   openExternal: (url) => ipcRenderer.invoke('shell:open', url),
 
+  // ---------- 开机自启（v2.14.0） ----------
+  // 读的是**系统里的真实注册状态**（用户可能在任务管理器里禁用了它），所以每次
+  // 打开设置页都要问一次系统，不能只信存档。
+  autoLaunchGet: () => ipcRenderer.invoke('app:autoLaunch:get'),
+  // 写。silent = "启动时只留托盘"，它会被写进注册项的 args（--silent）
+  autoLaunchSet: (on, silent) => ipcRenderer.invoke('app:autoLaunch:set', !!on, !!silent),
+  // 跳到 Windows「启动应用」设置页 —— 让用户自己看真话（我们判断不了"被禁用"）
+  openStartupSettings: () => ipcRenderer.invoke('app:openStartupSettings'),
+
   // ---------- 桌面歌词（独立置顶小窗） ----------
   // 打开那个浮在桌面上的歌词窗（opts 里带字号、位置、是否穿透等设置）
   lyricOpen:    (opts) => ipcRenderer.send('lyric:open', opts),

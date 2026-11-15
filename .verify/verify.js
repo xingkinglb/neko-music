@@ -5167,7 +5167,58 @@ console.log('\n[64] v2.12.0 · AI 歌词（整理字幕 / 没字幕时兜底生�
   } else ok('★ 统计页：单列铺满 + 有壁纸时深底（亮壁纸下也读得清）');
 }
 
-if (fail === 0) console.log('\n全部静态自检通过 ✅（共 68 大类检查）');
+/* ============================================================
+   第 69 类（v2.14.0）：开机自启动
+   ============================================================
+   ★ 这一块最贵的坑是"把存档当真值"：
+     `getLoginItemSettings()` 读的是**系统**里的注册状态。用户可能在任务管理器里
+     禁用了它、可能重装过、可能换了电脑（存档跟着恢复但注册表没有）。
+     界面如果只信存档，就会出现"设置里明明开着、开机却不起"——信任直接崩。
+   ★ 第二条是"静默启动变幽灵"：带了 --silent 却没托盘，进程在跑、哪儿都点不到。 */
+{
+  const autolaunch = stripLine(stripBlock(read('src/auto-launch.js')));
+  const need = [
+    // 纯函数：解析自己的 argv（能离线实测，见 test-round34 / round33 第 1 组）
+    [/function parseStartupArgv/, appmenus, 'app-menus.js 里没有 parseStartupArgv（argv 解析没法单测）'],
+    [/parseStartupArgv\(process\.argv\)/, mainCode, 'main.js 启动时没解析 --silent'],
+    // 注册逻辑抽在 auto-launch.js 里（好让实测对着真注册表跑）
+    [/createAutoLaunch\(app\)/, mainCode, 'main.js 没接上 auto-launch.js'],
+    [/setLoginItemSettings\(/, autolaunch, '没有调用 setLoginItemSettings —— 开机自启根本写不进去'],
+    [/args:\s*args\(/, autolaunch, '写启动项时没带 args（--silent 就丢了）'],
+    [/'--silent'/, autolaunch, '启动参数里没有 --silent'],
+    // 真值来自系统
+    [/getLoginItemSettings\(/, autolaunch, '没有回读 getLoginItemSettings —— 界面会只信存档'],
+    [/handle\('app:autoLaunch:get'/, mainCode, '缺 app:autoLaunch:get 这个接口'],
+    [/handle\('app:autoLaunch:set'/, mainCode, '缺 app:autoLaunch:set 这个接口'],
+    [/app:autoLaunch:get/, preload, 'preload 没暴露 autoLaunchGet'],
+    [/app:autoLaunch:set/, preload, 'preload 没暴露 autoLaunchSet'],
+    // 界面
+    [/id="chkAutoLaunch"/, html, '设置页没有「开机自启动」开关'],
+    [/id="chkStartupSilent"/, html, '设置页没有「启动时只留托盘」开关'],
+    [/id="btnOpenStartupSettings"/, html, '设置页没有「打开系统的启动项设置」入口'],
+    // 存档：默认关 + migrate 不能漏（这个函数是白名单重建，漏了就是"存得进去读不出来"）
+    [/startup:\s*\{\s*autoLaunch:\s*false,\s*silent:\s*false\s*\}/, appjs, 'DEFAULT_SETTINGS 里没有 startup 或默认值不对（应为 autoLaunch:false / silent:false —— 开机正常弹窗）'],
+    [/startup:\s*\{\s*\n\s*autoLaunch:/, appjs, '★ migrateSettings 里没有 startup —— 存档会存得进去、读不出来'],
+  ];
+  let badOne = null;
+  for (const [re, src, msg] of need) {
+    if (!re.test(src)) { badOne = msg; break; }
+  }
+  // ★★ 反向断言：读注册状态必须**两种 args 都试**。
+  //    v2.14.0 真机就栽在这儿：只查一种写法时，用户在副开关上切一下，
+  //    另一种写法查不到 → 开关弹回去、再点"没反应"（见 test-round34 第 3 组）。
+  if (!badOne && !/variants\(\)[\s\S]{0,260}?getLoginItemSettings/.test(autolaunch)) {
+    badOne = '★★ 读注册状态只试了一种 args —— 切过「只留托盘」之后开关会"点了没反应"';
+  }
+  // ★ 反向断言：托盘没建起来时必须撤销静默，改回显示窗口
+  if (!badOne && !/if \(bootSilent && !tray\)/.test(mainCode)) {
+    badOne = '★ 没有"托盘建失败 → 撤销静默并显示窗口"的兜底 —— 会变成后台幽灵进程';
+  }
+  if (badOne) err(badOne);
+  else ok('★ 开机自启：真值读系统（两种 args 都试）/ 写注册项带 --silent / 托盘失败兜底 / 默认弹窗且 migrate 不漏');
+}
+
+if (fail === 0) console.log('\n全部静态自检通过 ✅（共 69 大类检查）');
 else { console.log(`发现 ${fail} 处问题 ❌`); process.exit(1); }
 
 /* v2.12.5 Neo 抓的老 bug：定位按钮在歌单里永远失败。

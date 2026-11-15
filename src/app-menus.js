@@ -248,6 +248,29 @@ function parseSecondInstanceCmd(argv) {
   return null;
 }
 
+/* ---------- 启动参数（v2.14.0） ---------- */
+
+/**
+ * 从自己的 argv 里解析"这次是不是开机自启带上来的"。
+ *
+ * ★ 为什么单独一个函数、而不是直接 `process.argv.includes('--silent')`：
+ *   这条路径**只能靠真机开机验证**（离屏 Electron 里没法真的重启电脑），
+ *   所以至少要保证"解析"这段是纯函数 —— 能喂各种 argv 进来逐个断言。
+ *   `--silent` 由「开机自启动」注册到系统启动项里（见 main.js 的 autoLaunchArgs）。
+ *
+ * @param {string[]} argv  process.argv
+ * @returns {{silent:boolean, cmd:string|null}}  cmd 是 --cmd=xxx（同一个进程只可能有一个）
+ */
+function parseStartupArgv(argv) {
+  const list = Array.isArray(argv) ? argv : [];
+  // 用完全相等做判断，不做前缀匹配 —— 免得 `--silent-foo` 这种也把窗口藏了
+  const silent = list.some((raw) => {
+    const s = String(raw == null ? '' : raw);
+    return s === '--silent' || s === '-silent';
+  });
+  return { silent, cmd: parseSecondInstanceCmd(list) };
+}
+
 /* ---------- 把菜单模板变成"可以打印出来比对"的普通对象 ---------- */
 
 /**
@@ -285,5 +308,6 @@ module.exports = {
   buildTrayMenu,
   buildUserTasks,
   parseSecondInstanceCmd,
+  parseStartupArgv,
   describeMenu,
 };

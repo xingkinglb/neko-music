@@ -97,8 +97,21 @@ if (!vBadge) err('README 里没有版本徽章');
 else if (vBadge[1] !== pkg.version) err(`版本徽章写的是 ${vBadge[1]}，package.json 是 ${pkg.version}（两处必须一致）`);
 else ok(`版本徽章与 package.json 一致（${pkg.version}）`);
 
-const relNote = /最近更新（v([0-9]+\.[0-9]+\.[0-9]+)）/.exec(README);
-if (!relNote) err('「更新日志」里没有「最近更新（vX.Y.Z）」小节');
+/* ★ v2.14.0 修：原来这里认死一个字符串「最近更新（vX.Y.Z）」。
+   v2.13.0 整理 README 时，那一节改成了「## 更新日志 / 最近两版的变化 / ### v2.13.0 — …」，
+   于是自检从那天起**一直在报错**（被人当成"已知噪音"忽略了整整一版）。
+   现在改成：**在「更新日志」这一节内部找第一个 `### vX.Y.Z`**，跟着文档结构走，
+   以后再改导语也不会失修。 */
+const relSec = (() => {
+  const at = README.indexOf('## 更新日志');
+  if (at < 0) return '';
+  const rest = README.slice(at + '## 更新日志'.length);
+  const end = rest.search(/\n##\s/);          // 到下一个二级标题为止
+  return end < 0 ? rest : rest.slice(0, end);
+})();
+const relNote = /^###\s*v([0-9]+\.[0-9]+\.[0-9]+)/m.exec(relSec);
+if (!relSec) err('README 里找不到「## 更新日志」一节');
+else if (!relNote) err('「更新日志」里没有「### vX.Y.Z」这种版本小节');
 else if (relNote[1] !== pkg.version) err(`更新日志写的是 v${relNote[1]}，package.json 是 ${pkg.version}`);
 else ok(`更新日志的版本与 package.json 一致（v${pkg.version}）`);
 

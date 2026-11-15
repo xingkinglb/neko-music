@@ -157,8 +157,11 @@ let miniState = { on: false, expanded: false, fullBounds: null };
 //  这里只留"什么时候调它"和"真的去动系统"。
 const {
   DEFAULT_UI_STATE, normalizeUiState, normalizeCloseAction, decideCloseAction,
-  buildTrayMenu, buildUserTasks, parseSecondInstanceCmd,
+  buildTrayMenu, buildUserTasks, parseSecondInstanceCmd, parseStartupArgv,
 } = require('./app-menus');
+
+// 开机自启的读写（v2.14.0）—— 抽出单独文件，好让实测对着真注册表跑一遍
+const { createAutoLaunch } = require('./auto-launch');
 
 // 界面推过来的"现在在放什么、桌面歌词开没开、关窗想怎么关"。
 // 主进程拿它画托盘菜单和任务栏按钮 —— 界面是这些状态的唯一来源。
@@ -166,6 +169,21 @@ const {
 let uiState = Object.assign({}, DEFAULT_UI_STATE, { closeAction: readCloseActionFromStore() });
 
 let tray = null;
+
+/* ---------- 开机自启（v2.14.0） ----------
+   两件事要分清楚：
+     · **注册状态**在系统里（HKCU\...\Run），用 app.get/setLoginItemSettings 读写 —— 它是真值
+     · **"启动时只留托盘"这个偏好**在我们自己的存档里，由界面传过来（系统里存的是 args，
+       读回来不稳，不如自己记）
+   所以 set 一次要把两个都写进去：注册项里的 args 跟着 silent 变。
+
+   ★ 真正的读写逻辑在 `src/auto-launch.js`（纯函数 + 传入 app），
+     这样 .verify/test-round34.js 能对着**真注册表**跑一遍 ——
+     这块的 bug 只有真机才会暴露，不能只靠静态自检。 */
+const autoLaunch = createAutoLaunch(app);
+
+/** 这次启动带没带 --silent（决定 ready-to-show 时弹不弹窗） */
+let bootSilent = false;
 
 /* ---------- 单实例锁 ----------
    为什么必须有（两条都是真问题）：
@@ -668,6 +686,11 @@ function createWindow() {
 
   // 页面渲染完成后再亮相
   mainWindow.once('ready-to-show', () => {
+    // ★ v2.14.0：开机自启 + 勾了「启动时只留托盘」→ 这一次**不弹窗**，安静待在托盘里。
+    //   注意这里只是"不调 show()"，窗口本身已经建好了（托盘菜单、状态上报都要它活着）。
+    //   如果托盘没建成功，whenReady 那边会把 bootSilent 撤销并主动显示窗口 —— 见那里的兜底。
+    if (bootSilent) return;
+
     mainWindow.show();
     // ★ v2.4.0：mini 的置顶也要等窗口**真的显示出来之后**再升档。
     //   和下面 refreshThumbar 是同一个时机问题 —— 窗口还没显示时设了可能不算数。
@@ -680,7 +703,12 @@ function createWindow() {
   });
 
   // 从托盘 / 最小化回到前台时再补一次（Explorer 偶尔会把按钮状态弄丢）
-  mainWindow.on('show', () => refreshThumbar());
+  // ★ v2.14.0：静默启动时窗口是**后来**才第一次显示的，所以 mini 的置顶也得在这一下补上
+  //   （ready-to-show 那时我们直接 return 了，没给它升档）。
+  mainWindow.on('show', () => {
+    if (miniState.on) setMiniAlwaysOnTop(mainWindow, true);
+    refreshThumbar();
+  });
 
   // ============================================================
   //  点 ✕ 之后干什么（v2.2.0）
@@ -1124,6 +1152,36 @@ function registerHandlers() {
     }
     await shell.openExternal(u);
     return true;
+  });
+
+  // ---- 开机自启（v2.14.0）----
+  // ★ 读的是**系统里的真实状态**，不是我们的存档：用户可能在「任务管理器 → 启动」里
+  //   把它禁用了，也可能重装过。存档只记"用户的意图"，系统才是真值。
+  handle('app:autoLaunch:get', () => {
+    try {
+      return autoLaunch.read();
+    } catch (err) {
+      // 某些精简版 Windows / 被安全软件拦住时会抛 —— 让界面知道"读不到"，别假装成功
+      return { openAtLogin: false, packaged: app.isPackaged, error: err.message || String(err) };
+    }
+  });
+
+  handle('app:autoLaunch:set', (on, silent) => {
+    const st = autoLaunch.write(!!on, !!silent);
+    // 写完之后**再读一遍**回给界面：注册表写失败（权限 / 组策略）时不会抛异常，
+    // 只能靠回读发现"其实没生效"。
+    return st;
+  });
+
+  // 「打开系统的启动项设置」—— 我们没法可靠地判断"被任务管理器禁用了"（那个状态在
+  // StartupApproved 的二进制值里），所以干脆把真话交给系统自己说。
+  // ★ 写死这一个 URI，不接任意字符串，避免变成"能开任何东西"的后门。
+  handle('app:openStartupSettings', async () => {
+    if (process.platform === 'win32') {
+      await shell.openExternal('ms-settings:startupapps');
+      return true;
+    }
+    throw new Error('这个入口只在 Windows 下有效');
   });
 
   // 读取 / 保存用户填的 B 站 Cookie
@@ -1745,6 +1803,10 @@ app.whenReady().then(() => {
   // 不会突然冒出一块刺眼的白色。我们没有浅色主题，所以写死 dark 就行。
   nativeTheme.themeSource = 'dark';
 
+  // ★ v2.14.0：这次是不是"开机自启"带上来的。带了 --silent 就安静地只留托盘
+  //   （详见 createWindow 的 ready-to-show —— 那里决定弹不弹窗）。
+  bootSilent = parseStartupArgv(process.argv).silent;
+
   // 如果用户之前填过 Cookie，启动时就装上
   try {
     if (fs.existsSync(COOKIE_FILE)) {
@@ -1775,7 +1837,19 @@ app.whenReady().then(() => {
   // ---- v2.2.0：托盘 / 任务栏缩略图按钮 / 任务栏右键任务 ----
   // 都必须在窗口建好之后 —— 它们要挂在 mainWindow 上（托盘除外，但菜单里要显示歌名）
   createTray();
-  refreshThumbar();
+
+  // ★ v2.14.0：静默启动的兜底。
+  //   带了 --silent 却**没有托盘**，用户就"进程在跑、哪儿都点不到、只能开任务管理器"。
+  //   宁可弹一个窗，也不能让人找不到软件。
+  if (bootSilent && !tray) {
+    console.error('[启动] 托盘没建起来，取消静默启动，直接显示窗口');
+    bootSilent = false;
+    showMainWindow();
+  }
+
+  // 静默启动时窗口还没显示，现在设缩略图按钮必然返回 false 并刷一条红字 ——
+  // 留到真正 show 的那一刻补（见 createWindow 里的 on('show')）。
+  if (!bootSilent) refreshThumbar();
   refreshUserTasks();
 
   // Windows 上点 Dock/任务栏图标重新打开窗口

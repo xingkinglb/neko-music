@@ -31,3 +31,6 @@ cookie.txt
 backgrounds/
 .verify/tmp-*.json
 .verify/*-report.txt
+# 探针 / 实测跑出来的临时音频（脚本每次会重写，不用入库）
+.verify/probe-local.wav
+.verify/tmp-*.wav
