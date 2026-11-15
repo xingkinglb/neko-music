@@ -287,5 +287,7 @@ app.whenReady().then(async () => {
   }
 
   say('\n探针结束');
+  // 跑完把临时 wav 删掉（它是探针自己生成的，不该留在仓库里）
+  try { fs.unlinkSync(LOCAL_WAV); } catch (_) {}
   setTimeout(() => app.exit(0), 300);
 }).catch((e) => { say('FAIL ' + (e && e.stack || e)); setTimeout(() => app.exit(2), 300); });
